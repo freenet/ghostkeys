@@ -344,6 +344,35 @@ body {
     background: var(--danger-dim);
 }
 
+/* Connection badge */
+.status-badge {
+    display: inline-block;
+    font-size: 0.625rem;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.125rem 0.5rem;
+    border-radius: 999px;
+    margin-top: 0.5rem;
+}
+.status-badge.connected {
+    color: var(--accent-green);
+    background: rgba(96, 216, 160, 0.1);
+}
+.status-badge.connecting {
+    color: var(--glow);
+    background: var(--glow-dim);
+    animation: pulse-glow 1.5s ease-in-out infinite alternate;
+}
+.status-badge.disconnected {
+    color: var(--text-ghost);
+    background: rgba(60, 70, 90, 0.2);
+}
+.status-badge.error {
+    color: var(--danger);
+    background: var(--danger-dim);
+}
+
 /* Empty state */
 .empty-vault {
     text-align: center;

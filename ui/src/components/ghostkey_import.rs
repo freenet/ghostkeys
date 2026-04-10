@@ -1,11 +1,14 @@
 use dioxus::prelude::*;
-use ghostkey_common::GhostKeyInfo;
+use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
+
+use crate::api;
 
 #[component]
 pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKeyInfo>) -> Element {
     let mut cert_pem = use_signal(String::new);
     let mut sk_pem = use_signal(String::new);
     let mut error_msg = use_signal(|| None::<String>);
+    let mut importing = use_signal(|| false);
     let mut tab = use_signal(|| "paste");
 
     rsx! {
@@ -90,40 +93,47 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
                     }
                     button {
                         class: "btn-glow",
-                        disabled: cert_pem.read().is_empty() || sk_pem.read().is_empty(),
+                        disabled: cert_pem.read().is_empty() || sk_pem.read().is_empty() || *importing.read(),
                         onclick: move |_| {
                             let cert = cert_pem.read().clone();
-                            let _sk = sk_pem.read().clone();
+                            let sk = sk_pem.read().clone();
+                            importing.set(true);
+                            error_msg.set(None);
 
-                            #[cfg(any(feature = "no-sync", feature = "example-data"))]
-                            {
-                                let hash = simple_hash(cert.as_bytes());
-                                on_import.call(GhostKeyInfo {
-                                    fingerprint: hash,
-                                    label: None,
-                                    delegate_info: "imported".into(),
-                                });
-                                return;
-                            }
+                            spawn(async move {
+                                let result = api::delegate::send_request(
+                                    GhostkeyRequest::ImportGhostKey {
+                                        certificate_pem: cert,
+                                        signing_key_pem: sk,
+                                    },
+                                ).await;
 
-                            #[cfg(not(any(feature = "no-sync", feature = "example-data")))]
-                            {
-                                error_msg.set(Some("Delegate communication not yet wired".into()));
-                            }
+                                importing.set(false);
+
+                                match result {
+                                    Ok(GhostkeyResponse::ImportResult { fingerprint, delegate_info }) => {
+                                        on_import.call(GhostKeyInfo {
+                                            fingerprint,
+                                            label: None,
+                                            delegate_info,
+                                        });
+                                    }
+                                    Ok(GhostkeyResponse::Error { message }) => {
+                                        error_msg.set(Some(message));
+                                    }
+                                    Ok(other) => {
+                                        error_msg.set(Some(format!("Unexpected response: {other:?}")));
+                                    }
+                                    Err(e) => {
+                                        error_msg.set(Some(e));
+                                    }
+                                }
+                            });
                         },
-                        "Import Identity"
+                        if *importing.read() { "Importing..." } else { "Import Identity" }
                     }
                 }
             }
         }
     }
-}
-
-#[cfg(any(feature = "no-sync", feature = "example-data"))]
-fn simple_hash(data: &[u8]) -> String {
-    let mut h: u64 = 0;
-    for b in data {
-        h = h.wrapping_mul(31).wrapping_add(*b as u64);
-    }
-    format!("{:x}", h)[..8].to_string()
 }

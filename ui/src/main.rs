@@ -1,6 +1,11 @@
+mod api;
 mod components;
 
 use dioxus::prelude::*;
+
+use api::connection;
+use api::delegate;
+use api::state::ConnectionStatus;
 
 const STYLE: Asset = asset!("/assets/style.css");
 
@@ -10,6 +15,21 @@ fn main() {
 
 #[component]
 fn App() -> Element {
+    // Initialize connection on mount
+    use_effect(|| {
+        spawn(async {
+            if let Err(e) = connection::connect().await {
+                dioxus::logger::tracing::error!("Connection failed: {e}");
+                return;
+            }
+            if let Err(e) = delegate::register_delegate().await {
+                dioxus::logger::tracing::error!("Delegate registration failed: {e}");
+            }
+        });
+    });
+
+    let status = api::state::CONNECTION_STATUS.read();
+
     rsx! {
         document::Stylesheet { href: STYLE }
         div { class: "scene",
@@ -21,10 +41,25 @@ fn App() -> Element {
                     span { class: "title-key", "key" }
                 }
                 p { class: "app-subtitle", "Identity Vault" }
+                ConnectionBadge { status: *status }
             }
             main { class: "app-main",
                 components::ghostkey_list::GhostKeyList {}
             }
         }
+    }
+}
+
+#[component]
+fn ConnectionBadge(status: ConnectionStatus) -> Element {
+    let (class, label) = match status {
+        ConnectionStatus::Connected => ("status-badge connected", "Connected"),
+        ConnectionStatus::Connecting => ("status-badge connecting", "Connecting..."),
+        ConnectionStatus::Disconnected => ("status-badge disconnected", "Disconnected"),
+        ConnectionStatus::Error => ("status-badge error", "Error"),
+    };
+
+    rsx! {
+        div { class: "{class}", "{label}" }
     }
 }
