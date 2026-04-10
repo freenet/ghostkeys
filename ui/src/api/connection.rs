@@ -12,36 +12,28 @@ mod real {
     use crate::api::delegate::handle_delegate_response;
     use crate::api::state::WEB_API;
 
-    const DEFAULT_GATEWAY_URL: &str = "ws://127.0.0.1:7509";
+    /// Derive the WebSocket URL from the current page location.
+    /// The Freenet gateway serves the WebSocket at /v1/contract/command.
+    /// The shell page's postMessage bridge handles auth token injection.
+    fn get_websocket_url() -> String {
+        const FALLBACK: &str = "ws://localhost:7509/v1/contract/command?encodingProtocol=native";
 
-    fn get_gateway_url() -> String {
-        // Check URL query param: ?wsPort=7519
         if let Some(window) = web_sys::window() {
-            if let Ok(search) = window.location().search() {
-                if let Some(port_param) = search
-                    .trim_start_matches('?')
-                    .split('&')
-                    .find(|p| p.starts_with("wsPort="))
-                {
-                    if let Some(port) = port_param.strip_prefix("wsPort=") {
-                        return format!("ws://127.0.0.1:{port}");
-                    }
-                }
-            }
+            let location = window.location();
+            let protocol = location.protocol().unwrap_or_default();
+            let host = location.host().unwrap_or_default();
+
+            let ws_protocol = if protocol == "https:" { "wss:" } else { "ws:" };
+            format!("{ws_protocol}//{host}/v1/contract/command?encodingProtocol=native")
+        } else {
+            FALLBACK.to_string()
         }
-        DEFAULT_GATEWAY_URL.to_string()
     }
 
     pub async fn connect() -> Result<(), String> {
         *CONNECTION_STATUS.write() = ConnectionStatus::Connecting;
 
-        let gateway_url = get_gateway_url();
-        let auth_token = get_auth_token();
-        let url = match &auth_token {
-            Some(token) => format!("{gateway_url}?authToken={token}"),
-            None => gateway_url,
-        };
-
+        let url = get_websocket_url();
         info!("Connecting to Freenet node at {url}");
 
         let websocket = web_sys::WebSocket::new(&url).map_err(|e| {
@@ -76,16 +68,6 @@ mod real {
         *WEB_API.write() = Some(web_api);
         Ok(())
     }
-
-    fn get_auth_token() -> Option<String> {
-        let window = web_sys::window()?;
-        let token = js_sys::Reflect::get(
-            &window,
-            &wasm_bindgen::JsValue::from_str("__FREENET_AUTH_TOKEN__"),
-        )
-        .ok()?;
-        token.as_string()
-    }
 }
 
 #[cfg(all(
@@ -94,7 +76,6 @@ mod real {
 ))]
 pub use real::connect;
 
-// Stub for example-data, no-sync, or native compilation (cargo check on host)
 #[cfg(any(
     not(target_family = "wasm"),
     feature = "no-sync",
