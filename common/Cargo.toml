@@ -5,11 +5,17 @@ edition.workspace = true
 license.workspace = true
 description = "Shared types for the ghostkey delegate and UI"
 
+[features]
+default = []
+# Enable crypto operations (fingerprint computation, etc.)
+crypto = ["dep:ed25519-dalek", "dep:blake3", "dep:bs58"]
+
 [dependencies]
-ghostkey_lib = { workspace = true }
 freenet-stdlib = { workspace = true }
-ed25519-dalek = { workspace = true }
 serde = { workspace = true }
 ciborium = { workspace = true }
-blake3 = { workspace = true }
-bs58 = { workspace = true }
+
+# Optional crypto deps (needed by delegate, not by UI)
+ed25519-dalek = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
+bs58 = { workspace = true, optional = true }

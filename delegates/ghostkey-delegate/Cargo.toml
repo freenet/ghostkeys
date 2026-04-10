@@ -6,7 +6,7 @@ license.workspace = true
 description = "Freenet delegate for ghostkey storage and signing"
 
 [dependencies]
-ghostkey-common = { workspace = true }
+ghostkey-common = { workspace = true, features = ["crypto"] }
 ghostkey_lib = { workspace = true }
 freenet-stdlib = { workspace = true }
 ed25519-dalek = { workspace = true }

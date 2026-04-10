@@ -1,9 +1,12 @@
-use ed25519_dalek::VerifyingKey;
 use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "crypto")]
+use ed25519_dalek::VerifyingKey;
+
 /// Compute fingerprint for a ghostkey verifying key.
 /// First 8 bytes of BLAKE3(verifying_key_bytes), base58-encoded.
+#[cfg(feature = "crypto")]
 pub fn fingerprint(verifying_key: &VerifyingKey) -> String {
     let hash = blake3::hash(verifying_key.as_bytes());
     bs58::encode(&hash.as_bytes()[..8]).into_string()
@@ -39,7 +42,7 @@ pub struct ScopedPayload {
 }
 
 /// Summary info about a stored ghostkey.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct GhostKeyInfo {
     pub fingerprint: String,
     pub label: Option<String>,

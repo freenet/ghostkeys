@@ -2,6 +2,7 @@
 members = [
     "common",
     "delegates/ghostkey-delegate",
+    "ui",
 ]
 resolver = "2"
 
@@ -20,6 +21,10 @@ ciborium = "0.2"
 blake3 = "1"
 bs58 = "0.5"
 getrandom = { version = "0.2", features = ["custom"] }
+dioxus = { version = "=0.7.3", features = ["web"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlInputElement", "FileReader", "FileList", "File", "Blob"] }
+wasm-bindgen = "0.2"
+gloo-timers = { version = "0.3", features = ["futures"] }
 
 [profile.release]
 opt-level = "z"

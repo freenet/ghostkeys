@@ -1,0 +1,20 @@
+[package]
+name = "ghostkey-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ghostkey management UI for Freenet"
+
+[features]
+default = []
+example-data = []
+no-sync = []
+
+[dependencies]
+ghostkey-common = { workspace = true }
+dioxus = { workspace = true }
+serde = { workspace = true }
+ciborium = { workspace = true }
+web-sys = { workspace = true }
+wasm-bindgen = { workspace = true }
+gloo-timers = { workspace = true }
