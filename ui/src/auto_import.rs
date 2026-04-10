@@ -3,6 +3,7 @@ use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
 
 use crate::api;
 use crate::components::ghostkey_list::GHOSTKEYS;
+use crate::components::toast::{self, ToastKind};
 
 /// Check the URL hash fragment for an import payload and auto-import if found.
 ///
@@ -84,21 +85,27 @@ pub async fn check_and_import() {
         }) => {
             info!("Auto-imported ghostkey: {fingerprint}");
             GHOSTKEYS.write().push(GhostKeyInfo {
-                fingerprint,
+                fingerprint: fingerprint.clone(),
                 label: None,
                 delegate_info,
             });
-            // Clear the hash to prevent re-import on reload
             clear_hash();
+            toast::show(
+                format!("Ghostkey {fingerprint} imported successfully"),
+                ToastKind::Success,
+            );
         }
         Ok(GhostkeyResponse::Error { message }) => {
             error!("Auto-import failed: {message}");
+            toast::show(format!("Import failed: {message}"), ToastKind::Error);
         }
         Ok(other) => {
             error!("Auto-import: unexpected response: {other:?}");
+            toast::show("Import failed: unexpected response", ToastKind::Error);
         }
         Err(e) => {
             error!("Auto-import request failed: {e}");
+            toast::show(format!("Import failed: {e}"), ToastKind::Error);
         }
     }
 }

@@ -41,6 +41,9 @@ fn App() -> Element {
                 return;
             }
 
+            // Load existing ghostkeys from delegate storage
+            load_ghostkeys().await;
+
             // Check for auto-import via URL fragment
             auto_import::check_and_import().await;
         });
@@ -64,6 +67,32 @@ fn App() -> Element {
             main { class: "app-main",
                 components::ghostkey_list::GhostKeyList {}
             }
+            components::toast::ToastContainer {}
+        }
+    }
+}
+
+async fn load_ghostkeys() {
+    use ghostkey_common::{GhostkeyRequest, GhostkeyResponse};
+
+    match delegate::send_request(GhostkeyRequest::ListGhostKeys).await {
+        Ok(GhostkeyResponse::GhostKeyList { keys }) => {
+            if !keys.is_empty() {
+                dioxus::logger::tracing::info!("Loaded {} ghostkeys from delegate", keys.len());
+                let mut gk = components::ghostkey_list::GHOSTKEYS.write();
+                for key in keys {
+                    if !gk.iter().any(|k| k.fingerprint == key.fingerprint) {
+                        gk.push(key);
+                    }
+                }
+            }
+        }
+        Ok(GhostkeyResponse::Error { message }) => {
+            dioxus::logger::tracing::warn!("Failed to load ghostkeys: {message}");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            dioxus::logger::tracing::warn!("Failed to load ghostkeys: {e}");
         }
     }
 }

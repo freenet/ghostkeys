@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
 
+use super::toast::{self, ToastKind};
 use crate::api;
 
 #[component]
@@ -136,6 +137,7 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
 
                                 match result {
                                     Ok(GhostkeyResponse::ImportResult { fingerprint, delegate_info }) => {
+                                        toast::show(format!("Ghostkey {fingerprint} imported"), ToastKind::Success);
                                         on_import.call(GhostKeyInfo {
                                             fingerprint,
                                             label: None,

@@ -1,0 +1,94 @@
+[config]
+default_to_workspace = false
+
+[env]
+CONTRACT_TARGET = "wasm32-unknown-unknown"
+BUILD_PROFILE = "release"
+CONTRACT_ID = "DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N"
+WEB_CONTAINER_TOOL = "${HOME}/code/freenet/river/main/target/native/x86_64-unknown-linux-gnu/release/web-container-tool"
+KEY_FILE = "${HOME}/.config/ghostkeys/web-container-keys.toml"
+
+# --- Build tasks ---
+
+[tasks.build-delegate]
+description = "Build the ghostkey delegate WASM"
+command = "cargo"
+args = ["build", "--release", "--target", "${CONTRACT_TARGET}", "-p", "ghostkey-delegate"]
+
+[tasks.build-ui]
+description = "Build the Dioxus UI"
+dependencies = ["build-delegate"]
+command = "dx"
+args = ["build", "--${BUILD_PROFILE}"]
+cwd = "./ui"
+
+[tasks.compress-webapp]
+description = "Compress the UI into a tar.xz archive"
+dependencies = ["build-ui"]
+script = '''
+mkdir -p target/webapp
+cd target/dx/ghostkey-ui/${BUILD_PROFILE}/web/public && tar -cJf ../../../../../webapp/webapp.tar.xz *
+echo "Compressed webapp to target/webapp/webapp.tar.xz"
+'''
+
+[tasks.sign-webapp]
+description = "Sign the webapp archive with the web-container-tool"
+dependencies = ["compress-webapp"]
+script = '''
+VERSION=$(( $(date +%s) / 60 ))
+echo "Signing with version: $VERSION"
+${WEB_CONTAINER_TOOL} sign \
+  --input target/webapp/webapp.tar.xz \
+  --output target/webapp/webapp.metadata \
+  --parameters published-contract/webapp.parameters \
+  --version $VERSION \
+  --key-file ${KEY_FILE}
+'''
+
+[tasks.publish-ghostkeys]
+description = "Publish the ghostkey UI to the Freenet network"
+dependencies = ["sign-webapp"]
+script = '''
+fdev network publish \
+  --code published-contract/web_container_contract.wasm \
+  --parameters published-contract/webapp.parameters \
+  contract \
+  --webapp-archive target/webapp/webapp.tar.xz \
+  --webapp-metadata target/webapp/webapp.metadata
+echo ""
+echo "Published to: http://127.0.0.1:7509/v1/contract/web/${CONTRACT_ID}/"
+'''
+
+# --- Development tasks ---
+
+[tasks.dev]
+description = "Run UI in development mode with example data"
+dependencies = ["build-delegate"]
+command = "dx"
+args = ["serve", "--features", "example-data"]
+cwd = "./ui"
+
+[tasks.dev-no-sync]
+description = "Run UI without Freenet connection"
+command = "dx"
+args = ["serve", "--features", "example-data,no-sync"]
+cwd = "./ui"
+
+# --- Testing ---
+
+[tasks.test]
+description = "Run all tests"
+command = "cargo"
+args = ["test", "--workspace"]
+
+[tasks.clippy]
+description = "Run clippy on all targets"
+command = "cargo"
+args = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+
+# --- Utility ---
+
+[tasks.generate-import-url]
+description = "Generate an import URL from PEM files. Usage: cargo make generate-import-url cert.pem sk.pem [master_vk.pem]"
+command = "bash"
+args = ["scripts/generate-import-url.sh", "${@}"]
