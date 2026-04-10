@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "common",
+    "delegates/ghostkey-delegate",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+ghostkey-common = { path = "common" }
+ghostkey_lib = "0.1.4"
+freenet-stdlib = "0.4"
+ed25519-dalek = { version = "2.1", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+ciborium = "0.2"
+blake3 = "1"
+bs58 = "0.5"
+getrandom = { version = "0.2", features = ["custom"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

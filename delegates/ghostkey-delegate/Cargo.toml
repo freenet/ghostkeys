@@ -1,0 +1,20 @@
+[package]
+name = "ghostkey-delegate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Freenet delegate for ghostkey storage and signing"
+
+[dependencies]
+ghostkey-common = { workspace = true }
+ghostkey_lib = { workspace = true }
+freenet-stdlib = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+ciborium = { workspace = true }
+blake3 = { workspace = true }
+bs58 = { workspace = true }
+getrandom = { workspace = true }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
