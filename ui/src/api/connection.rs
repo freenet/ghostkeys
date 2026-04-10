@@ -12,15 +12,34 @@ mod real {
     use crate::api::delegate::handle_delegate_response;
     use crate::api::state::WEB_API;
 
-    const GATEWAY_URL: &str = "ws://127.0.0.1:7509";
+    const DEFAULT_GATEWAY_URL: &str = "ws://127.0.0.1:7509";
+
+    fn get_gateway_url() -> String {
+        // Check URL query param: ?wsPort=7519
+        if let Some(window) = web_sys::window() {
+            if let Ok(search) = window.location().search() {
+                if let Some(port_param) = search
+                    .trim_start_matches('?')
+                    .split('&')
+                    .find(|p| p.starts_with("wsPort="))
+                {
+                    if let Some(port) = port_param.strip_prefix("wsPort=") {
+                        return format!("ws://127.0.0.1:{port}");
+                    }
+                }
+            }
+        }
+        DEFAULT_GATEWAY_URL.to_string()
+    }
 
     pub async fn connect() -> Result<(), String> {
         *CONNECTION_STATUS.write() = ConnectionStatus::Connecting;
 
+        let gateway_url = get_gateway_url();
         let auth_token = get_auth_token();
         let url = match &auth_token {
-            Some(token) => format!("{GATEWAY_URL}?authToken={token}"),
-            None => GATEWAY_URL.to_string(),
+            Some(token) => format!("{gateway_url}?authToken={token}"),
+            None => gateway_url,
         };
 
         info!("Connecting to Freenet node at {url}");

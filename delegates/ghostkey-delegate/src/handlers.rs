@@ -53,7 +53,14 @@ pub fn handle(
         GhostkeyRequest::ImportGhostKey {
             certificate_pem,
             signing_key_pem,
-        } => handle_import(ctx, &certificate_pem, &signing_key_pem, requestor),
+            master_verifying_key_pem,
+        } => handle_import(
+            ctx,
+            &certificate_pem,
+            &signing_key_pem,
+            master_verifying_key_pem.as_deref(),
+            requestor,
+        ),
 
         GhostkeyRequest::ListGhostKeys => handle_list(ctx, requestor),
 
@@ -100,6 +107,7 @@ fn handle_import(
     ctx: &mut DelegateCtx,
     certificate_pem: &str,
     signing_key_pem: &str,
+    master_verifying_key_pem: Option<&str>,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
     // Deserialize certificate
@@ -112,8 +120,21 @@ fn handle_import(
         }
     };
 
-    // Verify certificate chain (back to master key)
-    let info = match cert.verify(&None) {
+    // Parse optional master verifying key override (for testing)
+    let master_vk: Option<VerifyingKey> = match master_verifying_key_pem {
+        Some(pem) => match Armorable::from_armored_string(pem) {
+            Ok(vk) => Some(vk),
+            Err(e) => {
+                return GhostkeyResponse::Error {
+                    message: format!("invalid master verifying key PEM: {e}"),
+                }
+            }
+        },
+        None => None,
+    };
+
+    // Verify certificate chain (back to master key, or provided key)
+    let info = match cert.verify(&master_vk) {
         Ok(info) => info,
         Err(e) => {
             return GhostkeyResponse::Error {

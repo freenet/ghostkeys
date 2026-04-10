@@ -105,6 +105,7 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
                                     GhostkeyRequest::ImportGhostKey {
                                         certificate_pem: cert,
                                         signing_key_pem: sk,
+                                        master_verifying_key_pem: None,
                                     },
                                 ).await;
 

@@ -20,5 +20,8 @@ blake3 = { workspace = true }
 bs58 = { workspace = true }
 getrandom = { workspace = true }
 
+[dev-dependencies]
+rand_core = "0.6"
+
 [lib]
 crate-type = ["cdylib", "rlib"]

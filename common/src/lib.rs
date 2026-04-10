@@ -54,9 +54,12 @@ pub struct GhostKeyInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GhostkeyRequest {
     /// Import a ghostkey from PEM-armored certificate and signing key.
+    /// If master_verifying_key_pem is None, uses the hardcoded Freenet master key.
     ImportGhostKey {
         certificate_pem: String,
         signing_key_pem: String,
+        #[serde(default)]
+        master_verifying_key_pem: Option<String>,
     },
     /// List all stored ghostkeys.
     ListGhostKeys,
