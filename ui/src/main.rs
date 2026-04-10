@@ -22,6 +22,20 @@ fn App() -> Element {
                 dioxus::logger::tracing::error!("Connection failed: {e}");
                 return;
             }
+
+            // Wait for WebSocket handshake to complete
+            for _ in 0..50 {
+                if *api::state::CONNECTION_STATUS.read() == ConnectionStatus::Connected {
+                    break;
+                }
+                gloo_timers::future::sleep(std::time::Duration::from_millis(100)).await;
+            }
+
+            if *api::state::CONNECTION_STATUS.read() != ConnectionStatus::Connected {
+                dioxus::logger::tracing::error!("Timed out waiting for connection");
+                return;
+            }
+
             if let Err(e) = delegate::register_delegate().await {
                 dioxus::logger::tracing::error!("Delegate registration failed: {e}");
             }

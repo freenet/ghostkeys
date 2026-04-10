@@ -6,6 +6,7 @@ asset_dir = "assets"
 
 [web.app]
 title = "Ghostkey Manager"
+base_path = "v1/contract/web/DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N"
 
 [web.watcher]
 reload_html = true

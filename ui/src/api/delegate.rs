@@ -25,7 +25,7 @@ mod real {
     use crate::api::state::WEB_API;
 
     const DELEGATE_WASM: &[u8] =
-        include_bytes!("../../../../target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm");
+        include_bytes!("../../../target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm");
 
     static PENDING: LazyLock<Mutex<VecDeque<oneshot::Sender<GhostkeyResponse>>>> =
         LazyLock::new(|| Mutex::new(VecDeque::new()));
