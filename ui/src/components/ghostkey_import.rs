@@ -10,6 +10,8 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
     let mut error_msg = use_signal(|| None::<String>);
     let mut importing = use_signal(|| false);
     let mut tab = use_signal(|| "paste");
+    let mut show_advanced = use_signal(|| false);
+    let mut master_vk_pem = use_signal(String::new);
 
     rsx! {
         div { class: "overlay",
@@ -80,6 +82,25 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
                         }
                     }
 
+                    button {
+                        class: "tab-btn",
+                        onclick: move |_| show_advanced.set(!show_advanced()),
+                        if *show_advanced.read() { "Hide Advanced" } else { "Advanced..." }
+                    }
+
+                    if *show_advanced.read() {
+                        div { class: "field",
+                            label { class: "field-label", "Master Verifying Key (optional, for testing)" }
+                            textarea {
+                                class: "pem-field",
+                                placeholder: "-----BEGIN VERIFYING_KEY_V1-----\nLeave empty for production Freenet master key",
+                                rows: 3,
+                                value: "{master_vk_pem}",
+                                oninput: move |e| master_vk_pem.set(e.value()),
+                            }
+                        }
+                    }
+
                     if let Some(err) = error_msg.read().as_ref() {
                         div { class: "error-banner", "{err}" }
                     }
@@ -97,6 +118,8 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
                         onclick: move |_| {
                             let cert = cert_pem.read().clone();
                             let sk = sk_pem.read().clone();
+                            let mvk = master_vk_pem.read().clone();
+                            let mvk_opt = if mvk.trim().is_empty() { None } else { Some(mvk) };
                             importing.set(true);
                             error_msg.set(None);
 
@@ -105,7 +128,7 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
                                     GhostkeyRequest::ImportGhostKey {
                                         certificate_pem: cert,
                                         signing_key_pem: sk,
-                                        master_verifying_key_pem: None,
+                                        master_verifying_key_pem: mvk_opt,
                                     },
                                 ).await;
 
