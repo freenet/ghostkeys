@@ -4,7 +4,7 @@ use ghostkey_common::GhostKeyInfo;
 use super::ghostkey_import::ImportDialog;
 use super::ghostkey_sign::SignDialog;
 
-static GHOSTKEYS: GlobalSignal<Vec<GhostKeyInfo>> = GlobalSignal::new(|| {
+pub static GHOSTKEYS: GlobalSignal<Vec<GhostKeyInfo>> = GlobalSignal::new(|| {
     #[cfg(feature = "example-data")]
     {
         vec![

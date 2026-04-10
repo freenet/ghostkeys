@@ -1,4 +1,5 @@
 mod api;
+mod auto_import;
 mod components;
 
 use dioxus::prelude::*;
@@ -15,7 +16,6 @@ fn main() {
 
 #[component]
 fn App() -> Element {
-    // Initialize connection on mount
     use_effect(|| {
         spawn(async {
             if let Err(e) = connection::connect().await {
@@ -38,7 +38,11 @@ fn App() -> Element {
 
             if let Err(e) = delegate::register_delegate().await {
                 dioxus::logger::tracing::error!("Delegate registration failed: {e}");
+                return;
             }
+
+            // Check for auto-import via URL fragment
+            auto_import::check_and_import().await;
         });
     });
 
