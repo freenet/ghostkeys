@@ -6,53 +6,63 @@ pub fn SignDialog(fingerprint: String, on_close: EventHandler<()>) -> Element {
     let mut result = use_signal(|| None::<String>);
 
     rsx! {
-        div { class: "modal-overlay",
+        div { class: "overlay",
             onclick: move |_| on_close.call(()),
 
             div {
-                class: "modal",
+                class: "dialog",
                 onclick: move |e| e.stop_propagation(),
 
-                h3 { "Sign Message" }
-                p { class: "hint",
-                    "Signing with ghostkey {fingerprint}"
-                }
-
-                div { class: "form-group",
-                    label { "Message" }
-                    textarea {
-                        class: "message-input",
-                        placeholder: "Enter message to sign...",
-                        rows: 4,
-                        value: "{message}",
-                        oninput: move |e| message.set(e.value()),
+                div { class: "dialog-header",
+                    h3 { class: "dialog-title", "Sign Message" }
+                    button {
+                        class: "close-btn",
+                        onclick: move |_| on_close.call(()),
+                        "\u{00d7}"
                     }
                 }
 
-                if let Some(res) = result.read().as_ref() {
-                    div { class: "form-group",
-                        label { "Signed Result" }
+                div { class: "dialog-body",
+                    div { class: "sign-identity-badge",
+                        span { class: "fp-label", "Signing as" }
+                        code { class: "fp-value", "{fingerprint}" }
+                    }
+
+                    div { class: "field",
+                        label { class: "field-label", "Message" }
                         textarea {
-                            class: "pem-input",
-                            rows: 8,
-                            readonly: true,
-                            value: "{res}",
+                            class: "message-field",
+                            placeholder: "Enter message to sign...",
+                            rows: 4,
+                            value: "{message}",
+                            oninput: move |e| message.set(e.value()),
+                        }
+                    }
+
+                    if let Some(res) = result.read().as_ref() {
+                        div { class: "field",
+                            label { class: "field-label", "Signature" }
+                            textarea {
+                                class: "pem-field result-field",
+                                rows: 6,
+                                readonly: true,
+                                value: "{res}",
+                            }
                         }
                     }
                 }
 
-                div { class: "modal-actions",
+                div { class: "dialog-footer",
                     button {
-                        class: "btn",
+                        class: "action-btn",
                         onclick: move |_| on_close.call(()),
                         "Close"
                     }
                     button {
-                        class: "btn btn-primary",
+                        class: "btn-glow",
                         disabled: message.read().is_empty(),
                         onclick: move |_| {
-                            // Placeholder -- will send SignMessage to delegate
-                            result.set(Some("[Signature will appear here when delegate is connected]".into()));
+                            result.set(Some("[Signature output pending delegate connection]".into()));
                         },
                         "Sign"
                     }

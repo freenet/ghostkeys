@@ -6,93 +6,97 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
     let mut cert_pem = use_signal(String::new);
     let mut sk_pem = use_signal(String::new);
     let mut error_msg = use_signal(|| None::<String>);
-    let mut tab = use_signal(|| "paste"); // "paste" or "file"
+    let mut tab = use_signal(|| "paste");
 
     rsx! {
-        div { class: "modal-overlay",
+        div { class: "overlay",
             onclick: move |_| on_close.call(()),
 
             div {
-                class: "modal",
+                class: "dialog",
                 onclick: move |e| e.stop_propagation(),
 
-                h3 { "Import Ghostkey" }
-
-                div { class: "tab-bar",
+                div { class: "dialog-header",
+                    h3 { class: "dialog-title", "Import Identity" }
                     button {
-                        class: if *tab.read() == "paste" { "tab active" } else { "tab" },
+                        class: "close-btn",
+                        onclick: move |_| on_close.call(()),
+                        "\u{00d7}"
+                    }
+                }
+
+                div { class: "tab-strip",
+                    button {
+                        class: if *tab.read() == "paste" { "tab-btn active" } else { "tab-btn" },
                         onclick: move |_| tab.set("paste"),
                         "Paste PEM"
                     }
                     button {
-                        class: if *tab.read() == "file" { "tab active" } else { "tab" },
+                        class: if *tab.read() == "file" { "tab-btn active" } else { "tab-btn" },
                         onclick: move |_| tab.set("file"),
-                        "Upload Files"
+                        "Upload"
                     }
                 }
 
-                if *tab.read() == "paste" {
-                    div { class: "form-group",
-                        label { "Certificate PEM" }
-                        textarea {
-                            class: "pem-input",
-                            placeholder: "-----BEGIN GHOSTKEY_CERTIFICATE_V1-----\n...\n-----END GHOSTKEY_CERTIFICATE_V1-----",
-                            rows: 6,
-                            value: "{cert_pem}",
-                            oninput: move |e| cert_pem.set(e.value()),
+                div { class: "dialog-body",
+                    if *tab.read() == "paste" {
+                        div { class: "field",
+                            label { class: "field-label", "Certificate" }
+                            textarea {
+                                class: "pem-field",
+                                placeholder: "-----BEGIN GHOSTKEY_CERTIFICATE_V1-----",
+                                rows: 5,
+                                value: "{cert_pem}",
+                                oninput: move |e| cert_pem.set(e.value()),
+                            }
+                        }
+                        div { class: "field",
+                            label { class: "field-label", "Signing Key" }
+                            textarea {
+                                class: "pem-field",
+                                placeholder: "-----BEGIN ED25519_SIGNING_KEY-----",
+                                rows: 5,
+                                value: "{sk_pem}",
+                                oninput: move |e| sk_pem.set(e.value()),
+                            }
+                        }
+                    } else {
+                        div { class: "field",
+                            label { class: "field-label", "Certificate File" }
+                            div { class: "file-drop",
+                                input { r#type: "file", accept: ".pem" }
+                                p { "Drop .pem file or click to browse" }
+                            }
+                        }
+                        div { class: "field",
+                            label { class: "field-label", "Signing Key File" }
+                            div { class: "file-drop",
+                                input { r#type: "file", accept: ".pem" }
+                                p { "Drop .pem file or click to browse" }
+                            }
                         }
                     }
 
-                    div { class: "form-group",
-                        label { "Signing Key PEM" }
-                        textarea {
-                            class: "pem-input",
-                            placeholder: "-----BEGIN ED25519_SIGNING_KEY-----\n...\n-----END ED25519_SIGNING_KEY-----",
-                            rows: 6,
-                            value: "{sk_pem}",
-                            oninput: move |e| sk_pem.set(e.value()),
-                        }
+                    if let Some(err) = error_msg.read().as_ref() {
+                        div { class: "error-banner", "{err}" }
                     }
-                } else {
-                    div { class: "form-group",
-                        label { "Certificate File" }
-                        input {
-                            r#type: "file",
-                            accept: ".pem",
-                            // File reading would need JS interop -- placeholder for now
-                        }
-                    }
-                    div { class: "form-group",
-                        label { "Signing Key File" }
-                        input {
-                            r#type: "file",
-                            accept: ".pem",
-                        }
-                    }
-                    p { class: "hint", "File upload will be connected in a future update." }
                 }
 
-                if let Some(err) = error_msg.read().as_ref() {
-                    div { class: "error-msg", "{err}" }
-                }
-
-                div { class: "modal-actions",
+                div { class: "dialog-footer",
                     button {
-                        class: "btn",
+                        class: "action-btn",
                         onclick: move |_| on_close.call(()),
                         "Cancel"
                     }
                     button {
-                        class: "btn btn-primary",
+                        class: "btn-glow",
                         disabled: cert_pem.read().is_empty() || sk_pem.read().is_empty(),
                         onclick: move |_| {
                             let cert = cert_pem.read().clone();
                             let _sk = sk_pem.read().clone();
 
-                            // In no-sync / example-data mode, fake the import
                             #[cfg(any(feature = "no-sync", feature = "example-data"))]
                             {
-                                // Generate a fake fingerprint from the cert content
                                 let hash = simple_hash(cert.as_bytes());
                                 on_import.call(GhostKeyInfo {
                                     fingerprint: hash,
@@ -102,13 +106,12 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
                                 return;
                             }
 
-                            // Real mode: send to delegate via Freenet API
                             #[cfg(not(any(feature = "no-sync", feature = "example-data")))]
                             {
-                                error_msg.set(Some("Delegate communication not yet implemented".into()));
+                                error_msg.set(Some("Delegate communication not yet wired".into()));
                             }
                         },
-                        "Import"
+                        "Import Identity"
                     }
                 }
             }
@@ -118,7 +121,6 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
 
 #[cfg(any(feature = "no-sync", feature = "example-data"))]
 fn simple_hash(data: &[u8]) -> String {
-    // Very simple hash for example mode -- not cryptographic
     let mut h: u64 = 0;
     for b in data {
         h = h.wrapping_mul(31).wrapping_add(*b as u64);

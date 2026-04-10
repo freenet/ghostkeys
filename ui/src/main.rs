@@ -12,9 +12,19 @@ fn main() {
 fn App() -> Element {
     rsx! {
         document::Stylesheet { href: STYLE }
-        div { class: "app-container",
-            h1 { "Ghostkey Manager" }
-            components::ghostkey_list::GhostKeyList {}
+        div { class: "scene",
+            div { class: "scene-grain" }
+            header { class: "app-header",
+                div { class: "logo-mark" }
+                h1 { class: "app-title",
+                    span { class: "title-ghost", "Ghost" }
+                    span { class: "title-key", "key" }
+                }
+                p { class: "app-subtitle", "Identity Vault" }
+            }
+            main { class: "app-main",
+                components::ghostkey_list::GhostKeyList {}
+            }
         }
     }
 }

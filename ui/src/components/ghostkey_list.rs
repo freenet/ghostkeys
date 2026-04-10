@@ -4,7 +4,6 @@ use ghostkey_common::GhostKeyInfo;
 use super::ghostkey_import::ImportDialog;
 use super::ghostkey_sign::SignDialog;
 
-/// Global state: list of ghostkeys known to the UI.
 static GHOSTKEYS: GlobalSignal<Vec<GhostKeyInfo>> = GlobalSignal::new(|| {
     #[cfg(feature = "example-data")]
     {
@@ -42,13 +41,17 @@ pub fn GhostKeyList() -> Element {
     let sign_fp = SIGN_FINGERPRINT.read();
 
     rsx! {
-        div { class: "ghostkey-panel",
-            div { class: "panel-header",
-                h2 { "Your Ghostkeys" }
+        section { class: "vault-section",
+            div { class: "section-header",
+                div { class: "section-title-group",
+                    h2 { class: "section-title", "Identities" }
+                    span { class: "key-count", "{keys.len()}" }
+                }
                 button {
-                    class: "btn btn-primary",
+                    class: "btn-glow",
                     onclick: move |_| *SHOW_IMPORT.write() = true,
-                    "Import Ghostkey"
+                    span { class: "btn-icon", "+" }
+                    span { "Import" }
                 }
             }
 
@@ -70,16 +73,19 @@ pub fn GhostKeyList() -> Element {
             }
 
             if keys.is_empty() {
-                div { class: "empty-state",
-                    p { "No ghostkeys imported yet." }
-                    p { class: "hint",
-                        "Purchase a ghostkey at freenet.org, then import it here."
+                div { class: "empty-vault",
+                    div { class: "empty-icon" }
+                    p { class: "empty-title", "No identities yet" }
+                    p { class: "empty-hint",
+                        "Purchase a ghostkey at "
+                        span { class: "link-text", "freenet.org" }
+                        ", then import it here."
                     }
                 }
             } else {
-                div { class: "ghostkey-grid",
-                    for gk in keys.iter() {
-                        GhostKeyCard { info: gk.clone() }
+                div { class: "identity-stack",
+                    for (i, gk) in keys.iter().enumerate() {
+                        GhostKeyCard { info: gk.clone(), index: i }
                     }
                 }
             }
@@ -95,38 +101,64 @@ fn parse_tier(info: &str) -> String {
     }
 }
 
+fn tier_level(info: &str) -> &'static str {
+    match info
+        .strip_prefix("donation_amount:")
+        .and_then(|a| a.parse::<u32>().ok())
+    {
+        Some(100..) => "tier-high",
+        Some(20..=99) => "tier-mid",
+        Some(1..=19) => "tier-low",
+        _ => "tier-unknown",
+    }
+}
+
 #[component]
-fn GhostKeyCard(info: GhostKeyInfo) -> Element {
+fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
     let fp_for_sign = info.fingerprint.clone();
     let fp_for_delete = info.fingerprint.clone();
+    let tier_class = tier_level(&info.delegate_info);
+    let delay = format!("{}ms", index * 80);
 
     rsx! {
-        div { class: "ghostkey-card",
-            div { class: "card-header",
-                span { class: "fingerprint", "{info.fingerprint}" }
-                span { class: "tier-badge", "{parse_tier(&info.delegate_info)}" }
-            }
+        div {
+            class: "identity-card {tier_class}",
+            style: "animation-delay: {delay}",
 
-            div { class: "card-body",
-                if let Some(label) = &info.label {
-                    p { class: "label", "{label}" }
-                } else {
-                    p { class: "label muted", "No label" }
-                }
-            }
+            div { class: "card-glow" }
 
-            div { class: "card-actions",
-                button {
-                    class: "btn btn-sm",
-                    onclick: move |_| *SIGN_FINGERPRINT.write() = Some(fp_for_sign.clone()),
-                    "Sign"
+            div { class: "card-inner",
+                div { class: "card-top-row",
+                    div { class: "fingerprint-group",
+                        span { class: "fp-label", "ID" }
+                        code { class: "fp-value", "{info.fingerprint}" }
+                    }
+                    div { class: "tier-pill",
+                        "{parse_tier(&info.delegate_info)}"
+                    }
                 }
-                button {
-                    class: "btn btn-sm btn-danger",
-                    onclick: move |_| {
-                        GHOSTKEYS.write().retain(|k| k.fingerprint != fp_for_delete);
-                    },
-                    "Delete"
+
+                div { class: "card-identity",
+                    if let Some(label) = &info.label {
+                        span { class: "identity-name", "{label}" }
+                    } else {
+                        span { class: "identity-name unnamed", "Unnamed identity" }
+                    }
+                }
+
+                div { class: "card-actions-row",
+                    button {
+                        class: "action-btn action-sign",
+                        onclick: move |_| *SIGN_FINGERPRINT.write() = Some(fp_for_sign.clone()),
+                        "Sign"
+                    }
+                    button {
+                        class: "action-btn action-delete",
+                        onclick: move |_| {
+                            GHOSTKEYS.write().retain(|k| k.fingerprint != fp_for_delete);
+                        },
+                        "Remove"
+                    }
                 }
             }
         }
