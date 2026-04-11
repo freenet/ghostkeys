@@ -93,19 +93,33 @@ pub fn GhostKeyList() -> Element {
     }
 }
 
+fn extract_amount(info: &str) -> Option<u32> {
+    // Try JSON format: {"amount":1,...}
+    if info.starts_with('{') {
+        // Simple JSON extraction without a JSON parser dependency
+        if let Some(pos) = info.find("\"amount\":") {
+            let after = &info[pos + 9..];
+            let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = num_str.parse() {
+                return Some(n);
+            }
+        }
+        return None;
+    }
+    // Try simple format: donation_amount:100
+    info.strip_prefix("donation_amount:")
+        .and_then(|a| a.parse().ok())
+}
+
 fn parse_tier(info: &str) -> String {
-    if let Some(amount) = info.strip_prefix("donation_amount:") {
-        format!("${amount}")
-    } else {
-        info.to_string()
+    match extract_amount(info) {
+        Some(amount) => format!("${amount}"),
+        None => "donated".to_string(),
     }
 }
 
 fn tier_level(info: &str) -> &'static str {
-    match info
-        .strip_prefix("donation_amount:")
-        .and_then(|a| a.parse::<u32>().ok())
-    {
+    match extract_amount(info) {
         Some(100..) => "tier-high",
         Some(20..=99) => "tier-mid",
         Some(1..=19) => "tier-low",
