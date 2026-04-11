@@ -127,16 +127,31 @@ fn get_hash() -> Option<String> {
     }
 }
 
+/// Clear the URL hash by asking the shell page to replace the URL.
+/// Uses the __freenet_shell__ postMessage bridge.
 fn clear_hash() {
     #[cfg(target_arch = "wasm32")]
     {
         if let Some(window) = web_sys::window() {
-            if let Some(history) = window.history().ok() {
-                let _ = history.replace_state_with_url(
-                    &wasm_bindgen::JsValue::NULL,
-                    "",
-                    Some(&window.location().pathname().unwrap_or_default()),
+            // Send to shell page via postMessage to clear the hash from the outer URL
+            if let Some(parent) = window.parent().ok().flatten() {
+                let msg = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(
+                    &msg,
+                    &wasm_bindgen::JsValue::from_str("__freenet_shell__"),
+                    &wasm_bindgen::JsValue::TRUE,
                 );
+                let _ = js_sys::Reflect::set(
+                    &msg,
+                    &wasm_bindgen::JsValue::from_str("type"),
+                    &wasm_bindgen::JsValue::from_str("hash"),
+                );
+                let _ = js_sys::Reflect::set(
+                    &msg,
+                    &wasm_bindgen::JsValue::from_str("hash"),
+                    &wasm_bindgen::JsValue::from_str("#"),
+                );
+                let _ = parent.post_message(&msg, "*");
             }
         }
     }
@@ -191,7 +206,6 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
         }
         let val = TABLE[b as usize];
         if val == 255 {
-            // Skip whitespace
             if b == b'\n' || b == b'\r' || b == b' ' {
                 continue;
             }

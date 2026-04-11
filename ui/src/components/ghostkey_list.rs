@@ -236,13 +236,8 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                         span { class: "fp-label", "ID" }
                         code { class: "fp-value", "{info.fingerprint}" }
                     }
-                    div { class: "card-meta",
-                        if let Some(date) = extract_date(&info.delegate_info) {
-                            span { class: "meta-date", "{date}" }
-                        }
-                        div { class: "tier-pill",
-                            "{parse_tier(&info.delegate_info)}"
-                        }
+                    div { class: "tier-pill",
+                        "{parse_tier(&info.delegate_info)}"
                     }
                 }
 
