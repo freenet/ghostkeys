@@ -187,13 +187,49 @@ fn extract_amount(info: &str) -> Option<u32> {
 
 fn extract_date(info: &str) -> Option<String> {
     if info.starts_with('{') {
-        extract_json_field(info, "delegate-key-created").map(|s| {
-            // Just show the date part, not the time
-            s.split(' ').next().unwrap_or(s).to_string()
+        extract_json_field(info, "delegate-key-created").and_then(|s| {
+            let date_part = s.split(' ').next().unwrap_or(s);
+            format_date(date_part)
         })
     } else {
         None
     }
+}
+
+/// Format "2024-08-13" as "13th August, 2024"
+fn format_date(ymd: &str) -> Option<String> {
+    let parts: Vec<&str> = ymd.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let year = parts[0];
+    let month: u32 = parts[1].parse().ok()?;
+    let day: u32 = parts[2].parse().ok()?;
+
+    let month_name = match month {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => return None,
+    };
+
+    let suffix = match day {
+        1 | 21 | 31 => "st",
+        2 | 22 => "nd",
+        3 | 23 => "rd",
+        _ => "th",
+    };
+
+    Some(format!("{day}{suffix} {month_name}, {year}"))
 }
 
 fn parse_tier(info: &str) -> String {
@@ -236,8 +272,13 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                         span { class: "fp-label", "ID" }
                         code { class: "fp-value", "{info.fingerprint}" }
                     }
-                    div { class: "tier-pill",
-                        "{parse_tier(&info.delegate_info)}"
+                    div { class: "card-meta",
+                        if let Some(date) = extract_date(&info.delegate_info) {
+                            span { class: "meta-date", "tier est. {date}" }
+                        }
+                        div { class: "tier-pill",
+                            "{parse_tier(&info.delegate_info)}"
+                        }
                     }
                 }
 
