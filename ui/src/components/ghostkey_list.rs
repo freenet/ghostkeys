@@ -1,5 +1,7 @@
 use dioxus::prelude::*;
 use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 
 use super::ghostkey_import::ImportDialog;
 use super::ghostkey_sign::SignDialog;
@@ -167,10 +169,18 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                         placeholder: "Name this identity...",
                         value: "{label_input}",
                         oninput: move |e| label_input.set(e.value()),
-                        onkeypress: {
+                        onkeydown: {
                             let fp = fp_for_label.clone();
                             move |e: KeyboardEvent| {
                                 if e.key() == Key::Enter {
+                                    e.prevent_default();
+                                    // Blur the input to visually deselect
+                                    #[cfg(target_arch = "wasm32")]
+                                    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                                        if let Some(el) = doc.active_element() {
+                                            let _ = el.dyn_into::<web_sys::HtmlElement>().map(|el| el.blur());
+                                        }
+                                    }
                                     let fp = fp.clone();
                                     let new_label = label_input.read().clone();
                                     spawn(async move {
