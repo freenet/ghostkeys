@@ -140,7 +140,6 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
     let fp_for_label = info.fingerprint.clone();
     let tier_class = tier_level(&info.delegate_info);
     let delay = format!("{}ms", index * 80);
-    let mut editing_label = use_signal(|| false);
     let mut label_input = use_signal(|| info.label.clone().unwrap_or_default());
 
     rsx! {
@@ -162,43 +161,18 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                 }
 
                 div { class: "card-identity",
-                    if *editing_label.read() {
-                        input {
-                            class: "label-input",
-                            r#type: "text",
-                            placeholder: "Name this identity...",
-                            value: "{label_input}",
-                            autofocus: true,
-                            oninput: move |e| label_input.set(e.value()),
-                            onkeypress: {
-                                let fp = fp_for_label.clone();
-                                move |e: KeyboardEvent| {
-                                    if e.key() == Key::Enter {
-                                        let fp = fp.clone();
-                                        let new_label = label_input.read().clone();
-                                        editing_label.set(false);
-                                        spawn(async move {
-                                            let _ = crate::api::delegate::send_request(
-                                                GhostkeyRequest::SetLabel {
-                                                    fingerprint: fp.clone(),
-                                                    label: new_label.clone(),
-                                                },
-                                            ).await;
-                                            // Update local state
-                                            let mut keys = GHOSTKEYS.write();
-                                            if let Some(k) = keys.iter_mut().find(|k| k.fingerprint == fp) {
-                                                k.label = if new_label.is_empty() { None } else { Some(new_label) };
-                                            }
-                                        });
-                                    }
-                                }
-                            },
-                            onblur: {
-                                let fp = fp.clone();
-                                move |_| {
+                    input {
+                        class: "label-input",
+                        r#type: "text",
+                        placeholder: "Name this identity...",
+                        value: "{label_input}",
+                        oninput: move |e| label_input.set(e.value()),
+                        onkeypress: {
+                            let fp = fp_for_label.clone();
+                            move |e: KeyboardEvent| {
+                                if e.key() == Key::Enter {
                                     let fp = fp.clone();
                                     let new_label = label_input.read().clone();
-                                    editing_label.set(false);
                                     spawn(async move {
                                         let _ = crate::api::delegate::send_request(
                                             GhostkeyRequest::SetLabel {
@@ -212,22 +186,27 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                                         }
                                     });
                                 }
-                            },
-                        }
-                    } else {
-                        if let Some(label) = &info.label {
-                            span {
-                                class: "identity-name clickable",
-                                onclick: move |_| editing_label.set(true),
-                                "{label}"
                             }
-                        } else {
-                            span {
-                                class: "identity-name unnamed clickable",
-                                onclick: move |_| editing_label.set(true),
-                                "Click to name..."
+                        },
+                        onblur: {
+                            let fp = fp.clone();
+                            move |_| {
+                                let fp = fp.clone();
+                                let new_label = label_input.read().clone();
+                                spawn(async move {
+                                    let _ = crate::api::delegate::send_request(
+                                        GhostkeyRequest::SetLabel {
+                                            fingerprint: fp.clone(),
+                                            label: new_label.clone(),
+                                        },
+                                    ).await;
+                                    let mut keys = GHOSTKEYS.write();
+                                    if let Some(k) = keys.iter_mut().find(|k| k.fingerprint == fp) {
+                                        k.label = if new_label.is_empty() { None } else { Some(new_label) };
+                                    }
+                                });
                             }
-                        }
+                        },
                     }
                 }
 

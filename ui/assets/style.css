@@ -310,26 +310,28 @@ body {
     font-weight: 300;
 }
 
-.identity-name.clickable {
-    cursor: pointer;
-}
-.identity-name.clickable:hover {
-    color: var(--glow);
-}
-
 .label-input {
     font-family: var(--serif);
     font-size: 1.0625rem;
     font-weight: 400;
     color: var(--text-bright);
-    background: var(--void);
-    border: 1px solid var(--border-focus);
+    background: transparent;
+    border: 1px solid transparent;
     border-radius: var(--radius-sm);
     padding: 0.25rem 0.5rem;
     width: 100%;
     outline: none;
+    transition: all 0.15s;
+}
+.label-input::placeholder {
+    color: var(--text-ghost);
+    font-style: italic;
+}
+.label-input:hover {
+    border-color: var(--border);
 }
 .label-input:focus {
+    background: var(--void);
     border-color: var(--glow);
     box-shadow: 0 0 0 2px rgba(126, 180, 255, 0.1);
 }
