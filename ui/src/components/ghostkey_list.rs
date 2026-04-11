@@ -1,6 +1,5 @@
 use dioxus::prelude::*;
 use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
-#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
 use super::ghostkey_import::ImportDialog;
@@ -41,6 +40,56 @@ pub fn add_ghostkey(info: GhostKeyInfo) {
     }
 }
 
+fn export_all() {
+    spawn(async {
+        use super::toast::{self, ToastKind};
+
+        let result = crate::api::delegate::send_request(GhostkeyRequest::ExportAllGhostKeys).await;
+
+        match result {
+            Ok(GhostkeyResponse::ExportAllResult { keys }) => {
+                if keys.is_empty() {
+                    toast::show("No ghostkeys to export", ToastKind::Info);
+                    return;
+                }
+                // Serialize to JSON and trigger download
+                let json = serde_json::to_string_pretty(&keys).unwrap_or_default();
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let blob = web_sys::Blob::new_with_str_sequence_and_options(
+                        &js_sys::Array::of1(&wasm_bindgen::JsValue::from_str(&json)),
+                        web_sys::BlobPropertyBag::new().type_("application/json"),
+                    );
+                    if let Ok(blob) = blob {
+                        if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+                            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                                if let Ok(a) = doc.create_element("a") {
+                                    let _ = a.set_attribute("href", &url);
+                                    let _ = a.set_attribute("download", "ghostkeys-backup.json");
+                                    let a: web_sys::HtmlElement = a.unchecked_into();
+                                    a.click();
+                                    let _ = web_sys::Url::revoke_object_url(&url);
+                                }
+                            }
+                        }
+                    }
+                }
+                toast::show(
+                    format!("Exported {} ghostkey(s)", keys.len()),
+                    ToastKind::Success,
+                );
+            }
+            Ok(GhostkeyResponse::Error { message }) => {
+                toast::show(format!("Export failed: {message}"), ToastKind::Error);
+            }
+            Err(e) => {
+                toast::show(format!("Export failed: {e}"), ToastKind::Error);
+            }
+            _ => {}
+        }
+    });
+}
+
 static SHOW_IMPORT: GlobalSignal<bool> = GlobalSignal::new(|| false);
 static SIGN_FINGERPRINT: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
 
@@ -57,11 +106,18 @@ pub fn GhostKeyList() -> Element {
                     h2 { class: "section-title", "Identities" }
                     span { class: "key-count", "{keys.len()}" }
                 }
-                button {
-                    class: "btn-glow",
-                    onclick: move |_| *SHOW_IMPORT.write() = true,
-                    span { class: "btn-icon", "+" }
-                    span { "Import" }
+                div { class: "header-actions",
+                    button {
+                        class: "action-btn",
+                        onclick: move |_| export_all(),
+                        "Export All"
+                    }
+                    button {
+                        class: "btn-glow",
+                        onclick: move |_| *SHOW_IMPORT.write() = true,
+                        span { class: "btn-icon", "+" }
+                        span { "Import" }
+                    }
                 }
             }
 
@@ -103,19 +159,41 @@ pub fn GhostKeyList() -> Element {
     }
 }
 
+fn extract_json_field<'a>(info: &'a str, field: &str) -> Option<&'a str> {
+    let key = format!("\"{}\":", field);
+    let pos = info.find(&key)?;
+    let after = &info[pos + key.len()..];
+    let after = after.trim_start();
+    if after.starts_with('"') {
+        // String value
+        let content = &after[1..];
+        let end = content.find('"')?;
+        Some(&content[..end])
+    } else {
+        // Numeric value
+        let end = after.find(|c: char| !c.is_ascii_digit())?;
+        Some(&after[..end])
+    }
+}
+
 fn extract_amount(info: &str) -> Option<u32> {
     if info.starts_with('{') {
-        if let Some(pos) = info.find("\"amount\":") {
-            let after = &info[pos + 9..];
-            let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(n) = num_str.parse() {
-                return Some(n);
-            }
-        }
-        return None;
+        extract_json_field(info, "amount").and_then(|s| s.parse().ok())
+    } else {
+        info.strip_prefix("donation_amount:")
+            .and_then(|a| a.parse().ok())
     }
-    info.strip_prefix("donation_amount:")
-        .and_then(|a| a.parse().ok())
+}
+
+fn extract_date(info: &str) -> Option<String> {
+    if info.starts_with('{') {
+        extract_json_field(info, "delegate-key-created").map(|s| {
+            // Just show the date part, not the time
+            s.split(' ').next().unwrap_or(s).to_string()
+        })
+    } else {
+        None
+    }
 }
 
 fn parse_tier(info: &str) -> String {
@@ -143,6 +221,7 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
     let tier_class = tier_level(&info.delegate_info);
     let delay = format!("{}ms", index * 80);
     let mut label_input = use_signal(|| info.label.clone().unwrap_or_default());
+    let mut confirming_delete = use_signal(|| false);
 
     rsx! {
         div {
@@ -157,8 +236,13 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                         span { class: "fp-label", "ID" }
                         code { class: "fp-value", "{info.fingerprint}" }
                     }
-                    div { class: "tier-pill",
-                        "{parse_tier(&info.delegate_info)}"
+                    div { class: "card-meta",
+                        if let Some(date) = extract_date(&info.delegate_info) {
+                            span { class: "meta-date", "{date}" }
+                        }
+                        div { class: "tier-pill",
+                            "{parse_tier(&info.delegate_info)}"
+                        }
                     }
                 }
 
@@ -226,12 +310,32 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                         onclick: move |_| *SIGN_FINGERPRINT.write() = Some(fp_for_sign.clone()),
                         "Sign"
                     }
-                    button {
-                        class: "action-btn action-delete",
-                        onclick: move |_| {
-                            GHOSTKEYS.write().retain(|k| k.fingerprint != fp_for_delete);
-                        },
-                        "Remove"
+                    if *confirming_delete.read() {
+                        span { class: "confirm-prompt", "Delete this identity?" }
+                        button {
+                            class: "action-btn action-confirm-yes",
+                            onclick: move |_| {
+                                let fp = fp_for_delete.clone();
+                                GHOSTKEYS.write().retain(|k| k.fingerprint != fp);
+                                spawn(async move {
+                                    let _ = crate::api::delegate::send_request(
+                                        GhostkeyRequest::DeleteGhostKey { fingerprint: fp },
+                                    ).await;
+                                });
+                            },
+                            "Yes"
+                        }
+                        button {
+                            class: "action-btn",
+                            onclick: move |_| confirming_delete.set(false),
+                            "No"
+                        }
+                    } else {
+                        button {
+                            class: "action-btn action-delete",
+                            onclick: move |_| confirming_delete.set(true),
+                            "Remove"
+                        }
                     }
                 }
             }

@@ -263,6 +263,17 @@ body {
     letter-spacing: 0.05em;
 }
 
+.card-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.meta-date {
+    font-size: 0.6875rem;
+    color: var(--text-ghost);
+}
+
 .tier-pill {
     font-family: var(--mono);
     font-size: 0.6875rem;
@@ -357,6 +368,25 @@ body {
     color: var(--text);
     border-color: var(--border-focus);
     background: var(--glow-dim);
+}
+
+.header-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.confirm-prompt {
+    font-size: 0.75rem;
+    color: var(--danger);
+}
+
+.action-confirm-yes {
+    color: var(--danger) !important;
+    border-color: var(--danger) !important;
+}
+.action-confirm-yes:hover {
+    background: var(--danger-dim) !important;
 }
 
 .action-sign:hover {

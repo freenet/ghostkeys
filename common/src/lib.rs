@@ -50,6 +50,16 @@ pub struct GhostKeyInfo {
     pub delegate_info: String,
 }
 
+/// A ghostkey exported for backup (includes private signing key).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExportedGhostKey {
+    pub fingerprint: String,
+    pub certificate_pem: String,
+    pub signing_key_pem: String,
+    pub label: Option<String>,
+    pub delegate_info: String,
+}
+
 /// Requests from UI or other delegates to the ghostkey delegate.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GhostkeyRequest {
@@ -79,6 +89,11 @@ pub enum GhostkeyRequest {
     },
     /// Verify a signed message produced by this delegate.
     VerifySignedMessage { signed_message: Vec<u8> },
+    /// Export a ghostkey's certificate and signing key for backup.
+    /// Security-sensitive: returns the private signing key.
+    ExportGhostKey { fingerprint: String },
+    /// Export all ghostkeys for backup.
+    ExportAllGhostKeys,
     /// Grant an application or delegate permission to use a ghostkey.
     GrantPermission {
         fingerprint: String,
@@ -146,6 +161,15 @@ pub enum GhostkeyResponse {
     PermissionList {
         fingerprint: String,
         requestors: Vec<SignatureRequestor>,
+    },
+    ExportResult {
+        fingerprint: String,
+        certificate_pem: String,
+        signing_key_pem: String,
+        label: Option<String>,
+    },
+    ExportAllResult {
+        keys: Vec<ExportedGhostKey>,
     },
     PermissionDenied {
         fingerprint: String,

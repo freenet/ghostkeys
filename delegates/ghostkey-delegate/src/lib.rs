@@ -119,6 +119,7 @@ fn requires_permission(request: &GhostkeyRequest) -> bool {
             | GhostkeyRequest::GetCertificate { .. }
             | GhostkeyRequest::SignMessage { .. }
             | GhostkeyRequest::DeleteGhostKey { .. }
+            | GhostkeyRequest::ExportGhostKey { .. }
     )
 }
 
@@ -129,7 +130,8 @@ fn get_fingerprint(request: &GhostkeyRequest) -> Option<String> {
         | GhostkeyRequest::GetCertificate { fingerprint }
         | GhostkeyRequest::SignMessage { fingerprint, .. }
         | GhostkeyRequest::DeleteGhostKey { fingerprint }
-        | GhostkeyRequest::SetLabel { fingerprint, .. } => Some(fingerprint.clone()),
+        | GhostkeyRequest::SetLabel { fingerprint, .. }
+        | GhostkeyRequest::ExportGhostKey { fingerprint } => Some(fingerprint.clone()),
         _ => None,
     }
 }

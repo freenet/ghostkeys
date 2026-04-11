@@ -23,5 +23,6 @@ gloo-timers = { workspace = true }
 futures = { workspace = true }
 # Required for wasm32-unknown-unknown: use JS crypto.getRandomValues for RNG
 js-sys = { workspace = true }
+serde_json = { workspace = true }
 # Required for wasm32-unknown-unknown: use JS crypto.getRandomValues for RNG
 getrandom = { version = "0.2", features = ["js", "wasm-bindgen", "js-sys"], default-features = false }

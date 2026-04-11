@@ -87,6 +87,12 @@ pub fn handle(
 
         GhostkeyRequest::VerifySignedMessage { signed_message } => handle_verify(&signed_message),
 
+        GhostkeyRequest::ExportGhostKey { fingerprint } => {
+            handle_export(ctx, &fingerprint, requestor)
+        }
+
+        GhostkeyRequest::ExportAllGhostKeys => handle_export_all(ctx, requestor),
+
         GhostkeyRequest::GrantPermission {
             fingerprint,
             requestor: target,
@@ -534,6 +540,121 @@ fn handle_verify(signed_message: &[u8]) -> GhostkeyResponse {
         requestor: Some(scoped.requestor),
         message: Some(scoped.payload),
     }
+}
+
+fn handle_export(ctx: &DelegateCtx, fp: &str, requestor: &SignatureRequestor) -> GhostkeyResponse {
+    if !permissions::is_allowed(ctx, fp, requestor) {
+        return GhostkeyResponse::PermissionDenied {
+            fingerprint: fp.to_string(),
+            requestor: requestor.clone(),
+        };
+    }
+
+    let cert = match load_cert(ctx, fp) {
+        Some(c) => c,
+        None => {
+            return GhostkeyResponse::Error {
+                message: format!("ghostkey {fp} not found"),
+            }
+        }
+    };
+
+    let certificate_pem = match Armorable::to_armored_string(&cert) {
+        Ok(s) => s,
+        Err(e) => {
+            return GhostkeyResponse::Error {
+                message: format!("serialize certificate: {e}"),
+            }
+        }
+    };
+
+    let sk_bytes = match ctx.get_secret(&sk_key(fp)) {
+        Some(b) => b,
+        None => {
+            return GhostkeyResponse::Error {
+                message: format!("signing key for {fp} not found"),
+            }
+        }
+    };
+
+    let sk_array: [u8; 32] = match sk_bytes.try_into() {
+        Ok(a) => a,
+        Err(_) => {
+            return GhostkeyResponse::Error {
+                message: "corrupt signing key".into(),
+            }
+        }
+    };
+    let signing_key = SigningKey::from_bytes(&sk_array);
+    let signing_key_pem = match Armorable::to_armored_string(&signing_key) {
+        Ok(s) => s,
+        Err(e) => {
+            return GhostkeyResponse::Error {
+                message: format!("serialize signing key: {e}"),
+            }
+        }
+    };
+
+    let label = ctx
+        .get_secret(&label_key(fp))
+        .and_then(|b| String::from_utf8(b).ok());
+
+    GhostkeyResponse::ExportResult {
+        fingerprint: fp.to_string(),
+        certificate_pem,
+        signing_key_pem,
+        label,
+    }
+}
+
+fn handle_export_all(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyResponse {
+    let index = load_index(ctx);
+    let mut keys = Vec::new();
+
+    for fp in &index {
+        if !permissions::is_allowed(ctx, fp, requestor) {
+            continue;
+        }
+
+        let cert = match load_cert(ctx, fp) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let certificate_pem = match Armorable::to_armored_string(&cert) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let sk_bytes = match ctx.get_secret(&sk_key(fp)) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let sk_array: [u8; 32] = match sk_bytes.try_into() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let signing_key = SigningKey::from_bytes(&sk_array);
+        let signing_key_pem = match Armorable::to_armored_string(&signing_key) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let label = ctx
+            .get_secret(&label_key(fp))
+            .and_then(|b| String::from_utf8(b).ok());
+
+        keys.push(ExportedGhostKey {
+            fingerprint: fp.clone(),
+            certificate_pem,
+            signing_key_pem,
+            label,
+            delegate_info: delegate_info(&cert),
+        });
+    }
+
+    GhostkeyResponse::ExportAllResult { keys }
 }
 
 fn handle_grant_permission(
