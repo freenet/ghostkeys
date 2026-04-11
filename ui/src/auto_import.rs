@@ -2,7 +2,7 @@ use dioxus::logger::tracing::{error, info, warn};
 use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
 
 use crate::api;
-use crate::components::ghostkey_list::GHOSTKEYS;
+use crate::components::ghostkey_list;
 use crate::components::toast::{self, ToastKind};
 
 /// Check the URL hash fragment for an import payload and auto-import if found.
@@ -84,7 +84,7 @@ pub async fn check_and_import() {
             delegate_info,
         }) => {
             info!("Auto-imported ghostkey: {fingerprint}");
-            GHOSTKEYS.write().push(GhostKeyInfo {
+            ghostkey_list::add_ghostkey(GhostKeyInfo {
                 fingerprint: fingerprint.clone(),
                 label: None,
                 delegate_info,

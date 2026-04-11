@@ -79,11 +79,8 @@ async fn load_ghostkeys() {
         Ok(GhostkeyResponse::GhostKeyList { keys }) => {
             if !keys.is_empty() {
                 dioxus::logger::tracing::info!("Loaded {} ghostkeys from delegate", keys.len());
-                let mut gk = components::ghostkey_list::GHOSTKEYS.write();
                 for key in keys {
-                    if !gk.iter().any(|k| k.fingerprint == key.fingerprint) {
-                        gk.push(key);
-                    }
+                    components::ghostkey_list::add_ghostkey(key);
                 }
             }
         }

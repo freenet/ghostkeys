@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use ghostkey_common::GhostKeyInfo;
+use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
 
 use super::ghostkey_import::ImportDialog;
 use super::ghostkey_sign::SignDialog;
@@ -31,6 +31,14 @@ pub static GHOSTKEYS: GlobalSignal<Vec<GhostKeyInfo>> = GlobalSignal::new(|| {
     }
 });
 
+/// Add a ghostkey to the list, deduplicating by fingerprint.
+pub fn add_ghostkey(info: GhostKeyInfo) {
+    let mut keys = GHOSTKEYS.write();
+    if !keys.iter().any(|k| k.fingerprint == info.fingerprint) {
+        keys.push(info);
+    }
+}
+
 static SHOW_IMPORT: GlobalSignal<bool> = GlobalSignal::new(|| false);
 static SIGN_FINGERPRINT: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
 
@@ -59,7 +67,7 @@ pub fn GhostKeyList() -> Element {
                 ImportDialog {
                     on_close: move || *SHOW_IMPORT.write() = false,
                     on_import: move |info: GhostKeyInfo| {
-                        GHOSTKEYS.write().push(info);
+                        add_ghostkey(info);
                         *SHOW_IMPORT.write() = false;
                     },
                 }
@@ -94,9 +102,7 @@ pub fn GhostKeyList() -> Element {
 }
 
 fn extract_amount(info: &str) -> Option<u32> {
-    // Try JSON format: {"amount":1,...}
     if info.starts_with('{') {
-        // Simple JSON extraction without a JSON parser dependency
         if let Some(pos) = info.find("\"amount\":") {
             let after = &info[pos + 9..];
             let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -106,7 +112,6 @@ fn extract_amount(info: &str) -> Option<u32> {
         }
         return None;
     }
-    // Try simple format: donation_amount:100
     info.strip_prefix("donation_amount:")
         .and_then(|a| a.parse().ok())
 }
@@ -129,10 +134,14 @@ fn tier_level(info: &str) -> &'static str {
 
 #[component]
 fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
+    let fp = info.fingerprint.clone();
     let fp_for_sign = info.fingerprint.clone();
     let fp_for_delete = info.fingerprint.clone();
+    let fp_for_label = info.fingerprint.clone();
     let tier_class = tier_level(&info.delegate_info);
     let delay = format!("{}ms", index * 80);
+    let mut editing_label = use_signal(|| false);
+    let mut label_input = use_signal(|| info.label.clone().unwrap_or_default());
 
     rsx! {
         div {
@@ -153,10 +162,72 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                 }
 
                 div { class: "card-identity",
-                    if let Some(label) = &info.label {
-                        span { class: "identity-name", "{label}" }
+                    if *editing_label.read() {
+                        input {
+                            class: "label-input",
+                            r#type: "text",
+                            placeholder: "Name this identity...",
+                            value: "{label_input}",
+                            autofocus: true,
+                            oninput: move |e| label_input.set(e.value()),
+                            onkeypress: {
+                                let fp = fp_for_label.clone();
+                                move |e: KeyboardEvent| {
+                                    if e.key() == Key::Enter {
+                                        let fp = fp.clone();
+                                        let new_label = label_input.read().clone();
+                                        editing_label.set(false);
+                                        spawn(async move {
+                                            let _ = crate::api::delegate::send_request(
+                                                GhostkeyRequest::SetLabel {
+                                                    fingerprint: fp.clone(),
+                                                    label: new_label.clone(),
+                                                },
+                                            ).await;
+                                            // Update local state
+                                            let mut keys = GHOSTKEYS.write();
+                                            if let Some(k) = keys.iter_mut().find(|k| k.fingerprint == fp) {
+                                                k.label = if new_label.is_empty() { None } else { Some(new_label) };
+                                            }
+                                        });
+                                    }
+                                }
+                            },
+                            onblur: {
+                                let fp = fp.clone();
+                                move |_| {
+                                    let fp = fp.clone();
+                                    let new_label = label_input.read().clone();
+                                    editing_label.set(false);
+                                    spawn(async move {
+                                        let _ = crate::api::delegate::send_request(
+                                            GhostkeyRequest::SetLabel {
+                                                fingerprint: fp.clone(),
+                                                label: new_label.clone(),
+                                            },
+                                        ).await;
+                                        let mut keys = GHOSTKEYS.write();
+                                        if let Some(k) = keys.iter_mut().find(|k| k.fingerprint == fp) {
+                                            k.label = if new_label.is_empty() { None } else { Some(new_label) };
+                                        }
+                                    });
+                                }
+                            },
+                        }
                     } else {
-                        span { class: "identity-name unnamed", "Unnamed identity" }
+                        if let Some(label) = &info.label {
+                            span {
+                                class: "identity-name clickable",
+                                onclick: move |_| editing_label.set(true),
+                                "{label}"
+                            }
+                        } else {
+                            span {
+                                class: "identity-name unnamed clickable",
+                                onclick: move |_| editing_label.set(true),
+                                "Click to name..."
+                            }
+                        }
                     }
                 }
 
