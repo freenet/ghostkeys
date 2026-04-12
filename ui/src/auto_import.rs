@@ -127,13 +127,15 @@ fn get_hash() -> Option<String> {
     }
 }
 
-/// Clear the URL hash by asking the shell page to replace the URL.
-/// Uses the __freenet_shell__ postMessage bridge.
+/// Clear the URL hash from both the iframe and the shell page.
 fn clear_hash() {
     #[cfg(target_arch = "wasm32")]
     {
         if let Some(window) = web_sys::window() {
-            // Send to shell page via postMessage to clear the hash from the outer URL
+            // Clear the iframe's own hash so get_hash() returns None on next check
+            let _ = window.location().set_hash("");
+
+            // Ask the shell page to clear the outer URL hash
             if let Some(parent) = window.parent().ok().flatten() {
                 let msg = js_sys::Object::new();
                 let _ = js_sys::Reflect::set(

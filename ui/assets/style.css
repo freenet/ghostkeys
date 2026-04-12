@@ -699,6 +699,17 @@ body {
     color: var(--text-ghost);
 }
 
+.result-message {
+    font-size: 0.875rem;
+    color: var(--text);
+    background: var(--void);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.625rem 0.75rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 .sign-identity-badge {
     display: flex;
     align-items: center;
