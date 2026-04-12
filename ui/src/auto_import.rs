@@ -81,13 +81,13 @@ pub async fn check_and_import() {
     match result {
         Ok(GhostkeyResponse::ImportResult {
             fingerprint,
-            delegate_info,
+            notary_info,
         }) => {
             info!("Auto-imported ghostkey: {fingerprint}");
             ghostkey_list::add_ghostkey(GhostKeyInfo {
                 fingerprint: fingerprint.clone(),
                 label: None,
-                delegate_info,
+                notary_info,
             });
             clear_hash();
             toast::show(

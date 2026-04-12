@@ -46,8 +46,12 @@ pub struct ScopedPayload {
 pub struct GhostKeyInfo {
     pub fingerprint: String,
     pub label: Option<String>,
-    /// The delegate certificate info field (encodes donation tier).
-    pub delegate_info: String,
+    /// The notary certificate info field (encodes donation tier).
+    /// Historically called `delegate_info` — the wire-format key is frozen
+    /// via `#[serde(rename)]` for backward compat with stored state.
+    /// See freenet/web#24.
+    #[serde(rename = "delegate_info")]
+    pub notary_info: String,
 }
 
 /// A ghostkey exported for backup (includes private signing key).
@@ -57,7 +61,8 @@ pub struct ExportedGhostKey {
     pub certificate_pem: String,
     pub signing_key_pem: String,
     pub label: Option<String>,
-    pub delegate_info: String,
+    #[serde(rename = "delegate_info")]
+    pub notary_info: String,
 }
 
 /// Requests from UI or other delegates to the ghostkey delegate.
@@ -113,7 +118,8 @@ pub enum GhostkeyRequest {
 pub enum GhostkeyResponse {
     ImportResult {
         fingerprint: String,
-        delegate_info: String,
+        #[serde(rename = "delegate_info")]
+        notary_info: String,
     },
     GhostKeyList {
         keys: Vec<GhostKeyInfo>,
@@ -122,7 +128,8 @@ pub enum GhostkeyResponse {
         fingerprint: String,
         certificate_pem: String,
         label: Option<String>,
-        delegate_info: String,
+        #[serde(rename = "delegate_info")]
+        notary_info: String,
     },
     Certificate {
         fingerprint: String,
@@ -139,7 +146,8 @@ pub enum GhostkeyResponse {
     VerifyResult {
         valid: bool,
         signer_fingerprint: Option<String>,
-        delegate_info: Option<String>,
+        #[serde(rename = "delegate_info")]
+        notary_info: Option<String>,
         requestor: Option<SignatureRequestor>,
         message: Option<Vec<u8>>,
     },

@@ -170,7 +170,7 @@ pub async fn send_request(request: GhostkeyRequest) -> Result<GhostkeyResponse, 
         GhostkeyRequest::ListGhostKeys => Ok(GhostkeyResponse::GhostKeyList { keys: vec![] }),
         GhostkeyRequest::ImportGhostKey { .. } => Ok(GhostkeyResponse::ImportResult {
             fingerprint: "mock1234".to_string(),
-            delegate_info: "example_import".into(),
+            notary_info: "example_import".into(),
         }),
         _ => Ok(GhostkeyResponse::Error {
             message: "Mock mode".into(),

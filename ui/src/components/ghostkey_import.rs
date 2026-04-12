@@ -136,12 +136,12 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
                                 importing.set(false);
 
                                 match result {
-                                    Ok(GhostkeyResponse::ImportResult { fingerprint, delegate_info }) => {
+                                    Ok(GhostkeyResponse::ImportResult { fingerprint, notary_info }) => {
                                         toast::show(format!("Ghostkey {fingerprint} imported"), ToastKind::Success);
                                         on_import.call(GhostKeyInfo {
                                             fingerprint,
                                             label: None,
-                                            delegate_info,
+                                            notary_info,
                                         });
                                     }
                                     Ok(GhostkeyResponse::Error { message }) => {
