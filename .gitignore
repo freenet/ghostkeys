@@ -1,2 +1,9 @@
 /target
 Cargo.lock
+
+# Secrets / credentials
+.env
+.env.*
+*.pem
+*.key
+secrets/
