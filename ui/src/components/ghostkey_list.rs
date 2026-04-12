@@ -12,17 +12,17 @@ pub static GHOSTKEYS: GlobalSignal<Vec<GhostKeyInfo>> = GlobalSignal::new(|| {
             GhostKeyInfo {
                 fingerprint: "3xKm9Rvp".into(),
                 label: Some("Trading Identity".into()),
-                delegate_info: "donation_amount:100".into(),
+                notary_info: "donation_amount:100".into(),
             },
             GhostKeyInfo {
                 fingerprint: "7bNq2Wft".into(),
                 label: Some("Chat Identity".into()),
-                delegate_info: "donation_amount:20".into(),
+                notary_info: "donation_amount:20".into(),
             },
             GhostKeyInfo {
                 fingerprint: "Hv5sRe8x".into(),
                 label: None,
-                delegate_info: "donation_amount:5".into(),
+                notary_info: "donation_amount:5".into(),
             },
         ]
     }
@@ -254,7 +254,7 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
     let fp_for_sign = info.fingerprint.clone();
     let fp_for_delete = info.fingerprint.clone();
     let fp_for_label = info.fingerprint.clone();
-    let tier_class = tier_level(&info.delegate_info);
+    let tier_class = tier_level(&info.notary_info);
     let delay = format!("{}ms", index * 80);
     let mut label_input = use_signal(|| info.label.clone().unwrap_or_default());
     let mut confirming_delete = use_signal(|| false);
@@ -273,11 +273,11 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                         code { class: "fp-value", "{info.fingerprint}" }
                     }
                     div { class: "card-meta",
-                        if let Some(date) = extract_date(&info.delegate_info) {
+                        if let Some(date) = extract_date(&info.notary_info) {
                             span { class: "meta-date", "tier est. {date}" }
                         }
                         div { class: "tier-pill",
-                            "{parse_tier(&info.delegate_info)}"
+                            "{parse_tier(&info.notary_info)}"
                         }
                     }
                 }

@@ -39,9 +39,9 @@ fn load_cert(ctx: &DelegateCtx, fp: &str) -> Option<GhostkeyCertificateV1> {
     Armorable::from_bytes(&bytes).ok()
 }
 
-/// Get the delegate info string from a certificate.
-fn delegate_info(cert: &GhostkeyCertificateV1) -> String {
-    cert.delegate.payload.info.clone()
+/// Get the notary info string from a certificate.
+fn notary_info(cert: &GhostkeyCertificateV1) -> String {
+    cert.notary.payload.info.clone()
 }
 
 pub fn handle(
@@ -197,7 +197,7 @@ fn handle_import(
 
     GhostkeyResponse::ImportResult {
         fingerprint: fp,
-        delegate_info: info,
+        notary_info: info,
     }
 }
 
@@ -218,7 +218,7 @@ fn handle_list(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyRes
             keys.push(GhostKeyInfo {
                 fingerprint: fp.clone(),
                 label,
-                delegate_info: delegate_info(&cert),
+                notary_info: notary_info(&cert),
             });
         }
     }
@@ -264,7 +264,7 @@ fn handle_get_detail(
         fingerprint: fp.to_string(),
         certificate_pem,
         label,
-        delegate_info: delegate_info(&cert),
+        notary_info: notary_info(&cert),
     }
 }
 
@@ -452,7 +452,7 @@ fn handle_verify(signed_message: &[u8]) -> GhostkeyResponse {
             return GhostkeyResponse::VerifyResult {
                 valid: false,
                 signer_fingerprint: None,
-                delegate_info: None,
+                notary_info: None,
                 requestor: None,
                 message: None,
             }
@@ -467,7 +467,7 @@ fn handle_verify(signed_message: &[u8]) -> GhostkeyResponse {
             return GhostkeyResponse::VerifyResult {
                 valid: false,
                 signer_fingerprint: None,
-                delegate_info: None,
+                notary_info: None,
                 requestor: None,
                 message: None,
             }
@@ -481,7 +481,7 @@ fn handle_verify(signed_message: &[u8]) -> GhostkeyResponse {
             return GhostkeyResponse::VerifyResult {
                 valid: false,
                 signer_fingerprint: None,
-                delegate_info: None,
+                notary_info: None,
                 requestor: None,
                 message: None,
             }
@@ -495,7 +495,7 @@ fn handle_verify(signed_message: &[u8]) -> GhostkeyResponse {
             return GhostkeyResponse::VerifyResult {
                 valid: false,
                 signer_fingerprint: None,
-                delegate_info: None,
+                notary_info: None,
                 requestor: None,
                 message: None,
             }
@@ -513,7 +513,7 @@ fn handle_verify(signed_message: &[u8]) -> GhostkeyResponse {
         return GhostkeyResponse::VerifyResult {
             valid: false,
             signer_fingerprint: Some(fingerprint(&cert.verifying_key)),
-            delegate_info: Some(info),
+            notary_info: Some(info),
             requestor: None,
             message: None,
         };
@@ -526,7 +526,7 @@ fn handle_verify(signed_message: &[u8]) -> GhostkeyResponse {
             return GhostkeyResponse::VerifyResult {
                 valid: false,
                 signer_fingerprint: Some(fingerprint(&cert.verifying_key)),
-                delegate_info: Some(info),
+                notary_info: Some(info),
                 requestor: None,
                 message: None,
             }
@@ -536,7 +536,7 @@ fn handle_verify(signed_message: &[u8]) -> GhostkeyResponse {
     GhostkeyResponse::VerifyResult {
         valid: true,
         signer_fingerprint: Some(fingerprint(&cert.verifying_key)),
-        delegate_info: Some(info),
+        notary_info: Some(info),
         requestor: Some(scoped.requestor),
         message: Some(scoped.payload),
     }
@@ -650,7 +650,7 @@ fn handle_export_all(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> Ghost
             certificate_pem,
             signing_key_pem,
             label,
-            delegate_info: delegate_info(&cert),
+            notary_info: notary_info(&cert),
         });
     }
 

@@ -136,7 +136,7 @@ This is a Rust workspace with three crates:
 ### Certificate chain
 
 ```
-Master Key -> Delegate Certificate -> Ghost Key Certificate
+Master Key -> Notary Certificate -> Ghost Key Certificate
 ```
 
 Each ghost key is identified by a fingerprint (first 8 bytes of BLAKE3 hash of the verifying key, base58-encoded).

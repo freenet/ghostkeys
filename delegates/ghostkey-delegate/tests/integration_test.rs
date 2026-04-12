@@ -1,10 +1,10 @@
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use ghostkey_common::*;
 use ghostkey_lib::armorable::Armorable;
-use ghostkey_lib::delegate_certificate::DelegateCertificateV1;
 use ghostkey_lib::ghost_key_certificate::GhostkeyCertificateV1;
+use ghostkey_lib::notary_certificate::NotaryCertificateV1;
 
-/// Generate a test ghostkey (master key -> delegate cert -> ghostkey cert).
+/// Generate a test ghostkey (master key -> notary cert -> ghostkey cert).
 fn generate_test_ghostkey() -> (String, String, String) {
     use rand_core::OsRng;
 
@@ -13,13 +13,12 @@ fn generate_test_ghostkey() -> (String, String, String) {
     let master_signing_key = SigningKey::from(master_sk);
     let master_verifying_key = VerifyingKey::from(master_vk);
 
-    // Generate delegate certificate
+    // Generate notary certificate
     let info = "donation_amount:100".to_string();
-    let (delegate_cert, delegate_sk) =
-        DelegateCertificateV1::new(&master_signing_key, &info).unwrap();
+    let (notary_cert, notary_sk) = NotaryCertificateV1::new(&master_signing_key, &info).unwrap();
 
     // Generate ghostkey
-    let (ghost_cert, ghost_sk) = GhostkeyCertificateV1::new(&delegate_cert, &delegate_sk);
+    let (ghost_cert, ghost_sk) = GhostkeyCertificateV1::new(&notary_cert, &notary_sk);
 
     // Verify it works
     let verified = ghost_cert.verify(&Some(master_verifying_key)).unwrap();
@@ -118,13 +117,13 @@ fn test_request_response_serialization() {
     let responses = vec![
         GhostkeyResponse::ImportResult {
             fingerprint: "abc123".into(),
-            delegate_info: "donation_amount:100".into(),
+            notary_info: "donation_amount:100".into(),
         },
         GhostkeyResponse::GhostKeyList {
             keys: vec![GhostKeyInfo {
                 fingerprint: "abc123".into(),
                 label: Some("Test".into()),
-                delegate_info: "info".into(),
+                notary_info: "info".into(),
             }],
         },
         GhostkeyResponse::Error {
