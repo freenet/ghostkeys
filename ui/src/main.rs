@@ -17,6 +17,24 @@ fn main() {
 #[component]
 fn App() -> Element {
     use_effect(|| {
+        // Set the page title via the shell bridge
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Ok(Some(parent)) = window.parent() {
+                    let msg = js_sys::Object::new();
+                    let _ = js_sys::Reflect::set(
+                        &msg,
+                        &"__freenet_shell__".into(),
+                        &wasm_bindgen::JsValue::TRUE,
+                    );
+                    let _ = js_sys::Reflect::set(&msg, &"type".into(), &"title".into());
+                    let _ = js_sys::Reflect::set(&msg, &"title".into(), &"Ghostkey Vault".into());
+                    let _ = parent.post_message(&msg, "*");
+                }
+            }
+        }
+
         spawn(async {
             if let Err(e) = connection::connect().await {
                 dioxus::logger::tracing::error!("Connection failed: {e}");
