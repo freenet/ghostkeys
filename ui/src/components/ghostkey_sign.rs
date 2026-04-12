@@ -127,10 +127,11 @@ pub fn SignDialog(fingerprint: String, on_close: EventHandler<()>) -> Element {
                                             signing.set(false);
 
                                             match resp {
-                                                Ok(GhostkeyResponse::SignResult { signature, certificate_pem, .. }) => {
-                                                    let sig_b64 = base64_encode(&signature);
+                                                Ok(GhostkeyResponse::SignResult { signature, certificate_pem, scoped_payload }) => {
+                                                    let sig_pem = to_pem("GHOSTKEY_SIGNATURE", &signature);
+                                                    let payload_pem = to_pem("GHOSTKEY_SIGNED_PAYLOAD", &scoped_payload);
                                                     signed_output.set(Some(format!(
-                                                        "Signature: {sig_b64}\n\n{certificate_pem}"
+                                                        "{sig_pem}\n{payload_pem}\n{certificate_pem}"
                                                     )));
                                                 }
                                                 Ok(GhostkeyResponse::PermissionDenied { .. }) => {
@@ -181,6 +182,20 @@ fn copy_to_clipboard(text: &str) {
             }
         }
     }
+}
+
+fn to_pem(label: &str, data: &[u8]) -> String {
+    let b64 = base64_encode(data);
+    // Wrap at 64 chars per line
+    let wrapped: Vec<&str> = b64
+        .as_bytes()
+        .chunks(64)
+        .map(|c| std::str::from_utf8(c).unwrap())
+        .collect();
+    format!(
+        "-----BEGIN {label}-----\n{}\n-----END {label}-----",
+        wrapped.join("\n")
+    )
 }
 
 fn base64_encode(data: &[u8]) -> String {
