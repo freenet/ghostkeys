@@ -90,6 +90,47 @@ fn export_all() {
     });
 }
 
+fn test_permission_prompt() {
+    spawn(async {
+        use super::toast::{self, ToastKind};
+
+        let keys = GHOSTKEYS.read();
+        let fp = match keys.first() {
+            Some(k) => k.fingerprint.clone(),
+            None => {
+                toast::show("No ghostkeys to test with", ToastKind::Error);
+                return;
+            }
+        };
+        drop(keys);
+
+        toast::show("Sending test prompt request...", ToastKind::Info);
+
+        let result = crate::api::delegate::send_request(GhostkeyRequest::TestPermissionPrompt {
+            fingerprint: fp,
+        })
+        .await;
+
+        match result {
+            Ok(GhostkeyResponse::PermissionDenied { .. }) => {
+                toast::show("Permission denied by user", ToastKind::Info);
+            }
+            Ok(GhostkeyResponse::Error { message }) if message == "Test prompt approved" => {
+                toast::show("Permission prompt approved!", ToastKind::Success);
+            }
+            Ok(GhostkeyResponse::Error { message }) => {
+                toast::show(format!("Error: {message}"), ToastKind::Error);
+            }
+            Err(e) => {
+                toast::show(format!("Request failed: {e}"), ToastKind::Error);
+            }
+            _ => {
+                toast::show("Unexpected response", ToastKind::Info);
+            }
+        }
+    });
+}
+
 static SHOW_IMPORT: GlobalSignal<bool> = GlobalSignal::new(|| false);
 static SIGN_FINGERPRINT: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
 
@@ -107,6 +148,12 @@ pub fn GhostKeyList() -> Element {
                     span { class: "key-count", "{keys.len()}" }
                 }
                 div { class: "header-actions",
+                    button {
+                        class: "action-btn",
+                        style: "color: var(--warning); border-color: var(--warning);",
+                        onclick: move |_| test_permission_prompt(),
+                        "Test Prompt"
+                    }
                     button {
                         class: "action-btn",
                         onclick: move |_| export_all(),

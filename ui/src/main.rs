@@ -1,6 +1,7 @@
 mod api;
 mod auto_import;
 mod components;
+mod migration;
 
 use dioxus::prelude::*;
 
@@ -58,6 +59,8 @@ fn App() -> Element {
                 dioxus::logger::tracing::error!("Delegate registration failed: {e}");
                 return;
             }
+
+            migration::log_legacy_info();
 
             // Load existing ghostkeys from delegate storage
             load_ghostkeys().await;

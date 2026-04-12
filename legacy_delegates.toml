@@ -1,0 +1,10 @@
+# Legacy delegate entries for migration.
+# Each entry records a previous delegate WASM's key so that secrets
+# stored under that key can be migrated to the current delegate.
+#
+# Run: ./scripts/add-migration.sh before making delegate/common changes.
+
+# Current as of 2026-04-12 (after notary rename + TestPermissionPrompt)
+[[entry]]
+code_hash = "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f"
+delegate_key = "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5"

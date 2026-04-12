@@ -10,6 +10,11 @@ KEY_FILE = "${HOME}/.config/ghostkeys/web-container-keys.toml"
 
 # --- Build tasks ---
 
+[tasks.add-migration]
+description = "Record current delegate key in legacy_delegates.toml (run BEFORE changing delegate/common code)"
+command = "bash"
+args = ["scripts/add-migration.sh"]
+
 [tasks.build-delegate]
 description = "Build the ghostkey delegate WASM"
 command = "cargo"
