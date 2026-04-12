@@ -39,6 +39,14 @@ The delegate supports: importing keys, listing/exporting keys, signing and verif
 
 Applications on Freenet request access to ghost keys through the delegate. Users are prompted to allow once, always allow, or deny. This ensures signing keys never leave the delegate.
 
+### Delegate UI
+
+When running a Freenet peer locally, the ghost key management UI is available at:
+
+```
+http://127.0.0.1:7509/v1/contract/web/DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N/
+```
+
 ## Building
 
 Requires [cargo-make](https://github.com/sagiegurari/cargo-make):
