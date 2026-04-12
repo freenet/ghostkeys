@@ -111,6 +111,8 @@ pub enum GhostkeyRequest {
     },
     /// List permissions for a ghostkey.
     ListPermissions { fingerprint: String },
+    /// Debug: force a permission prompt regardless of existing permissions.
+    TestPermissionPrompt { fingerprint: String },
 }
 
 /// Responses from the ghostkey delegate.

@@ -14,7 +14,7 @@ CODE_HASH=$(b3sum --no-names "$WASM")
 DELEGATE_KEY=$(echo -n "$CODE_HASH" | xxd -r -p | b3sum --no-names)
 
 # Check if already recorded
-if grep -q "$delegate_key" legacy_delegates.toml 2>/dev/null; then
+if grep -q "$DELEGATE_KEY" legacy_delegates.toml 2>/dev/null; then
     echo "Delegate key already in legacy_delegates.toml"
     exit 0
 fi

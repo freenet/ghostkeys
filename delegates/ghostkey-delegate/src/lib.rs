@@ -91,6 +91,11 @@ fn handle_request(
     let request: GhostkeyRequest = from_cbor(payload)
         .map_err(|e| DelegateError::Other(format!("deserialize request: {e}")))?;
 
+    // TestPermissionPrompt always triggers the prompt
+    if let GhostkeyRequest::TestPermissionPrompt { ref fingerprint } = request {
+        return request_user_permission(ctx, fingerprint, requestor, payload);
+    }
+
     // Permission-sensitive operations check access first
     if requires_permission(&request) {
         if let Some(fp) = get_fingerprint(&request) {
@@ -150,13 +155,20 @@ fn request_user_permission(
     let request_id = REQUEST_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let requestor_desc = match requestor {
-        SignatureRequestor::WebApp(id) => format!("Web app {}", id),
-        SignatureRequestor::Delegate(key) => format!("Delegate {}", key.encode()),
+        SignatureRequestor::WebApp(id) => {
+            let short_id = &id.to_string()[..8.min(id.to_string().len())];
+            format!("A Freenet application ({short_id}...)")
+        }
+        SignatureRequestor::Delegate(key) => {
+            let short_key = &key.encode()[..8.min(key.encode().len())];
+            format!("A Freenet delegate ({short_key}...)")
+        }
     };
 
     let prompt = format!(
-        "{} wants to access ghostkey {}. Allow?",
-        requestor_desc, fingerprint
+        "{requestor_desc} is requesting access to your ghostkey identity ({fingerprint}).\n\n\
+         Choose 'Allow' for one-time access, 'Always Allow' to remember this choice, \
+         or 'Deny' to block the request."
     );
 
     logging::info(&format!("Requesting user permission: {prompt}"));
@@ -180,9 +192,9 @@ fn request_user_permission(
                 .expect("string to NotificationMessage")
         },
         responses: vec![
-            ClientResponse::new(b"allow".to_vec()),
-            ClientResponse::new(b"always_allow".to_vec()),
-            ClientResponse::new(b"deny".to_vec()),
+            ClientResponse::new(b"Allow Once".to_vec()),
+            ClientResponse::new(b"Always Allow".to_vec()),
+            ClientResponse::new(b"Deny".to_vec()),
         ],
     });
 
@@ -209,13 +221,13 @@ fn handle_user_response(
 
     let response_bytes = user_resp.response.bytes();
 
-    if response_bytes == b"allow" || response_bytes == b"always_allow" {
+    if response_bytes == b"Allow Once" || response_bytes == b"Always Allow" {
         logging::info(&format!(
             "User approved access to ghostkey {}",
             pending.fingerprint
         ));
 
-        let permanent = response_bytes == b"always_allow";
+        let permanent = response_bytes == b"Always Allow";
 
         // Grant permission (permanent or temporary for replay)
         permissions::grant(ctx, &pending.fingerprint, &pending.requestor);

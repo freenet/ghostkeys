@@ -106,6 +106,14 @@ pub fn handle(
         GhostkeyRequest::ListPermissions { fingerprint } => {
             handle_list_permissions(ctx, &fingerprint, requestor)
         }
+
+        GhostkeyRequest::TestPermissionPrompt { .. } => {
+            // Handled in lib.rs before reaching here; if we get here
+            // it means the user approved the prompt, return success
+            GhostkeyResponse::Error {
+                message: "Test prompt approved".into(),
+            }
+        }
     }
 }
 

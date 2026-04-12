@@ -8,3 +8,8 @@
 [[entry]]
 code_hash = "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f"
 delegate_key = "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5"
+
+# Added 2026-04-12
+[[entry]]
+code_hash = "63c2ccddcab61c1983dc7b6eccf68e9aaca6e1d1e31e79539ecd4eada3195650"
+delegate_key = "d3f152bcecaf31021cf8b1b5541bd6acf890b31256750ddfd6b3c8d4bafb726c"
