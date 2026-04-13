@@ -1,0 +1,56 @@
+name: Check delegate migration
+
+on:
+  pull_request:
+    paths:
+      - 'delegates/**'
+      - 'common/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+jobs:
+  check-migration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install b3sum
+        run: cargo install b3sum
+
+      - name: Build delegate WASM
+        run: cargo build --target wasm32-unknown-unknown --release -p ghostkey-delegate
+
+      - name: Check migration entry exists
+        run: |
+          WASM="target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm"
+          CODE_HASH=$(b3sum --no-names "$WASM")
+
+          echo "Delegate WASM code_hash: $CODE_HASH"
+
+          if grep -q "$CODE_HASH" legacy_delegates.toml; then
+            echo "Migration entry found for current WASM hash."
+          else
+            # Check if the WASM actually changed compared to the base branch
+            git stash
+            git checkout ${{ github.event.pull_request.base.sha }} -- legacy_delegates.toml 2>/dev/null || true
+            BASE_LAST_HASH=$(grep 'code_hash' legacy_delegates.toml | tail -1 | grep -o '"[^"]*"' | tr -d '"')
+            git stash pop 2>/dev/null || true
+
+            if [ "$CODE_HASH" = "$BASE_LAST_HASH" ]; then
+              echo "WASM unchanged from base branch, no migration needed."
+            else
+              echo "::error::Delegate WASM changed but no migration entry found!"
+              echo "::error::Run 'cargo make add-migration' BEFORE making delegate/common changes,"
+              echo "::error::then commit legacy_delegates.toml with your PR."
+              echo ""
+              echo "Current WASM hash: $CODE_HASH"
+              echo "Last recorded hash: $BASE_LAST_HASH"
+              exit 1
+            fi
+          fi
