@@ -5,5 +5,5 @@ pub fn info(msg: &str) {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn info(msg: &str) {
-    println!("[ghostkey-delegate] {}", msg);
+    println!("[ghostkey-vault] {}", msg);
 }
