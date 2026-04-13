@@ -86,12 +86,20 @@ pub enum GhostkeyRequest {
     DeleteGhostKey { fingerprint: String },
     /// Set a user-friendly label.
     SetLabel { fingerprint: String, label: String },
-    /// Sign a message. The delegate scopes the signature to the requestor.
-    /// Returns a ScopedPayload signature, not a raw signature.
+    /// Sign a message with a specific ghostkey. The delegate scopes the
+    /// signature to the requestor.
     SignMessage {
         fingerprint: String,
         message: Vec<u8>,
     },
+    /// Sign a message with the user's default ghostkey (highest-tier key,
+    /// or user-overridden via SetDefaultKey). Apps should prefer this over
+    /// SignMessage -- it avoids needing to know about specific fingerprints.
+    SignWithDefault { message: Vec<u8> },
+    /// Set which ghostkey is the default for signing.
+    SetDefaultKey { fingerprint: String },
+    /// Get the current default ghostkey fingerprint.
+    GetDefaultKey,
     /// Verify a signed message produced by this delegate.
     VerifySignedMessage { signed_message: Vec<u8> },
     /// Export a ghostkey's certificate and signing key for backup.
@@ -144,6 +152,12 @@ pub enum GhostkeyResponse {
         signature: Vec<u8>,
         /// The certificate PEM, so the verifier has the full chain
         certificate_pem: String,
+    },
+    DefaultKeyResult {
+        fingerprint: Option<String>,
+    },
+    DefaultKeySet {
+        fingerprint: String,
     },
     VerifyResult {
         valid: bool,

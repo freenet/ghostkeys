@@ -85,6 +85,16 @@ pub fn handle(
             message,
         } => handle_sign(ctx, &fingerprint, &message, requestor),
 
+        GhostkeyRequest::SignWithDefault { message } => {
+            handle_sign_with_default(ctx, &message, requestor)
+        }
+
+        GhostkeyRequest::SetDefaultKey { fingerprint } => {
+            handle_set_default(ctx, &fingerprint, requestor)
+        }
+
+        GhostkeyRequest::GetDefaultKey => handle_get_default(ctx, requestor),
+
         GhostkeyRequest::VerifySignedMessage { signed_message } => handle_verify(&signed_message),
 
         GhostkeyRequest::ExportGhostKey { fingerprint } => {
@@ -364,6 +374,103 @@ fn handle_set_label(
         fingerprint: fp.to_string(),
         label: label.to_string(),
     }
+}
+
+const DEFAULT_KEY: &[u8] = b"gk:default";
+
+/// Resolve the default ghostkey fingerprint: explicit default, or highest-tier.
+fn resolve_default(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> Option<String> {
+    // Check explicit default
+    if let Some(bytes) = ctx.get_secret(DEFAULT_KEY) {
+        if let Ok(fp) = String::from_utf8(bytes) {
+            // Verify it still exists and we have permission
+            if load_cert(ctx, &fp).is_some() && permissions::is_allowed(ctx, &fp, requestor) {
+                return Some(fp);
+            }
+        }
+    }
+
+    // Fall back to highest-tier key we have permission for
+    let index = load_index(ctx);
+    let mut best: Option<(String, u32)> = None;
+
+    for fp in &index {
+        if !permissions::is_allowed(ctx, fp, requestor) {
+            continue;
+        }
+        if let Some(cert) = load_cert(ctx, fp) {
+            let info = notary_info(&cert);
+            let amount = extract_amount(&info).unwrap_or(0);
+            if best
+                .as_ref()
+                .map_or(true, |(_, best_amt)| amount > *best_amt)
+            {
+                best = Some((fp.clone(), amount));
+            }
+        }
+    }
+
+    best.map(|(fp, _)| fp)
+}
+
+/// Extract donation amount from notary info string.
+fn extract_amount(info: &str) -> Option<u32> {
+    if info.starts_with('{') {
+        // JSON: {"amount":1,...}
+        if let Some(pos) = info.find("\"amount\":") {
+            let after = &info[pos + 9..];
+            let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            return num_str.parse().ok();
+        }
+        None
+    } else {
+        info.strip_prefix("donation_amount:")
+            .and_then(|a| a.parse().ok())
+    }
+}
+
+fn handle_sign_with_default(
+    ctx: &DelegateCtx,
+    message: &[u8],
+    requestor: &SignatureRequestor,
+) -> GhostkeyResponse {
+    match resolve_default(ctx, requestor) {
+        Some(fp) => handle_sign(ctx, &fp, message, requestor),
+        None => GhostkeyResponse::Error {
+            message: "No ghostkey available. Import a ghostkey first.".into(),
+        },
+    }
+}
+
+fn handle_set_default(
+    ctx: &mut DelegateCtx,
+    fingerprint: &str,
+    requestor: &SignatureRequestor,
+) -> GhostkeyResponse {
+    if !permissions::is_allowed(ctx, fingerprint, requestor) {
+        return GhostkeyResponse::PermissionDenied {
+            fingerprint: fingerprint.to_string(),
+            requestor: requestor.clone(),
+        };
+    }
+
+    if load_cert(ctx, fingerprint).is_none() {
+        return GhostkeyResponse::Error {
+            message: format!("ghostkey {fingerprint} not found"),
+        };
+    }
+
+    ctx.set_secret(DEFAULT_KEY, fingerprint.as_bytes());
+    logging::info(&format!("Default ghostkey set to {fingerprint}"));
+
+    GhostkeyResponse::DefaultKeySet {
+        fingerprint: fingerprint.to_string(),
+    }
+}
+
+fn handle_get_default(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyResponse {
+    let fp = resolve_default(ctx, requestor);
+    GhostkeyResponse::DefaultKeyResult { fingerprint: fp }
 }
 
 fn handle_sign(

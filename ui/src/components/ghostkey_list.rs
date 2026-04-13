@@ -133,6 +133,19 @@ fn test_permission_prompt() {
 
 static SHOW_IMPORT: GlobalSignal<bool> = GlobalSignal::new(|| false);
 static SIGN_FINGERPRINT: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
+static DEFAULT_KEY: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
+
+/// Load the default key from the delegate on startup.
+pub fn load_default_key() {
+    spawn(async {
+        if let Ok(GhostkeyResponse::DefaultKeyResult {
+            fingerprint: Some(fp),
+        }) = crate::api::delegate::send_request(GhostkeyRequest::GetDefaultKey).await
+        {
+            *DEFAULT_KEY.write() = Some(fp);
+        }
+    });
+}
 
 #[component]
 pub fn GhostKeyList() -> Element {
@@ -301,7 +314,12 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
     let fp_for_sign = info.fingerprint.clone();
     let fp_for_delete = info.fingerprint.clone();
     let fp_for_label = info.fingerprint.clone();
+    let fp_for_default = info.fingerprint.clone();
     let tier_class = tier_level(&info.notary_info);
+    let is_default = DEFAULT_KEY
+        .read()
+        .as_ref()
+        .map_or(false, |dk| dk == &info.fingerprint);
     let delay = format!("{}ms", index * 80);
     let mut label_input = use_signal(|| info.label.clone().unwrap_or_default());
     let mut confirming_delete = use_signal(|| false);
@@ -318,6 +336,9 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                     div { class: "fingerprint-group",
                         span { class: "fp-label", "ID" }
                         code { class: "fp-value", "{info.fingerprint}" }
+                        if is_default {
+                            span { class: "default-badge", "default" }
+                        }
                     }
                     div { class: "card-meta",
                         if let Some(date) = extract_date(&info.notary_info) {
@@ -392,6 +413,24 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                         class: "action-btn action-sign",
                         onclick: move |_| *SIGN_FINGERPRINT.write() = Some(fp_for_sign.clone()),
                         "Sign"
+                    }
+                    if !is_default {
+                        button {
+                            class: "action-btn",
+                            onclick: {
+                                let fp = fp_for_default.clone();
+                                move |_| {
+                                    let fp = fp.clone();
+                                    spawn(async move {
+                                        let _ = crate::api::delegate::send_request(
+                                            GhostkeyRequest::SetDefaultKey { fingerprint: fp.clone() },
+                                        ).await;
+                                        *DEFAULT_KEY.write() = Some(fp);
+                                    });
+                                }
+                            },
+                            "Set Default"
+                        }
                     }
                     if *confirming_delete.read() {
                         span { class: "confirm-prompt", "Delete this identity?" }

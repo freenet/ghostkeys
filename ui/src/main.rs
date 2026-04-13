@@ -62,8 +62,9 @@ fn App() -> Element {
 
             migration::log_legacy_info();
 
-            // Load existing ghostkeys from delegate storage
+            // Load existing ghostkeys and default key from delegate storage
             load_ghostkeys().await;
+            components::ghostkey_list::load_default_key();
 
             // Check for auto-import via URL fragment
             auto_import::check_and_import().await;
