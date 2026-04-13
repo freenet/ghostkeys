@@ -60,7 +60,8 @@ fn App() -> Element {
                 return;
             }
 
-            migration::log_legacy_info();
+            // Migrate ghostkeys from any previous delegate versions
+            migration::try_migrate().await;
 
             // Load existing ghostkeys and default key from delegate storage
             load_ghostkeys().await;
