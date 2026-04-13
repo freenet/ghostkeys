@@ -259,8 +259,8 @@ fn handle_get_detail(
     let cert = match load_cert(ctx, fp) {
         Some(c) => c,
         None => {
-            return GhostkeyResponse::Error {
-                message: format!("ghostkey {fp} not found"),
+            return GhostkeyResponse::KeyNotFound {
+                fingerprint: fp.to_string(),
             }
         }
     };
@@ -301,8 +301,8 @@ fn handle_get_certificate(
     let cert = match load_cert(ctx, fp) {
         Some(c) => c,
         None => {
-            return GhostkeyResponse::Error {
-                message: format!("ghostkey {fp} not found"),
+            return GhostkeyResponse::KeyNotFound {
+                fingerprint: fp.to_string(),
             }
         }
     };
@@ -363,8 +363,8 @@ fn handle_set_label(
     }
 
     if !load_index(ctx).contains(&fp.to_string()) {
-        return GhostkeyResponse::Error {
-            message: format!("ghostkey {fp} not found"),
+        return GhostkeyResponse::KeyNotFound {
+            fingerprint: fp.to_string(),
         };
     }
 
@@ -436,9 +436,7 @@ fn handle_sign_with_default(
 ) -> GhostkeyResponse {
     match resolve_default(ctx, requestor) {
         Some(fp) => handle_sign(ctx, &fp, message, requestor),
-        None => GhostkeyResponse::Error {
-            message: "No ghostkey available. Import a ghostkey first.".into(),
-        },
+        None => GhostkeyResponse::NoIdentityAvailable,
     }
 }
 
@@ -455,8 +453,8 @@ fn handle_set_default(
     }
 
     if load_cert(ctx, fingerprint).is_none() {
-        return GhostkeyResponse::Error {
-            message: format!("ghostkey {fingerprint} not found"),
+        return GhostkeyResponse::KeyNotFound {
+            fingerprint: fingerprint.to_string(),
         };
     }
 
@@ -668,8 +666,8 @@ fn handle_export(ctx: &DelegateCtx, fp: &str, requestor: &SignatureRequestor) ->
     let cert = match load_cert(ctx, fp) {
         Some(c) => c,
         None => {
-            return GhostkeyResponse::Error {
-                message: format!("ghostkey {fp} not found"),
+            return GhostkeyResponse::KeyNotFound {
+                fingerprint: fp.to_string(),
             }
         }
     };

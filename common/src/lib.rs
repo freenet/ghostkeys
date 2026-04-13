@@ -199,6 +199,14 @@ pub enum GhostkeyResponse {
         fingerprint: String,
         requestor: SignatureRequestor,
     },
+    /// The user has no ghostkeys. Apps should direct the user to
+    /// freenet.org/ghostkey to purchase one.
+    NoIdentityAvailable,
+    /// The requested ghostkey fingerprint was not found.
+    KeyNotFound {
+        fingerprint: String,
+    },
+    /// Generic error for unexpected failures.
     Error {
         message: String,
     },
