@@ -26,6 +26,7 @@ pub fn from_cbor<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, String
 
 /// Who requested a ghostkey operation. Runtime-attested, can't be spoofed.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SignatureRequestor {
     /// A web application (UI) backed by this contract.
     WebApp(ContractInstanceId),
@@ -67,6 +68,7 @@ pub struct ExportedGhostKey {
 
 /// Requests from UI or other delegates to the ghostkey delegate.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[non_exhaustive]
 pub enum GhostkeyRequest {
     /// Import a ghostkey from PEM-armored certificate and signing key.
     /// If master_verifying_key_pem is None, uses the hardcoded Freenet master key.
@@ -125,6 +127,7 @@ pub enum GhostkeyRequest {
 
 /// Responses from the ghostkey delegate.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[non_exhaustive]
 pub enum GhostkeyResponse {
     ImportResult {
         fingerprint: String,

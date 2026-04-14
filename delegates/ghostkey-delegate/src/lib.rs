@@ -163,6 +163,8 @@ fn request_user_permission(
             let short_key = &key.encode()[..8.min(key.encode().len())];
             format!("A Freenet delegate ({short_key}...)")
         }
+        // Required by `#[non_exhaustive]` on SignatureRequestor.
+        _ => "An unknown caller".to_string(),
     };
 
     let prompt = format!(

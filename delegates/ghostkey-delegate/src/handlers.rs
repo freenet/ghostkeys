@@ -124,6 +124,15 @@ pub fn handle(
                 message: "Test prompt approved".into(),
             }
         }
+
+        // Required by `#[non_exhaustive]` on GhostkeyRequest so adding new
+        // request variants in future ghostkey-common releases is not a
+        // breaking change. A delegate built against an older ghostkey-common
+        // version will never see these variants; if we somehow do (because
+        // the UI was built against a newer common), reject cleanly.
+        _ => GhostkeyResponse::Error {
+            message: "Unsupported request variant for this delegate version".into(),
+        },
     }
 }
 

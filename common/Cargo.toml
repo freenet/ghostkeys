@@ -3,7 +3,11 @@ name = "ghostkey-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared types for the ghostkey delegate and UI"
+repository.workspace = true
+description = "Wire types for communicating with the Freenet ghostkey delegate (GhostkeyRequest/GhostkeyResponse). Use this crate from a Freenet dapp that needs to sign messages or read ghostkey identity info via the delegate. For low-level ghostkey certificate crypto, see ghostkey_lib instead."
+readme = "README.md"
+keywords = ["freenet", "ghostkey", "delegate"]
+categories = ["cryptography"]
 
 [features]
 default = []
