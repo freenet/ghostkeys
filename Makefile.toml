@@ -15,6 +15,17 @@ description = "Record current delegate key in legacy_delegates.toml (run BEFORE 
 command = "bash"
 args = ["scripts/add-migration.sh"]
 
+[tasks.check-migration]
+description = "Verify migration coverage before publishing (fails fast if unsafe)"
+dependencies = ["build-delegate"]
+command = "bash"
+args = ["scripts/check-migration.sh"]
+
+[tasks.record-migration]
+description = "Append just-published delegate hash to legacy_delegates.toml"
+command = "bash"
+args = ["scripts/record-migration.sh"]
+
 [tasks.build-delegate]
 description = "Build the ghostkey delegate WASM"
 command = "cargo"
@@ -38,7 +49,7 @@ echo "Compressed webapp to target/webapp/webapp.tar.xz"
 
 [tasks.sign-webapp]
 description = "Sign the webapp archive with the web-container-tool"
-dependencies = ["compress-webapp"]
+dependencies = ["compress-webapp", "check-migration"]
 script = '''
 VERSION=$(( $(date +%s) / 60 ))
 echo "Signing with version: $VERSION"
@@ -54,6 +65,7 @@ ${WEB_CONTAINER_TOOL} sign \
 description = "Publish the ghostkey UI to the Freenet network"
 dependencies = ["sign-webapp"]
 script = '''
+set -e
 fdev network publish \
   --code published-contract/web_container_contract.wasm \
   --parameters published-contract/webapp.parameters \
@@ -62,6 +74,12 @@ fdev network publish \
   --webapp-metadata target/webapp/webapp.metadata
 echo ""
 echo "Published to: http://127.0.0.1:7509/v1/contract/web/${CONTRACT_ID}/"
+
+# After publishing, record the deployed hash as the new baseline so
+# the next delegate change can migrate from it without anyone having
+# to remember to run `add-migration` first.
+echo ""
+bash scripts/record-migration.sh
 '''
 
 # --- Development tasks ---
