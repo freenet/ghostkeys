@@ -15,7 +15,7 @@ repository = "https://github.com/freenet/ghostkeys"
 [workspace.dependencies]
 ghostkey-common = { path = "common" }
 ghostkey_lib = "0.2"
-freenet-stdlib = "0.3.5"
+freenet-stdlib = "0.6"
 ed25519-dalek = { version = "2.1", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 ciborium = "0.2"

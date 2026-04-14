@@ -43,9 +43,23 @@ impl DelegateInterface for GhostkeyDelegate {
                     Some(MessageOrigin::WebApp(contract_id)) => {
                         SignatureRequestor::WebApp(contract_id)
                     }
+                    Some(MessageOrigin::Delegate(delegate_key)) => {
+                        // stdlib 0.6 routes inter-delegate calls through
+                        // MessageOrigin::Delegate(caller_key). Trust the
+                        // runtime-attested caller identity for authorization.
+                        SignatureRequestor::Delegate(delegate_key)
+                    }
                     None => {
                         return Err(DelegateError::Other(
                             "missing message origin for application message".into(),
+                        ));
+                    }
+                    // Required by `#[non_exhaustive]` on MessageOrigin.
+                    // Reject unknown origin kinds rather than silently
+                    // granting access under an ambiguous identity.
+                    Some(_) => {
+                        return Err(DelegateError::Other(
+                            "unsupported message origin kind".into(),
                         ));
                     }
                 };
