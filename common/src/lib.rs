@@ -53,6 +53,10 @@ pub struct GhostKeyInfo {
     /// See freenet/web#24.
     #[serde(rename = "delegate_info")]
     pub notary_info: String,
+    /// Ed25519 verifying key bytes (32 bytes). Added in 0.2.2 for dapps
+    /// that need the raw key (e.g. Harvest store contract parameters).
+    #[serde(default)]
+    pub verifying_key_bytes: Option<Vec<u8>>,
 }
 
 /// A ghostkey exported for backup (includes private signing key).

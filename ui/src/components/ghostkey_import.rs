@@ -358,6 +358,7 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
                                             fingerprint,
                                             label: None,
                                             notary_info,
+                                            verifying_key_bytes: None,
                                         });
                                     }
                                     Ok(GhostkeyResponse::Error { message }) => {

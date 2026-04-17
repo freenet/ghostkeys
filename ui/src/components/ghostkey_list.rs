@@ -13,16 +13,19 @@ pub static GHOSTKEYS: GlobalSignal<Vec<GhostKeyInfo>> = GlobalSignal::new(|| {
                 fingerprint: "3xKm9Rvp".into(),
                 label: Some("Trading Identity".into()),
                 notary_info: "donation_amount:100".into(),
+                verifying_key_bytes: None,
             },
             GhostKeyInfo {
                 fingerprint: "7bNq2Wft".into(),
                 label: Some("Chat Identity".into()),
                 notary_info: "donation_amount:20".into(),
+                verifying_key_bytes: None,
             },
             GhostKeyInfo {
                 fingerprint: "Hv5sRe8x".into(),
                 label: None,
                 notary_info: "donation_amount:5".into(),
+                verifying_key_bytes: None,
             },
         ]
     }

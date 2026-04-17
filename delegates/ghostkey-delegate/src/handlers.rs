@@ -246,6 +246,7 @@ fn handle_list(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyRes
                 fingerprint: fp.clone(),
                 label,
                 notary_info: notary_info(&cert),
+                verifying_key_bytes: Some(cert.verifying_key.as_bytes().to_vec()),
             });
         }
     }

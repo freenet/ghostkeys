@@ -78,6 +78,7 @@ pub async fn try_migrate() {
                                     fingerprint,
                                     label: exported.label.clone(),
                                     notary_info,
+                                    verifying_key_bytes: None,
                                 });
                                 migrated_count += 1;
                             }

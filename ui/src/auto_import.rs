@@ -88,6 +88,7 @@ pub async fn check_and_import() {
                 fingerprint: fingerprint.clone(),
                 label: None,
                 notary_info,
+                verifying_key_bytes: None,
             });
             clear_hash();
             toast::show(
