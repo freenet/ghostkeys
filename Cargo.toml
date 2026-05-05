@@ -37,3 +37,16 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
+# `strip = true` removes debug symbols and source-path metadata from
+# the WASM binary. This is what makes the build byte-reproducible
+# across machines: without it, embedded paths and stack-trace info
+# differ between local dev and CI, producing divergent WASM hashes
+# (and therefore different delegate keys). River and Delta both pin
+# this for the same reason.
+strip = true
+
+# Apply size+reproducibility optimisations to dependencies too, so a
+# Cargo.lock change in a leaf crate doesn't accidentally bloat the
+# delegate WASM via a release-profile mismatch.
+[profile.release.package."*"]
+opt-level = "z"
