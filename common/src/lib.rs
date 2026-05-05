@@ -34,6 +34,38 @@ pub enum SignatureRequestor {
     Delegate(DelegateKey),
 }
 
+/// What an authorised caller is allowed to do with a ghostkey.
+///
+/// A grant carries a set of scopes. The vault auto-grants itself every
+/// scope when it imports a key. Third-party apps can request access via
+/// `RequestAnyAccess`, which (on user approval) grants only
+/// `{ReadPublic, Sign}` -- enough to read the public certificate and sign
+/// messages, but not enough to extract the private key or destroy the
+/// identity. Apps that need higher privileges are deliberately routed
+/// through the vault, where the user is rendering the management UI.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum GhostkeyScope {
+    /// Read public certificate and metadata. Granted alongside `Sign`
+    /// because every signing UI also wants to display the public cert.
+    ReadPublic,
+    /// Sign messages with the private key. Implies `ReadPublic` in
+    /// practice (a verifier needs the cert), but gating is per-scope so
+    /// the grant intent is explicit.
+    Sign,
+    /// Export the private signing key. Catastrophic if granted to a
+    /// third-party app -- the recipient becomes able to sign as the
+    /// user offline. Only ever granted to the vault.
+    Export,
+    /// Delete the ghostkey or rewrite its label. Only ever granted to
+    /// the vault.
+    Delete,
+    /// Manage permissions for this ghostkey: grant/revoke other apps'
+    /// access. The vault gets this on import; third-party apps never
+    /// get it via `RequestAnyAccess`.
+    Admin,
+}
+
 /// What the ghostkey delegate actually signs. The raw payload is never signed
 /// alone -- always wrapped with the attested caller identity.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -127,6 +159,20 @@ pub enum GhostkeyRequest {
     ListPermissions { fingerprint: String },
     /// Debug: force a permission prompt regardless of existing permissions.
     TestPermissionPrompt { fingerprint: String },
+    /// A third-party app asks for any one of the user's ghostkeys. The
+    /// delegate emits a user prompt that lets the user pick a key (or
+    /// deny). On approval the delegate grants `{ReadPublic, Sign}` to
+    /// the requesting app for the chosen fingerprint and replies with a
+    /// single-element `GhostKeyList` containing that key.
+    ///
+    /// The request takes no fields on purpose: the only identifier the
+    /// user sees in the prompt is the runtime-attested requestor (a
+    /// truncated contract id). Letting the app supply free text would
+    /// open a phishing surface (a hostile app could write text designed
+    /// to look like Freenet UI chrome). Apps that want to communicate
+    /// purpose to the user should do so in their own UI before this
+    /// flow runs.
+    RequestAnyAccess,
 }
 
 /// Responses from the ghostkey delegate.
@@ -204,6 +250,14 @@ pub enum GhostkeyResponse {
     },
     PermissionDenied {
         fingerprint: String,
+        requestor: SignatureRequestor,
+    },
+    /// Permission denied for a request that didn't name a specific
+    /// fingerprint -- today this means the user denied a
+    /// `RequestAnyAccess` prompt. Distinct from `PermissionDenied` so
+    /// callers don't have to invent a placeholder fingerprint to
+    /// pattern-match.
+    AccessDenied {
         requestor: SignatureRequestor,
     },
     /// The user has no ghostkeys. Apps should direct the user to
