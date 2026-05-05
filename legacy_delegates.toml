@@ -39,7 +39,7 @@ delegate_key = "7a374ed8c6f8dab44baf4db7325e8114cdad12278b112b85f3d074250e078477
 code_hash = "6c42cdb7bee8892fcff67cd8f8f70dd741518785bb3036d22fd7f5be0682b9d1"
 delegate_key = "aec3e641b0acd3a529a987ecc90bb300f782f15d1374f715d1cc7e7b2b17aa40"
 
-# Added 2026-05-04
+# Added 2026-05-05 (rebuild with pinned rust-toolchain.toml = 1.95.0)
 [[entry]]
-code_hash = "834354da6b8ba111a48775bd1210067700c13c0656fd323e0cc3210676eff7b0"
-delegate_key = "cbf6aafab047aaad1d74bf5b73e7aa489bc9fdf02f0fa462a67724181ab4ebc5"
+code_hash = "f0c07c464ddd95869e4d46d103b36b519b57553bf59f6778ae4dca5cc9b5f6f7"
+delegate_key = "1e9501537f02e36ecfdcae8b3d35adbf44f40553d11e4364e19b6ef108cf9cc6"
