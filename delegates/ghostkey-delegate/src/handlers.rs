@@ -19,8 +19,10 @@ fn label_key(fp: &str) -> Vec<u8> {
     format!("gk:label:{fp}").into_bytes()
 }
 
-/// Load the fingerprint index from secrets.
-fn load_index(ctx: &DelegateCtx) -> Vec<String> {
+/// Load the fingerprint index from secrets. Exposed at crate visibility
+/// so the `RequestAnyAccess` prompt path in `lib.rs` can list keys for
+/// the user without recreating the storage layout knowledge.
+pub(crate) fn load_index(ctx: &DelegateCtx) -> Vec<String> {
     ctx.get_secret(INDEX_KEY)
         .and_then(|bytes| from_cbor(&bytes).ok())
         .unwrap_or_default()
@@ -219,12 +221,46 @@ fn handle_import(
         save_index(ctx, &index);
     }
 
-    // Auto-grant permission to the importing requestor
-    permissions::grant(ctx, &fp, requestor);
+    // Auto-grant the full scope set to the importing requestor. The
+    // importer (typically the vault) is the user's agent for this key
+    // and gets every scope the delegate enforces, including Admin so it
+    // can manage other apps' grants on the user's behalf.
+    permissions::grant_full(ctx, &fp, requestor);
 
     GhostkeyResponse::ImportResult {
         fingerprint: fp,
         notary_info: info,
+    }
+}
+
+/// Build a `GhostKeyList` containing exactly the named key, with no
+/// permission filtering. Used by the `RequestAnyAccess` approval path so
+/// the response carries only the fingerprint the user just chose to
+/// share -- routing through `handle_list` would leak any other keys the
+/// requestor previously had `ReadPublic` on.
+pub(crate) fn lookup_single_key(ctx: &DelegateCtx, fp: &str) -> GhostkeyResponse {
+    match load_cert(ctx, fp) {
+        Some(cert) => {
+            let label = ctx
+                .get_secret(&label_key(fp))
+                .and_then(|b| String::from_utf8(b).ok());
+            GhostkeyResponse::GhostKeyList {
+                keys: vec![GhostKeyInfo {
+                    fingerprint: fp.to_string(),
+                    label,
+                    notary_info: notary_info(&cert),
+                    verifying_key_bytes: Some(cert.verifying_key.as_bytes().to_vec()),
+                }],
+            }
+        }
+        // The fp came from `load_index(ctx)` at prompt-emit time, so
+        // missing here means the cert was deleted between prompt and
+        // approval. Fall through to KeyNotFound rather than an empty
+        // list, which would otherwise look like a successful share with
+        // a zero-element result.
+        None => GhostkeyResponse::KeyNotFound {
+            fingerprint: fp.to_string(),
+        },
     }
 }
 
@@ -233,8 +269,10 @@ fn handle_list(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyRes
     let mut keys = Vec::new();
 
     for fp in &index {
-        // Only show ghostkeys the requestor has permission for
-        if !permissions::is_allowed(ctx, fp, requestor) {
+        // Only show ghostkeys the requestor has at least ReadPublic on.
+        // Sign / Export / Delete grants always include ReadPublic so an
+        // app with any visible-to-them grant lists the key.
+        if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::ReadPublic) {
             continue;
         }
 
@@ -259,7 +297,7 @@ fn handle_get_detail(
     fp: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
-    if !permissions::is_allowed(ctx, fp, requestor) {
+    if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::ReadPublic) {
         return GhostkeyResponse::PermissionDenied {
             fingerprint: fp.to_string(),
             requestor: requestor.clone(),
@@ -301,7 +339,7 @@ fn handle_get_certificate(
     fp: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
-    if !permissions::is_allowed(ctx, fp, requestor) {
+    if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::ReadPublic) {
         return GhostkeyResponse::PermissionDenied {
             fingerprint: fp.to_string(),
             requestor: requestor.clone(),
@@ -337,7 +375,7 @@ fn handle_delete(
     fp: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
-    if !permissions::is_allowed(ctx, fp, requestor) {
+    if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Delete) {
         return GhostkeyResponse::PermissionDenied {
             fingerprint: fp.to_string(),
             requestor: requestor.clone(),
@@ -365,7 +403,7 @@ fn handle_set_label(
     label: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
-    if !permissions::is_allowed(ctx, fp, requestor) {
+    if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Delete) {
         return GhostkeyResponse::PermissionDenied {
             fingerprint: fp.to_string(),
             requestor: requestor.clone(),
@@ -390,31 +428,32 @@ const DEFAULT_KEY: &[u8] = b"gk:default";
 
 /// Resolve the default ghostkey fingerprint: explicit default, or highest-tier.
 fn resolve_default(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> Option<String> {
-    // Check explicit default
+    // The "default key" is selected for signing, so the requestor needs
+    // Sign on it. ReadPublic alone wouldn't be enough -- a third-party
+    // app that hasn't been granted Sign for any key shouldn't get a
+    // signing fp from this resolver.
     if let Some(bytes) = ctx.get_secret(DEFAULT_KEY) {
         if let Ok(fp) = String::from_utf8(bytes) {
-            // Verify it still exists and we have permission
-            if load_cert(ctx, &fp).is_some() && permissions::is_allowed(ctx, &fp, requestor) {
+            if load_cert(ctx, &fp).is_some()
+                && permissions::has_scope(ctx, &fp, requestor, GhostkeyScope::Sign)
+            {
                 return Some(fp);
             }
         }
     }
 
-    // Fall back to highest-tier key we have permission for
+    // Fall back to the highest-tier key the requestor can sign with.
     let index = load_index(ctx);
     let mut best: Option<(String, u32)> = None;
 
     for fp in &index {
-        if !permissions::is_allowed(ctx, fp, requestor) {
+        if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Sign) {
             continue;
         }
         if let Some(cert) = load_cert(ctx, fp) {
             let info = notary_info(&cert);
             let amount = extract_amount(&info).unwrap_or(0);
-            if best
-                .as_ref()
-                .map_or(true, |(_, best_amt)| amount > *best_amt)
-            {
+            if best.as_ref().is_none_or(|(_, best_amt)| amount > *best_amt) {
                 best = Some((fp.clone(), amount));
             }
         }
@@ -455,7 +494,9 @@ fn handle_set_default(
     fingerprint: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
-    if !permissions::is_allowed(ctx, fingerprint, requestor) {
+    // Setting the default-for-signing requires the caller to be able to
+    // sign with the key.
+    if !permissions::has_scope(ctx, fingerprint, requestor, GhostkeyScope::Sign) {
         return GhostkeyResponse::PermissionDenied {
             fingerprint: fingerprint.to_string(),
             requestor: requestor.clone(),
@@ -487,7 +528,7 @@ fn handle_sign(
     message: &[u8],
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
-    if !permissions::is_allowed(ctx, fp, requestor) {
+    if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Sign) {
         return GhostkeyResponse::PermissionDenied {
             fingerprint: fp.to_string(),
             requestor: requestor.clone(),
@@ -666,7 +707,9 @@ fn handle_verify(signed_message: &[u8]) -> GhostkeyResponse {
 }
 
 fn handle_export(ctx: &DelegateCtx, fp: &str, requestor: &SignatureRequestor) -> GhostkeyResponse {
-    if !permissions::is_allowed(ctx, fp, requestor) {
+    // Export returns the private signing key. Catastrophic if granted to
+    // a third-party app, so this scope is reserved for the vault.
+    if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Export) {
         return GhostkeyResponse::PermissionDenied {
             fingerprint: fp.to_string(),
             requestor: requestor.clone(),
@@ -735,7 +778,7 @@ fn handle_export_all(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> Ghost
     let mut keys = Vec::new();
 
     for fp in &index {
-        if !permissions::is_allowed(ctx, fp, requestor) {
+        if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Export) {
             continue;
         }
 
@@ -786,16 +829,22 @@ fn handle_grant_permission(
     target: &SignatureRequestor,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
-    // Only the ghostkey management UI (the importer) can grant permissions.
-    // We check that the requestor already has permission for this ghostkey.
-    if !permissions::is_allowed(ctx, fp, requestor) {
+    // Only callers with the Admin scope on this fingerprint can grant.
+    // Admin is auto-given to the importer (the vault) and never granted
+    // via `RequestAnyAccess`, so a third-party app with `{ReadPublic, Sign}`
+    // cannot escalate by calling Grant.
+    if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Admin) {
         return GhostkeyResponse::PermissionDenied {
             fingerprint: fp.to_string(),
             requestor: requestor.clone(),
         };
     }
 
-    permissions::grant(ctx, fp, target);
+    // Default-grant the third-party scope set so vault-mediated
+    // share-with-app flows match the `RequestAnyAccess` semantics. A
+    // future protocol bump can add a scoped variant for vault UIs that
+    // want finer control.
+    permissions::grant_third_party(ctx, fp, target);
 
     GhostkeyResponse::PermissionGranted {
         fingerprint: fp.to_string(),
@@ -809,14 +858,14 @@ fn handle_revoke_permission(
     target: &SignatureRequestor,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
-    if !permissions::is_allowed(ctx, fp, requestor) {
+    if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Admin) {
         return GhostkeyResponse::PermissionDenied {
             fingerprint: fp.to_string(),
             requestor: requestor.clone(),
         };
     }
 
-    permissions::revoke(ctx, fp, target);
+    permissions::revoke_all(ctx, fp, target);
 
     GhostkeyResponse::PermissionRevoked {
         fingerprint: fp.to_string(),
@@ -829,14 +878,18 @@ fn handle_list_permissions(
     fp: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
-    if !permissions::is_allowed(ctx, fp, requestor) {
+    // ReadPublic is enough to see the grant list. The vault has every
+    // scope so it always passes; a third-party app with `Sign` access
+    // can introspect who else holds grants on a key it can already
+    // operate on (no extra capability surface).
+    if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::ReadPublic) {
         return GhostkeyResponse::PermissionDenied {
             fingerprint: fp.to_string(),
             requestor: requestor.clone(),
         };
     }
 
-    let requestors = permissions::list(ctx, fp);
+    let requestors = permissions::list_requestors(ctx, fp);
 
     GhostkeyResponse::PermissionList {
         fingerprint: fp.to_string(),

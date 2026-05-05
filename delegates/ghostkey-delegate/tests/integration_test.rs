@@ -10,8 +10,8 @@ fn generate_test_ghostkey() -> (String, String, String) {
 
     // Generate master key
     let (master_sk, master_vk) = ghostkey_lib::util::create_keypair(&mut OsRng).unwrap();
-    let master_signing_key = SigningKey::from(master_sk);
-    let master_verifying_key = VerifyingKey::from(master_vk);
+    let master_signing_key = master_sk;
+    let master_verifying_key = master_vk;
 
     // Generate notary certificate
     let info = "donation_amount:100".to_string();
@@ -104,6 +104,9 @@ fn test_request_response_serialization() {
             fingerprint: "abc123".into(),
             message: b"hello".to_vec(),
         },
+        // Cross-app access: no fields, the prompt is rendered entirely
+        // from runtime-attested data so no payload to round-trip.
+        GhostkeyRequest::RequestAnyAccess,
     ];
 
     for req in &requests {
@@ -113,6 +116,13 @@ fn test_request_response_serialization() {
         assert_eq!(bytes, re_encoded, "Round-trip failed for request");
     }
     println!("All {} request types serialize correctly", requests.len());
+
+    // Build a SignatureRequestor used inside response variants below.
+    let dummy_id_bytes = [42u8; 32];
+    let dummy_id_b58 = bs58::encode(&dummy_id_bytes).into_string();
+    let dummy_contract_id =
+        freenet_stdlib::prelude::ContractInstanceId::from_bytes(dummy_id_b58).unwrap();
+    let webapp_requestor = SignatureRequestor::WebApp(dummy_contract_id);
 
     let responses = vec![
         GhostkeyResponse::ImportResult {
@@ -124,6 +134,7 @@ fn test_request_response_serialization() {
                 fingerprint: "abc123".into(),
                 label: Some("Test".into()),
                 notary_info: "info".into(),
+                verifying_key_bytes: None,
             }],
         },
         GhostkeyResponse::Error {
@@ -134,6 +145,12 @@ fn test_request_response_serialization() {
             signature: vec![4, 5, 6],
             certificate_pem: "cert".into(),
         },
+        // New in cross-app-access: AccessDenied fires when the user
+        // denies a `RequestAnyAccess` prompt. Distinct from
+        // PermissionDenied because there's no fingerprint to report.
+        GhostkeyResponse::AccessDenied {
+            requestor: webapp_requestor.clone(),
+        },
     ];
 
     for resp in &responses {
@@ -143,6 +160,35 @@ fn test_request_response_serialization() {
         assert_eq!(bytes, re_encoded, "Round-trip failed for response");
     }
     println!("All {} response types serialize correctly", responses.len());
+}
+
+/// Wire-format pin for the `GhostkeyScope` enum. The discriminants are
+/// part of the over-the-wire shape that vault and apps exchange via
+/// `ScopedPayload` and (in future, when a scoped variant of
+/// GrantPermission exists) future protocol variants. Reordering these
+/// variants would silently change every grant's encoded shape, so this
+/// test fails fast if anyone reorders them.
+#[test]
+fn test_ghostkey_scope_wire_format_is_stable() {
+    let scopes = [
+        GhostkeyScope::ReadPublic,
+        GhostkeyScope::Sign,
+        GhostkeyScope::Export,
+        GhostkeyScope::Delete,
+        GhostkeyScope::Admin,
+    ];
+    for s in &scopes {
+        let bytes = to_cbor(s).unwrap();
+        let decoded: GhostkeyScope = from_cbor(&bytes).unwrap();
+        assert_eq!(*s, decoded);
+    }
+    // Stable JSON pinning: serde tags variants by name in CBOR text-key
+    // form, so any rename or reorder shows up as a JSON difference here.
+    let json = serde_json::to_string(&scopes.to_vec()).unwrap();
+    assert_eq!(
+        json, r#"["ReadPublic","Sign","Export","Delete","Admin"]"#,
+        "GhostkeyScope wire names changed -- this is a wire-format break"
+    );
 }
 
 #[test]

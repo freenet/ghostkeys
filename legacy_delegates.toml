@@ -33,3 +33,26 @@ delegate_key = "1562b3fcfd135d2a05575231ee4fec084dea6f457bb9f1a8ae8195810f4ff579
 [[entry]]
 code_hash = "ed44922a533d6f7c598e540f28e5624d2e7de4e0467647001065bd636fb9851d"
 delegate_key = "7a374ed8c6f8dab44baf4db7325e8114cdad12278b112b85f3d074250e078477"
+
+# Added 2026-05-04
+[[entry]]
+code_hash = "6c42cdb7bee8892fcff67cd8f8f70dd741518785bb3036d22fd7f5be0682b9d1"
+delegate_key = "aec3e641b0acd3a529a987ecc90bb300f782f15d1374f715d1cc7e7b2b17aa40"
+
+# Added 2026-05-05 (rust-toolchain.toml=1.95.0 + profile.release.strip=true)
+# Local build (15121e02..., delegate_key 830219b9...) and the GitHub
+# Actions runner build differ even with the same pinned toolchain --
+# unsolved binary-reproducibility gap, see follow-up issue. Recording
+# both so the migration system tolerates either origin until publish
+# locks in one canonical hash via record-migration.
+[[entry]]
+code_hash = "15121e02b2a895aeab275be8972707490c59eae7fde44412295c480521a88c00"
+delegate_key = "830219b9fda7a16a74cf23c61bd753fe2b68130b43d71406ee2efa01ebad9727"
+
+# CI runner build (ubuntu-latest, dtolnay/rust-toolchain@stable resolves
+# to 1.95.0 same as the pin). Recorded so check-migration passes; both
+# entries are pre-publish ephemera, the canonical post-publish hash
+# will be appended by record-migration after `cargo make publish-ghostkeys`.
+[[entry]]
+code_hash = "338da2354c37c51ef68c817e946bbdd94979eda722a7c1f6c221968c72fdafd6"
+delegate_key = "66dafd5841e3701892927c044f9dc8799e4052e791457e3e8f0b1614e9b62bf9"

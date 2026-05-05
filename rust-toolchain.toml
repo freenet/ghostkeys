@@ -1,0 +1,29 @@
+[toolchain]
+# Pinned to keep ghostkey_delegate.wasm builds byte-deterministic across
+# local dev and CI.
+#
+# Why this matters: the delegate key is BLAKE3(BLAKE3(wasm) || params).
+# A different rustc version produces different WASM bytes (LLVM
+# changes between releases) and therefore a different delegate key.
+# Users store their ghostkey certificates and signing keys under the
+# current delegate's key — changing the key without recording the old
+# key in legacy_delegates.toml silently orphans every user's data.
+#
+# Same reason river/main and delta pin to the same channel; aim to
+# keep these aligned so a shared dependency built in two repos
+# produces the same bytes.
+#
+# When updating this pin:
+#   1. Run `cargo make add-migration` BEFORE bumping so the old
+#      delegate key is recorded for legacy migration.
+#   2. Bump the channel below.
+#   3. Run `cargo make build-delegate` to rebuild WASM with the new
+#      toolchain.
+#   4. Verify the WASM hash changed (`b3sum target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm`).
+#   5. Commit rust-toolchain.toml + legacy_delegates.toml together.
+#   6. After merge, `cargo make publish-ghostkeys` republishes; users
+#      automatically migrate from the old delegate key to the new one
+#      on next vault open.
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
