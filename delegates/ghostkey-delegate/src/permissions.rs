@@ -22,6 +22,8 @@ use freenet_stdlib::prelude::DelegateCtx;
 use ghostkey_common::{from_cbor, to_cbor, GhostkeyScope, SignatureRequestor};
 use serde::{Deserialize, Serialize};
 
+use crate::logging;
+
 /// One app/delegate's permission record for a single ghostkey.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GrantEntry {
@@ -35,9 +37,28 @@ fn perm_key(fingerprint: &str) -> Vec<u8> {
 }
 
 fn load(ctx: &DelegateCtx, fingerprint: &str) -> Vec<GrantEntry> {
-    ctx.get_secret(&perm_key(fingerprint))
-        .and_then(|bytes| from_cbor(&bytes).ok())
-        .unwrap_or_default()
+    let Some(bytes) = ctx.get_secret(&perm_key(fingerprint)) else {
+        // No grant entry for this fingerprint -- normal for a freshly
+        // imported key before any third-party grant.
+        return Vec::new();
+    };
+    match from_cbor::<Vec<GrantEntry>>(&bytes) {
+        Ok(grants) => grants,
+        Err(e) => {
+            // The bytes exist but don't deserialise as the current
+            // schema. In production the new delegate has a different
+            // DelegateKey from any predecessor, so its secret store
+            // starts empty and this branch can't be reached. Logging
+            // here makes it loud if a future change ever shares the
+            // secret store across delegate revisions and a stale
+            // grant blob appears: the user's permissions would
+            // silently default to "no grants" without this warning.
+            logging::info(&format!(
+                "Failed to decode grants for {fingerprint}: {e}; treating as empty"
+            ));
+            Vec::new()
+        }
+    }
 }
 
 fn save(ctx: &mut DelegateCtx, fingerprint: &str, grants: &[GrantEntry]) {

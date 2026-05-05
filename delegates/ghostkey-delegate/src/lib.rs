@@ -138,9 +138,19 @@ fn handle_request(
     if let Some(scope) = required_scope(&request) {
         if let Some(fp) = get_fingerprint(&request) {
             if !permissions::has_scope(ctx, &fp, requestor, scope) {
-                // Emit a user prompt and store the pending request so we
-                // can replay it after the user approves.
-                return request_user_permission(ctx, &fp, requestor, payload);
+                // Only fire a user prompt for scopes the third-party flow
+                // can actually grant (`ReadPublic` and `Sign`). Higher
+                // scopes (`Export`, `Delete`, `Admin`) are vault-only:
+                // prompting for them would mislead the user into clicking
+                // Allow on a request that the replay would still deny,
+                // because `grant_third_party` never adds those scopes.
+                if matches!(scope, GhostkeyScope::ReadPublic | GhostkeyScope::Sign) {
+                    return request_user_permission(ctx, &fp, requestor, payload);
+                }
+                // Hard-deny without prompting. The user reaches these
+                // operations through the vault, where the requestor is
+                // already the vault and has the scope.
+                return deny_immediately(&fp, requestor);
             }
         }
     }
@@ -152,6 +162,25 @@ fn handle_request(
 
     Ok(vec![OutboundDelegateMsg::ApplicationMessage(
         ApplicationMessage::new(response_bytes),
+    )])
+}
+
+/// Emit a `PermissionDenied` response without firing a prompt. Used for
+/// scopes that `RequestAnyAccess`'s third-party grant path cannot satisfy
+/// (`Export`, `Delete`, `Admin`); prompting in those cases would mislead
+/// the user, because the replayed handler would still deny the request.
+fn deny_immediately(
+    fingerprint: &str,
+    requestor: &SignatureRequestor,
+) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    let response = ghostkey_common::GhostkeyResponse::PermissionDenied {
+        fingerprint: fingerprint.to_string(),
+        requestor: requestor.clone(),
+    };
+    let bytes =
+        to_cbor(&response).map_err(|e| DelegateError::Other(format!("serialize response: {e}")))?;
+    Ok(vec![OutboundDelegateMsg::ApplicationMessage(
+        ApplicationMessage::new(bytes),
     )])
 }
 
@@ -233,7 +262,7 @@ fn request_user_permission(
 
     let prompt = format!(
         "{requestor_desc} is requesting access to your ghostkey identity ({fingerprint}).\n\n\
-         Choose 'Allow' for one-time access, 'Always Allow' to remember this choice, \
+         Choose 'Allow' to grant access (you can revoke later from the vault), \
          or 'Deny' to block the request."
     );
 
@@ -249,6 +278,12 @@ fn request_user_permission(
         to_cbor(&pending).map_err(|e| DelegateError::Other(format!("serialize pending: {e}")))?;
     ctx.write(&pending_bytes);
 
+    // Two-button prompt: persistent grant on Allow, no grant on Deny. The
+    // older "Allow Once" / "Always Allow" pair was removed because the
+    // "Allow Once" path's revoke-after-replay used `revoke_all`, which
+    // would also wipe any pre-existing grants the same requestor held on
+    // this fingerprint. Keeping the model simple (every grant persists
+    // until explicit revoke) avoids that footgun.
     let user_request = OutboundDelegateMsg::RequestUserInput(UserInputRequest {
         request_id,
         message: {
@@ -257,8 +292,7 @@ fn request_user_permission(
                 .expect("string to NotificationMessage")
         },
         responses: vec![
-            ClientResponse::new(b"Allow Once".to_vec()),
-            ClientResponse::new(b"Always Allow".to_vec()),
+            ClientResponse::new(b"Allow".to_vec()),
             ClientResponse::new(b"Deny".to_vec()),
         ],
     });
@@ -297,12 +331,23 @@ fn request_any_access(
         )]);
     }
 
+    // Cap the number of fingerprint buttons so a user with many ghostkeys
+    // doesn't get a wall of buttons (and so a future prompt-rendering
+    // change isn't burdened with arbitrary list lengths). The cap matches
+    // freenet-stdlib's MAX_LABELS for `UserInputRequest::responses` minus
+    // one slot reserved for the trailing Deny button.
+    const MAX_BUTTON_FINGERPRINTS: usize = 9;
+    let fingerprints: Vec<String> = fingerprints
+        .into_iter()
+        .take(MAX_BUTTON_FINGERPRINTS)
+        .collect();
+
     let request_id = next_prompt_request_id();
     let requestor_desc = requestor_short_label(requestor);
 
-    // Build prompt text. The fingerprint list is short (cap on
-    // MAX_PENDING_PROMPTS keeps it bounded in practice) and goes into
-    // the message body so the user can see which key each button picks.
+    // Build prompt text. The fingerprint list goes into the message body
+    // so the user can see which key each button picks; the buttons
+    // themselves carry the fingerprint as part of the label.
     let mut body = format!(
         "{requestor_desc} wants to use one of your ghostkey identities to read your public certificate and sign messages on your behalf.\n\n\
          Pick a key to share, or deny."
@@ -375,13 +420,13 @@ fn handle_user_response(
     }
 }
 
-/// Single-fingerprint approval flow: the user clicked Allow Once / Always
-/// Allow / Deny on a permission prompt for a specific key. On approval we
-/// grant the third-party scope set (or the full scope set if the caller
-/// is the same identity that already imported the key, but that branch is
-/// unreachable in practice -- the importer auto-grants on import), replay
-/// the original request, and revert the grant if the user chose
-/// "Allow Once".
+/// Single-fingerprint approval flow: the user clicked Allow or Deny on a
+/// permission prompt for a specific key. On approval we grant the
+/// third-party scope set, then replay the original request. The grant
+/// persists until explicit revoke (the prior "Allow Once" path was
+/// removed because its revoke-after-replay used `revoke_all`, which
+/// would also drop unrelated pre-existing grants the same requestor
+/// held on this fingerprint).
 fn handle_fingerprint_response(
     ctx: &mut DelegateCtx,
     user_resp: &freenet_stdlib::prelude::UserInputResponse<'_>,
@@ -390,7 +435,7 @@ fn handle_fingerprint_response(
     original_payload: Vec<u8>,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
     let response_bytes = user_resp.response.bytes();
-    let approved = response_bytes == b"Allow Once" || response_bytes == b"Always Allow";
+    let approved = response_bytes == b"Allow";
 
     if !approved {
         logging::info(&format!("User denied access to ghostkey {fingerprint}"));
@@ -405,26 +450,19 @@ fn handle_fingerprint_response(
         )]);
     }
 
-    let permanent = response_bytes == b"Always Allow";
-    logging::info(&format!(
-        "User approved access to ghostkey {fingerprint} (permanent={permanent})"
-    ));
+    logging::info(&format!("User approved access to ghostkey {fingerprint}"));
 
     // Grant the third-party scope set so the requesting app can read the
     // public certificate and sign messages with this key. Higher-privilege
-    // operations (Export/Delete/Admin) deliberately stay vault-only.
+    // operations (Export/Delete/Admin) deliberately stay vault-only and
+    // never reach this code path -- `handle_request` hard-denies them
+    // before a prompt fires.
     permissions::grant_third_party(ctx, &fingerprint, &requestor);
 
     let request: GhostkeyRequest = from_cbor(&original_payload)
         .map_err(|e| DelegateError::Other(format!("deserialize original request: {e}")))?;
 
     let response = handlers::handle(ctx, request, &requestor);
-
-    if !permanent {
-        // "Allow Once" -- remove the just-added grant after replaying the
-        // request. Subsequent calls from the same requestor will re-prompt.
-        permissions::revoke_all(ctx, &fingerprint, &requestor);
-    }
 
     let response_bytes =
         to_cbor(&response).map_err(|e| DelegateError::Other(format!("serialize response: {e}")))?;
@@ -483,15 +521,65 @@ fn handle_any_access_response(
     ));
     permissions::grant_third_party(ctx, &fp, &requestor);
 
-    // Synthesise a one-element GhostKeyList for the granted key. This is
-    // exactly what `ListGhostKeys` would return now that the grant
-    // exists; we route through `handlers::handle` to keep the response
-    // shape canonical.
-    let response = handlers::handle(ctx, GhostkeyRequest::ListGhostKeys, &requestor);
-
+    // Synthesise a `GhostKeyList` containing exactly the key the user
+    // chose to share. Routing through `ListGhostKeys` is wrong here: if
+    // the same requestor already had a grant on other keys (from a prior
+    // share), `ListGhostKeys` would return ALL of them, leaking more
+    // identities than the user just authorised in this prompt.
+    let response = handlers::lookup_single_key(ctx, &fp);
     let response_bytes =
         to_cbor(&response).map_err(|e| DelegateError::Other(format!("serialize response: {e}")))?;
     Ok(vec![OutboundDelegateMsg::ApplicationMessage(
         ApplicationMessage::new(response_bytes),
     )])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freenet_stdlib::prelude::ContractInstanceId;
+
+    fn webapp(seed: u8) -> SignatureRequestor {
+        let bytes = [seed; 32];
+        let id = ContractInstanceId::from_bytes(bs58::encode(&bytes).into_string()).unwrap();
+        SignatureRequestor::WebApp(id)
+    }
+
+    /// Wire-pin for `PendingPrompt`. The enum is persisted via
+    /// `ctx.write` between two delegate invocations (prompt emit, then
+    /// user response). A rename or reorder of variants here would silently
+    /// drop every in-flight prompt the next time a user clicks Allow,
+    /// because the second invocation's `from_cbor` would fail. This test
+    /// fails on any such change, forcing an explicit migration plan.
+    #[test]
+    fn pending_prompt_wire_format_is_stable() {
+        let fp = PendingPrompt::Fingerprint {
+            request_id: 7,
+            fingerprint: "ciQaxxSwKF8".into(),
+            requestor: webapp(0xab),
+            original_payload: vec![1, 2, 3],
+        };
+        let any = PendingPrompt::AnyAccess {
+            request_id: 8,
+            requestor: webapp(0xcd),
+            fingerprints: vec!["fp1".into(), "fp2".into()],
+        };
+        for variant in [&fp, &any] {
+            let bytes = to_cbor(variant).unwrap();
+            // Round-trip exactly.
+            let _decoded: PendingPrompt = from_cbor(&bytes).unwrap();
+        }
+
+        // Pin the JSON variant names so a rename is loud.
+        let fp_json = serde_json::to_string(&fp).unwrap();
+        assert!(
+            fp_json.starts_with(r#"{"Fingerprint":"#),
+            "Fingerprint variant name shifted: {fp_json}"
+        );
+        let any_json = serde_json::to_string(&any).unwrap();
+        assert!(
+            any_json.starts_with(r#"{"AnyAccess":"#),
+            "AnyAccess variant name shifted: {any_json}"
+        );
+    }
 }

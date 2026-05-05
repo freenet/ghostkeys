@@ -233,6 +233,37 @@ fn handle_import(
     }
 }
 
+/// Build a `GhostKeyList` containing exactly the named key, with no
+/// permission filtering. Used by the `RequestAnyAccess` approval path so
+/// the response carries only the fingerprint the user just chose to
+/// share -- routing through `handle_list` would leak any other keys the
+/// requestor previously had `ReadPublic` on.
+pub(crate) fn lookup_single_key(ctx: &DelegateCtx, fp: &str) -> GhostkeyResponse {
+    match load_cert(ctx, fp) {
+        Some(cert) => {
+            let label = ctx
+                .get_secret(&label_key(fp))
+                .and_then(|b| String::from_utf8(b).ok());
+            GhostkeyResponse::GhostKeyList {
+                keys: vec![GhostKeyInfo {
+                    fingerprint: fp.to_string(),
+                    label,
+                    notary_info: notary_info(&cert),
+                    verifying_key_bytes: Some(cert.verifying_key.as_bytes().to_vec()),
+                }],
+            }
+        }
+        // The fp came from `load_index(ctx)` at prompt-emit time, so
+        // missing here means the cert was deleted between prompt and
+        // approval. Fall through to KeyNotFound rather than an empty
+        // list, which would otherwise look like a successful share with
+        // a zero-element result.
+        None => GhostkeyResponse::KeyNotFound {
+            fingerprint: fp.to_string(),
+        },
+    }
+}
+
 fn handle_list(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyResponse {
     let index = load_index(ctx);
     let mut keys = Vec::new();
