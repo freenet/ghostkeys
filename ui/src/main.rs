@@ -1,6 +1,5 @@
 mod api;
 mod auto_import;
-mod backup;
 mod components;
 mod migration;
 
@@ -52,16 +51,21 @@ fn App() -> Element {
                 return;
             }
 
-            // Recover ghostkeys stored under previous delegate versions.
-            migration::try_migrate().await;
-
-            // Load existing ghostkeys and default key from delegate storage
-            load_ghostkeys().await;
+            // Load what the current delegate already holds, so the vault
+            // renders immediately and the sweep below knows what it can skip.
+            let held = load_ghostkeys().await;
             components::ghostkey_list::load_default_key();
 
+            // Import a just-purchased key BEFORE sweeping legacy delegates.
+            // It exists nowhere else, and the sweep can take seconds per
+            // legacy entry on a slow node -- there is no reason to make the
+            // one irreplaceable key wait behind it.
             if let Some(pending) = pending_import {
                 auto_import::import(pending).await;
             }
+
+            // Recover ghostkeys stranded under previous delegate versions.
+            migration::try_migrate(held).await;
         });
     });
 
@@ -150,24 +154,34 @@ async fn connect_and_register() -> Result<(), String> {
     delegate::register_delegate().await
 }
 
-async fn load_ghostkeys() {
+/// Load the identities the current delegate holds, returning their
+/// fingerprints so the legacy sweep can skip what is already here.
+///
+/// An empty result on failure is the safe direction: the sweep then re-imports
+/// rather than wrongly skipping a key it should have recovered.
+async fn load_ghostkeys() -> Vec<String> {
     use ghostkey_common::{GhostkeyRequest, GhostkeyResponse};
 
     match delegate::send_request(GhostkeyRequest::ListGhostKeys).await {
         Ok(GhostkeyResponse::GhostKeyList { keys }) => {
-            if !keys.is_empty() {
-                dioxus::logger::tracing::info!("Loaded {} ghostkeys from delegate", keys.len());
-                for key in keys {
-                    components::ghostkey_list::add_ghostkey(key);
-                }
+            if keys.is_empty() {
+                return Vec::new();
             }
+            dioxus::logger::tracing::info!("Loaded {} ghostkeys from delegate", keys.len());
+            let fingerprints = keys.iter().map(|k| k.fingerprint.clone()).collect();
+            for key in keys {
+                components::ghostkey_list::add_ghostkey(key);
+            }
+            fingerprints
         }
         Ok(GhostkeyResponse::Error { message }) => {
             dioxus::logger::tracing::warn!("Failed to load ghostkeys: {message}");
+            Vec::new()
         }
-        Ok(_) => {}
+        Ok(_) => Vec::new(),
         Err(e) => {
             dioxus::logger::tracing::warn!("Failed to load ghostkeys: {e}");
+            Vec::new()
         }
     }
 }

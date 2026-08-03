@@ -22,9 +22,15 @@ use ghostkey_common::{GhostkeyRequest, GhostkeyResponse};
 /// stranded under that delegate and we must look again later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DelegateCallError {
-    /// The node has no such delegate registered. For a legacy delegate this
-    /// is conclusive: a delegate the node never registered cannot be holding
-    /// secrets, so there is nothing to migrate from it.
+    /// The node reported no such delegate.
+    ///
+    /// Useful as a fast skip, but NOT proof that nothing is stored under that
+    /// delegate, and it must never be treated as such. Two reasons, both
+    /// verified in freenet-core: the websocket layer synthesizes this error
+    /// from a per-key backoff throttle without ever consulting the delegate
+    /// store (`client_events/websocket.rs`), and `UnregisterDelegate` removes
+    /// a delegate's code while leaving its secrets in place -- the delegate
+    /// store and the secrets store are separate.
     NotRegistered,
     /// The node reported a delegate-level failure (execution error, missing
     /// secret, registration failure). We reached the delegate but the call
@@ -78,11 +84,59 @@ mod real {
         include_bytes!("../../../target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm");
 
     type PendingReply = Result<GhostkeyResponse, DelegateCallError>;
-    type PendingQueue = VecDeque<oneshot::Sender<PendingReply>>;
 
-    /// Pending responses keyed by delegate key bytes, each with a FIFO queue.
-    static PENDING: LazyLock<Mutex<HashMap<Vec<u8>, PendingQueue>>> =
+    struct Waiter {
+        token: u64,
+        sender: oneshot::Sender<PendingReply>,
+    }
+
+    /// In-flight calls to one delegate.
+    ///
+    /// Delegate replies carry no request id (freenet-stdlib has a standing TODO
+    /// about this), so a reply can only be matched to a request by position.
+    /// That correspondence breaks the moment a caller gives up: the node's late
+    /// reply would otherwise be handed to whoever is waiting NOW.
+    ///
+    /// That is not a cosmetic mix-up here. In the migration sweep it would
+    /// resolve one key's `ImportGhostKey` with another key's result, counting a
+    /// key as recovered that was never imported.
+    #[derive(Default)]
+    struct DelegateCalls {
+        waiters: VecDeque<Waiter>,
+        /// Replies still owed to callers that timed out. The node answers in
+        /// request order, so this many incoming replies belong to abandoned
+        /// requests and must be discarded rather than delivered.
+        abandoned: usize,
+    }
+
+    /// Ceiling on `abandoned`. If the node ever drops a request without
+    /// replying at all, the skip counter would otherwise consume one
+    /// legitimate reply per lost one and cascade. Capping trades that runaway
+    /// for at most this many mis-deliveries in a case that should not happen.
+    const MAX_ABANDONED: usize = 8;
+
+    /// Pending calls, keyed by delegate key bytes.
+    static PENDING: LazyLock<Mutex<HashMap<Vec<u8>, DelegateCalls>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    fn next_token() -> u64 {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Take the reply that belongs to the next waiter, honouring abandonments.
+    ///
+    /// Returns `None` when the reply belongs to a caller that already gave up
+    /// (or to no one at all), in which case it must be dropped.
+    fn claim_waiter(key_bytes: &[u8]) -> Option<oneshot::Sender<PendingReply>> {
+        let mut pending = PENDING.lock().ok()?;
+        let calls = pending.get_mut(key_bytes)?;
+        if calls.abandoned > 0 {
+            calls.abandoned -= 1;
+            return None;
+        }
+        calls.waiters.pop_front().map(|w| w.sender)
+    }
 
     fn current_delegate_key() -> DelegateKey {
         let delegate_code = DelegateCode::from(DELEGATE_WASM.to_vec());
@@ -151,6 +205,7 @@ mod real {
 
         let (sender, receiver) = oneshot::channel();
         let key_bytes = delegate_key.encode().into_bytes();
+        let token = next_token();
 
         {
             let mut pending = PENDING
@@ -158,8 +213,9 @@ mod real {
                 .map_err(|e| DelegateCallError::Transport(format!("lock poisoned: {e}")))?;
             pending
                 .entry(key_bytes.clone())
-                .or_insert_with(VecDeque::new)
-                .push_back(sender);
+                .or_default()
+                .waiters
+                .push_back(Waiter { token, sender });
         }
 
         let app_msg = freenet_stdlib::prelude::ApplicationMessage::new(payload);
@@ -179,9 +235,12 @@ mod real {
         };
 
         if let Err(e) = api_result {
+            // The node never received this, so no reply is coming: drop our own
+            // waiter and do NOT count it as abandoned. Removing by token rather
+            // than by position, so a concurrent call's waiter is never taken.
             if let Ok(mut pending) = PENDING.lock() {
-                if let Some(queue) = pending.get_mut(&key_bytes) {
-                    queue.pop_back();
+                if let Some(calls) = pending.get_mut(&key_bytes) {
+                    calls.waiters.retain(|w| w.token != token);
                 }
             }
             return Err(DelegateCallError::Transport(format!("send failed: {e}")));
@@ -198,9 +257,20 @@ mod real {
                 )),
             },
             Either::Right((_, _)) => {
+                // Give up on this call. Remove OUR waiter by token -- popping
+                // the front would discard a concurrent call's waiter, and with
+                // mixed deadlines in play (10s here, 5s for legacy probes) the
+                // front is not necessarily ours.
+                //
+                // A reply may still be in flight for it, so record that one
+                // incoming reply is owed to a caller who is no longer there.
                 if let Ok(mut pending) = PENDING.lock() {
-                    if let Some(queue) = pending.get_mut(&key_bytes) {
-                        queue.pop_front();
+                    if let Some(calls) = pending.get_mut(&key_bytes) {
+                        let waiting = calls.waiters.len();
+                        calls.waiters.retain(|w| w.token != token);
+                        if calls.waiters.len() < waiting && calls.abandoned < MAX_ABANDONED {
+                            calls.abandoned += 1;
+                        }
                     }
                 }
                 Err(DelegateCallError::TimedOut)
@@ -222,15 +292,12 @@ mod real {
                         }
                     };
 
-                    if let Ok(mut pending) = PENDING.lock() {
-                        if let Some(queue) = pending.get_mut(&key_bytes) {
-                            if let Some(sender) = queue.pop_front() {
-                                let _ = sender.send(Ok(gk_response));
-                            } else {
-                                warn!("Response for delegate but no pending request");
-                            }
-                        } else {
-                            warn!("Response from unknown delegate key");
+                    match claim_waiter(&key_bytes) {
+                        Some(sender) => {
+                            let _ = sender.send(Ok(gk_response));
+                        }
+                        None => {
+                            warn!("Discarding delegate response with no waiting caller");
                         }
                     }
                 }
@@ -238,14 +305,18 @@ mod real {
         }
     }
 
-    /// Resolve the waiting request for a node-reported error.
+    /// Resolve the waiting call for a node-reported error.
     ///
-    /// Without this every delegate error was logged and dropped, so the caller
-    /// sat on its oneshot until the timeout fired -- a request to a delegate
-    /// the node does not have took the full timeout to fail and reported
-    /// "timed out" rather than "not registered". Migration probes every legacy
-    /// delegate, most of which a given node never registered, so that was both
-    /// the slow path and the ambiguous one.
+    /// Without this, every delegate error was logged to the console and
+    /// dropped, so the caller sat on its oneshot until the deadline and then
+    /// reported "timed out" for something the node had already explained.
+    ///
+    /// Scope note, measured rather than assumed: this does NOT speed up probes
+    /// for a delegate the node simply does not have. Driving the published
+    /// vault against a live node shows those requests draw no response at all,
+    /// not an error -- so they still cost a full deadline. What this recovers
+    /// is the errors the node *does* send (a throttled key, a missing secret),
+    /// which previously vanished into the console.
     pub fn handle_client_error(err: &ClientError) {
         let Some((key, call_error)) = attribute_error(err) else {
             // Not attributable to a specific delegate, so there is no way to
@@ -256,22 +327,25 @@ mod real {
         };
 
         let key_bytes = key.encode().into_bytes();
-        if let Ok(mut pending) = PENDING.lock() {
-            if let Some(queue) = pending.get_mut(&key_bytes) {
-                if let Some(sender) = queue.pop_front() {
-                    let _ = sender.send(Err(call_error));
-                    return;
-                }
+        match claim_waiter(&key_bytes) {
+            Some(sender) => {
+                let _ = sender.send(Err(call_error));
+            }
+            None => {
+                warn!("Discarding delegate error with no waiting caller: {err}");
             }
         }
-        warn!("Delegate error with no pending request: {err}");
     }
 
-    /// Map a node error onto the delegate it concerns, when it names one.
+    /// Map a node error onto the delegate call it concerns, when it names one.
     ///
-    /// `ExecutionError` and `ForbiddenSecretAccess` carry no delegate key, so
-    /// they are deliberately left unattributed rather than resolved against
-    /// whichever request happens to be at the front of some queue.
+    /// Deliberately narrow. `ExecutionError` and `ForbiddenSecretAccess` carry
+    /// no delegate key at all, and `RegisterError` names one but corresponds to
+    /// no waiting call -- `register_delegate` returns as soon as the send
+    /// succeeds and never enqueues a waiter, so attributing it would resolve
+    /// some *other* in-flight request for that delegate with a registration
+    /// failure and leave the queue misaligned from then on. All three are left
+    /// to the timeout instead.
     fn attribute_error(err: &ClientError) -> Option<(DelegateKey, DelegateCallError)> {
         let ErrorKind::RequestError(RequestError::DelegateError(delegate_error)) = err.kind()
         else {
@@ -280,10 +354,6 @@ mod real {
 
         match delegate_error {
             DelegateError::Missing(key) => Some((key.clone(), DelegateCallError::NotRegistered)),
-            DelegateError::RegisterError(key) => Some((
-                key.clone(),
-                DelegateCallError::Failed("delegate registration failed".into()),
-            )),
             DelegateError::MissingSecret { key, secret } => Some((
                 key.clone(),
                 DelegateCallError::Failed(format!("missing secret {secret}")),

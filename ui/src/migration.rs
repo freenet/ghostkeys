@@ -3,63 +3,89 @@
 //! Every change to the delegate WASM re-keys the delegate -- its key is
 //! `BLAKE3(BLAKE3(wasm) || params)` -- which moves the secret namespace it
 //! reads and writes. Secrets stored under a predecessor are not deleted, only
-//! unreachable, so the vault walks `legacy_delegates.toml` on startup and
+//! unreachable, so the vault sweeps `legacy_delegates.toml` on startup and
 //! re-imports whatever it finds.
 //!
 //! On a hosted node this is the *only* safety net. freenet-core's own
 //! predecessor copy-forward deliberately skips user-scope secrets (the
 //! per-user DEK is not derivable at rest), so nothing else will carry a
 //! hosted user's keys across a re-key.
+//!
+//! # Why there is no "migration done" flag
+//!
+//! There used to be one, in `localStorage`, and it never did anything: the
+//! vault runs in the shell's iframe, which is sandboxed without
+//! `allow-same-origin`, so its origin is opaque and every `localStorage`
+//! access throws. Verified against a live node -- the app frame reports
+//! `SecurityError: The document is sandboxed and lacks the 'allow-same-origin'
+//! flag`, while the top-level shell reads and writes storage normally.
+//!
+//! It should not come back even if storage becomes available, because no
+//! available signal would justify setting it. The obvious candidate -- "the
+//! node says that delegate is not registered" -- is not proof of absence (see
+//! `DelegateCallError::NotRegistered`), and neither is an empty export:
+//! `ExportAllGhostKeys` silently skips any key the caller lacks `Export` scope
+//! on, or whose material fails to decode, and the reply carries no count to
+//! check against. A flag that permanently stops the vault looking, set on
+//! evidence that cannot support it, is exactly how keys get stranded.
+//!
+//! Sweeping on every startup is therefore the behaviour, not a fallback --
+//! and measured against a live node, it is also what already happens today,
+//! since the flag never persisted.
+//!
+//! It is not free. A node that does not have a given legacy delegate does not
+//! answer the probe *at all* -- verified by driving the published vault in a
+//! browser: nine legacy entries, nine `Timeout waiting for delegate response`,
+//! and no error response for any of them. So the sweep costs one full deadline
+//! per absent entry. Two things keep that tolerable: it runs after the vault
+//! has already loaded and rendered what the current delegate holds, so the
+//! user is never waiting on it, and the deadline is sized for a local WASM
+//! call rather than a network round trip.
 
-/// How many inconclusive passes to make before accepting that a definite
-/// answer is not coming, and letting the migration rest.
-///
-/// A ceiling is required because "undetermined" is also what an unhealthy or
-/// offline node looks like. Without one, a node that never answers would make
-/// the vault re-probe every legacy delegate on every open, forever.
-const MAX_MIGRATION_ATTEMPTS: u32 = 5;
-
-/// What one pass over the legacy delegate table established.
+/// What one pass over the legacy delegate table established. Reported to the
+/// user; it does not gate anything.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MigrationOutcome {
-    /// Keys successfully re-imported under the current delegate.
-    pub migrated: usize,
-    /// Legacy delegates that gave no definite answer. We do not know whether
-    /// these hold keys, so the migration cannot be called finished.
+    /// Keys recovered that the current delegate did not already hold.
+    pub recovered: usize,
+    /// Legacy delegates that gave no definite answer, so we do not know
+    /// whether they hold keys.
     pub undetermined: usize,
-    /// Keys a legacy delegate handed over that would not re-import. These are
-    /// still only in the predecessor.
+    /// Keys a legacy delegate handed over that would not re-import.
     pub failed_imports: usize,
 }
 
 impl MigrationOutcome {
-    /// True only when every legacy delegate answered *and* every key it held
-    /// was re-imported -- the sole state in which "there is nothing left to
-    /// migrate" is a fact rather than an assumption.
+    /// Whether every legacy delegate answered and every key it offered was
+    /// re-imported. Purely a reporting distinction -- the sweep runs again on
+    /// the next startup either way.
     pub(crate) fn is_conclusive(&self) -> bool {
         self.undetermined == 0 && self.failed_imports == 0
     }
-}
 
-/// Whether to record the migration as finished.
-///
-/// Recording it is what stops the vault ever looking again, so an
-/// inconclusive pass must not record it. The previous implementation recorded
-/// it unconditionally at the end of every run, so one transient failure -- a
-/// node still starting up, a five-second timeout -- permanently stranded the
-/// user's keys under a predecessor delegate, with nothing but a console line
-/// to say so. That is the shape of the loss reported in freenet/ghostkeys#3.
-pub(crate) fn should_mark_done(outcome: &MigrationOutcome, attempts_so_far: u32) -> bool {
-    outcome.is_conclusive() || attempts_so_far + 1 >= MAX_MIGRATION_ATTEMPTS
+    /// Whether the user needs telling that something could not be checked.
+    pub(crate) fn needs_user_attention(&self) -> bool {
+        !self.is_conclusive()
+    }
 }
 
 /// Recover ghostkeys stored under earlier delegate versions.
-pub async fn try_migrate() {
+///
+/// `already_held` is the set of fingerprints the current delegate already has,
+/// so a key present in both is neither re-imported nor reported as recovered
+/// on every startup.
+pub async fn try_migrate(already_held: Vec<String>) {
     #[cfg(all(
         target_family = "wasm",
         not(any(feature = "no-sync", feature = "example-data"))
     ))]
-    real::run().await;
+    real::run(already_held).await;
+
+    #[cfg(not(all(
+        target_family = "wasm",
+        not(any(feature = "no-sync", feature = "example-data"))
+    )))]
+    let _ = already_held;
 }
 
 #[cfg(all(
@@ -67,11 +93,13 @@ pub async fn try_migrate() {
     not(any(feature = "no-sync", feature = "example-data"))
 ))]
 mod real {
+    use std::collections::BTreeSet;
+
     use dioxus::logger::tracing::{info, warn};
     use freenet_stdlib::prelude::{CodeHash, DelegateKey};
     use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
 
-    use super::{should_mark_done, MigrationOutcome};
+    use super::MigrationOutcome;
     use crate::api;
     use crate::api::delegate::DelegateCallError;
     use crate::components::ghostkey_list;
@@ -80,43 +108,33 @@ mod real {
     // Generated by build.rs from legacy_delegates.toml
     include!(concat!(env!("OUT_DIR"), "/legacy_delegates.rs"));
 
-    const MIGRATION_FLAG: &str = "ghostkey_migration_done";
-    const MIGRATION_ATTEMPTS: &str = "ghostkey_migration_attempts";
+    /// Seconds to wait for a legacy delegate to answer.
+    ///
+    /// A delegate the node actually has is a local WASM call that answers in
+    /// milliseconds, so this only ever bounds the wait for one the node does
+    /// not have -- and those never answer, so the deadline is paid in full for
+    /// each. At the previous 5s, ten entries meant ~50s of background probing
+    /// on every vault open. Erring short is safe: a legacy delegate that does
+    /// not answer in time is recorded as undetermined and the user is told,
+    /// rather than being silently written off.
+    const LEGACY_PROBE_TIMEOUT_SECS: u64 = 3;
 
-    /// Seconds to wait for a legacy delegate to answer. A registered delegate
-    /// runs locally and replies fast, and an unregistered one now fails
-    /// immediately via `DelegateCallError::NotRegistered`, so this deadline is
-    /// only reached when the node itself is unresponsive.
-    const LEGACY_PROBE_TIMEOUT_SECS: u64 = 5;
-
-    pub(super) async fn run() {
-        if LEGACY_DELEGATES.is_empty() || is_migration_done() {
+    pub(super) async fn run(already_held: Vec<String>) {
+        if LEGACY_DELEGATES.is_empty() {
             return;
         }
 
-        let attempts = read_attempts();
         info!(
-            "Checking {} legacy delegate(s) for stored ghostkeys (attempt {})",
-            LEGACY_DELEGATES.len(),
-            attempts + 1
+            "Sweeping {} legacy delegate(s) for stored ghostkeys",
+            LEGACY_DELEGATES.len()
         );
 
-        let outcome = run_pass().await;
+        let outcome = run_pass(already_held.into_iter().collect()).await;
         report(&outcome);
-
-        if should_mark_done(&outcome, attempts) {
-            mark_migration_done();
-        } else {
-            write_attempts(attempts + 1);
-        }
     }
 
     /// One sweep of the legacy delegate table.
-    ///
-    /// Probes are sequential on purpose: `send_to_delegate` holds the
-    /// `WEB_API` write guard across its await, so two concurrent delegate
-    /// calls would double-borrow and panic.
-    async fn run_pass() -> MigrationOutcome {
+    async fn run_pass(mut held: BTreeSet<String>) -> MigrationOutcome {
         let current_key = api::delegate::get_current_delegate_key();
         let mut outcome = MigrationOutcome::default();
 
@@ -134,10 +152,10 @@ mod real {
             .await
             {
                 Ok(GhostkeyResponse::ExportAllResult { keys }) => keys,
-                // The node has no such delegate registered, so it cannot be
-                // holding secrets: this entry is settled, not unknown. It is
-                // also the common case, since most nodes never ran most
-                // previous vault versions.
+                // Skip cheaply, but do NOT read this as "nothing is stored
+                // here": the node synthesizes it from a backoff throttle, and
+                // an unregistered delegate can still own secrets. Nothing is
+                // sealed on the strength of it -- the next startup asks again.
                 Err(DelegateCallError::NotRegistered) => continue,
                 Err(e) => {
                     warn!("Legacy delegate {} undetermined: {e}", legacy_key.encode());
@@ -151,16 +169,14 @@ mod real {
                 }
             };
 
-            if exported.is_empty() {
-                continue;
-            }
-            info!(
-                "Found {} ghostkey(s) under legacy delegate {}",
-                exported.len(),
-                legacy_key.encode()
-            );
-
             for key in &exported {
+                // Already in the current delegate: skip, so a predecessor that
+                // keeps its copy forever does not re-import and re-announce
+                // the same identities on every startup.
+                if held.contains(&key.fingerprint) {
+                    continue;
+                }
+
                 match api::delegate::send_request(GhostkeyRequest::ImportGhostKey {
                     certificate_pem: key.certificate_pem.clone(),
                     signing_key_pem: key.signing_key_pem.clone(),
@@ -173,13 +189,14 @@ mod real {
                         notary_info,
                     }) => {
                         info!("Recovered ghostkey {fingerprint}");
+                        held.insert(fingerprint.clone());
                         ghostkey_list::add_ghostkey(GhostKeyInfo {
                             fingerprint: fingerprint.clone(),
                             label: key.label.clone(),
                             notary_info,
                             verifying_key_bytes: None,
                         });
-                        outcome.migrated += 1;
+                        outcome.recovered += 1;
 
                         if let Some(label) = &key.label {
                             let _ = api::delegate::send_request(GhostkeyRequest::SetLabel {
@@ -189,10 +206,8 @@ mod real {
                             .await;
                         }
                     }
-                    // Anything else means the key is still only in the
-                    // predecessor. Counting it as migrated would let the pass
-                    // report success and seal the flag over a key we failed to
-                    // move.
+                    // The key is still only in the predecessor. Counting it as
+                    // recovered would report a success that did not happen.
                     other => {
                         warn!("Could not re-import {}: {other:?}", key.fingerprint);
                         outcome.failed_imports += 1;
@@ -205,19 +220,19 @@ mod real {
     }
 
     fn report(outcome: &MigrationOutcome) {
-        if outcome.migrated > 0 {
+        if outcome.recovered > 0 {
             toast::show(
                 format!(
                     "Recovered {} ghostkey(s) from a previous vault version",
-                    outcome.migrated
+                    outcome.recovered
                 ),
                 ToastKind::Success,
             );
         }
 
-        if !outcome.is_conclusive() {
+        if outcome.needs_user_attention() {
             warn!(
-                "Migration inconclusive: {} undetermined delegate(s), {} failed import(s)",
+                "Migration sweep incomplete: {} undetermined delegate(s), {} failed import(s)",
                 outcome.undetermined, outcome.failed_imports
             );
             toast::show(
@@ -228,62 +243,15 @@ mod real {
             );
         }
     }
-
-    fn local_storage() -> Option<web_sys::Storage> {
-        web_sys::window().and_then(|w| w.local_storage().ok().flatten())
-    }
-
-    fn current_delegate_id() -> String {
-        api::delegate::get_current_delegate_key().encode()
-    }
-
-    /// Both markers are namespaced by the current delegate id so a republish
-    /// starts the recovery over: the new delegate has a fresh namespace, and
-    /// its predecessor is exactly what we then need to sweep.
-    fn is_migration_done() -> bool {
-        local_storage()
-            .and_then(|s| s.get_item(MIGRATION_FLAG).ok().flatten())
-            .is_some_and(|stored| stored == current_delegate_id())
-    }
-
-    fn mark_migration_done() {
-        if let Some(storage) = local_storage() {
-            let _ = storage.set_item(MIGRATION_FLAG, &current_delegate_id());
-        }
-    }
-
-    fn read_attempts() -> u32 {
-        let current = current_delegate_id();
-        local_storage()
-            .and_then(|s| s.get_item(MIGRATION_ATTEMPTS).ok().flatten())
-            .and_then(|stored| {
-                let (id, count) = stored.split_once(':')?;
-                if id == current {
-                    count.parse().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0)
-    }
-
-    fn write_attempts(attempts: u32) {
-        if let Some(storage) = local_storage() {
-            let _ = storage.set_item(
-                MIGRATION_ATTEMPTS,
-                &format!("{}:{attempts}", current_delegate_id()),
-            );
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn outcome(migrated: usize, undetermined: usize, failed_imports: usize) -> MigrationOutcome {
+    fn outcome(recovered: usize, undetermined: usize, failed_imports: usize) -> MigrationOutcome {
         MigrationOutcome {
-            migrated,
+            recovered,
             undetermined,
             failed_imports,
         }
@@ -292,44 +260,37 @@ mod tests {
     #[test]
     fn a_pass_that_found_nothing_is_conclusive() {
         assert!(outcome(0, 0, 0).is_conclusive());
-        assert!(should_mark_done(&outcome(0, 0, 0), 0));
+        assert!(!outcome(0, 0, 0).needs_user_attention());
     }
 
     #[test]
     fn a_pass_that_recovered_everything_is_conclusive() {
         assert!(outcome(3, 0, 0).is_conclusive());
-        assert!(should_mark_done(&outcome(3, 0, 0), 0));
+        assert!(!outcome(3, 0, 0).needs_user_attention());
     }
 
-    /// Regression for the loss behind freenet/ghostkeys#3: the old
-    /// implementation recorded the migration as finished no matter what
-    /// happened, so one unreachable legacy delegate sealed the flag and left
-    /// the user's keys stranded under a predecessor.
+    /// A legacy delegate we could not reach may still be holding keys, so the
+    /// user has to be told rather than left with a silently partial sweep.
     #[test]
-    fn an_undetermined_delegate_leaves_the_migration_open() {
+    fn an_undetermined_delegate_needs_user_attention() {
         let o = outcome(0, 1, 0);
         assert!(!o.is_conclusive());
-        assert!(!should_mark_done(&o, 0));
+        assert!(o.needs_user_attention());
     }
 
     /// A key pulled out of a predecessor but not re-imported is still only in
-    /// the predecessor, so the pass has not finished its job.
+    /// the predecessor, even though the sweep otherwise completed.
     #[test]
-    fn a_failed_import_leaves_the_migration_open() {
+    fn a_failed_import_needs_user_attention() {
         let o = outcome(1, 0, 1);
         assert!(!o.is_conclusive());
-        assert!(!should_mark_done(&o, 0));
+        assert!(o.needs_user_attention());
     }
 
+    /// Recovering keys does not excuse an entry we could not check.
     #[test]
-    fn an_inconclusive_pass_gives_up_at_the_attempt_ceiling() {
-        let o = outcome(0, 1, 0);
-        for attempts in 0..MAX_MIGRATION_ATTEMPTS - 1 {
-            assert!(
-                !should_mark_done(&o, attempts),
-                "gave up after {attempts} attempt(s), before the ceiling"
-            );
-        }
-        assert!(should_mark_done(&o, MAX_MIGRATION_ATTEMPTS - 1));
+    fn recovery_does_not_mask_an_unchecked_delegate() {
+        let o = outcome(5, 1, 0);
+        assert!(o.needs_user_attention());
     }
 }

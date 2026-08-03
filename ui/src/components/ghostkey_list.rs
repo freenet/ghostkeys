@@ -88,9 +88,6 @@ fn export_all() {
                         }
                     }
                 }
-                // The user now holds a copy of these outside the vault, so
-                // stop warning about them.
-                crate::backup::mark_backed_up(keys.iter().map(|k| k.fingerprint.clone()));
                 toast::show(
                     format!("Exported {} ghostkey(s)", keys.len()),
                     ToastKind::Success,
@@ -363,14 +360,6 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                         }
                     }
                     div { class: "card-meta",
-                        if !crate::backup::is_backed_up(&info.fingerprint) {
-                            button {
-                                class: "backup-warning",
-                                title: "This identity exists only inside this vault. Download a backup so you can restore it.",
-                                onclick: move |_| export_all(),
-                                "not backed up"
-                            }
-                        }
                         if let Some(date) = extract_date(&info.notary_info) {
                             span { class: "meta-date", "tier est. {date}" }
                         }
