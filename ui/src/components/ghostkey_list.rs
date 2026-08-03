@@ -273,6 +273,28 @@ fn test_permission_prompt() {
 /// that the file exists. `Some(..)` renders the confirmation bar.
 static CONFIRM_EXPORT_ALL: GlobalSignal<Option<Vec<String>>> = GlobalSignal::new(|| None);
 
+/// A validated contract instance id to offer the user a way back to, set once
+/// a key imported from a purchase link has actually landed in the delegate.
+static RETURN_TO: GlobalSignal<Option<String>> = GlobalSignal::new(|| {
+    // Shown under `example-data` so `cargo make dev` and the browser suite
+    // exercise it. Reaching this state for real needs a completed Stripe
+    // purchase, which is not something a test can drive.
+    #[cfg(feature = "example-data")]
+    {
+        Some("DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N".to_string())
+    }
+    #[cfg(not(feature = "example-data"))]
+    {
+        None
+    }
+});
+
+/// Offer the user the trip back to wherever they were before they left to buy
+/// a ghostkey. `id` must already be validated -- see `auto_import`.
+pub fn offer_return_to(id: String) {
+    *RETURN_TO.write() = Some(id);
+}
+
 static SHOW_IMPORT: GlobalSignal<bool> = GlobalSignal::new(|| false);
 static SIGN_FINGERPRINT: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
 static DEFAULT_KEY: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
@@ -314,6 +336,7 @@ pub fn GhostKeyList() -> Element {
     let sign_fp = SIGN_FINGERPRINT.read();
     let unusable = *UNUSABLE_COUNT.read();
     let confirm_all = CONFIRM_EXPORT_ALL.read();
+    let return_to = RETURN_TO.read();
 
     rsx! {
         section { class: "vault-section",
@@ -357,6 +380,33 @@ pub fn GhostKeyList() -> Element {
                 SignDialog {
                     fingerprint: fp.clone(),
                     on_close: move || *SIGN_FINGERPRINT.write() = None,
+                }
+            }
+
+            if let Some(id) = return_to.as_ref() {
+                div { class: "return-banner",
+                    span { class: "return-banner-text",
+                        "Your ghostkey is in the vault. Back to where you came from:"
+                    }
+                    a {
+                        // Relative and same-origin. The gateway shell's
+                        // navigation interceptor turns this into a
+                        // cross-contract hop; it only accepts the
+                        // /v1/contract/web/<key>/ shape, which is what the id
+                        // was validated to produce.
+                        class: "btn-glow return-link",
+                        href: "/v1/contract/web/{id}/",
+                        // No app-supplied name is shown. The vault only knows
+                        // the contract id, and rendering a name the link
+                        // itself supplied would let any site label its button
+                        // "Freenet Official".
+                        "Return to {short_id(id)}"
+                    }
+                    button {
+                        class: "action-btn",
+                        onclick: move |_| *RETURN_TO.write() = None,
+                        "Stay here"
+                    }
                 }
             }
 
@@ -426,6 +476,17 @@ pub fn GhostKeyList() -> Element {
                 }
             }
         }
+    }
+}
+
+/// First 10 characters of a contract id, for a link label. Contract ids are
+/// base58 and ~44 characters; the whole thing in a button is unreadable.
+fn short_id(id: &str) -> String {
+    let head: String = id.chars().take(10).collect();
+    if id.chars().count() > 10 {
+        format!("{head}\u{2026}")
+    } else {
+        head
     }
 }
 

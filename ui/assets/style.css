@@ -2,7 +2,21 @@
    Aesthetic: spectral/ethereal -- identities floating in a deep void
    Fonts: Newsreader (serif headings), Source Code Pro (crypto data), Outfit (body) */
 
-@import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,300;6..72,400;6..72,600&family=Source+Code+Pro:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap');
+/* No webfont @import.
+ *
+ * The gateway serves every webapp under a same-origin CSP that blocks
+ * fonts.googleapis.com, so this import never loaded in production -- verified
+ * against the live vault on 2026-08-03, which reported
+ * "Loading the stylesheet ... violates the following Content Security Policy
+ * directive" on every page load. Production has always rendered in the
+ * fallback stacks below.
+ *
+ * Keeping the import only made `dx serve` show developers a design users
+ * never saw, while adding a failed request and a console error to every real
+ * load. Removing it changes nothing a user sees.
+ *
+ * To actually ship these faces they must be vendored as data: URIs (see
+ * ghostkeys#13) -- a CDN link cannot work here whatever its URL. */
 
 :root {
     --void: #06080d;
@@ -409,6 +423,37 @@ body {
 .action-sign:hover {
     color: var(--glow);
     border-color: rgba(126, 180, 255, 0.25);
+}
+
+/* Return-to-app banner. Deliberately the brightest thing on the page while it
+   is showing: the user came here from somewhere else to do one task, that task
+   is done, and getting back is the only thing they want next. */
+.return-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+    padding: 0.875rem 1rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(96, 216, 160, 0.25);
+    background: rgba(96, 216, 160, 0.07);
+}
+
+.return-banner-text {
+    font-size: 0.8125rem;
+    line-height: 1.4;
+    color: var(--text);
+    flex: 1 1 14rem;
+}
+
+/* The label carries a contract id, which does not wrap at sensible points. */
+.return-link {
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    white-space: nowrap;
 }
 
 /* Backup reminder -- deliberately warm rather than alarming. Losing a key is

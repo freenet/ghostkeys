@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Ghostkey Vault</title>
+        <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta charset="UTF-8" />
+        <!--
+            A custom template for one reason: dx's default one opens with a
+            Google Fonts @import for Inter.
+
+            (Deliberately not quoting that URL here. This comment ships inside
+            index.html, and a literal fonts.googleapis.com string in the
+            published bundle reads as a live import to anyone grepping for
+            one -- it already fooled one such grep.)
+
+            The gateway serves sandboxed webapp content under
+            `default-src <origin> ...` with no other host allowed, so that
+            import is refused on every real page load. It cost a console error
+            per load and never once delivered a font. Nothing here uses Inter
+            anyway -- assets/style.css declares its own stacks.
+
+            Keep this file minimal: dx appends its own module script and
+            requires `<div id="main">`. Anything else added here has to hold
+            up under a CSP that permits no external host.
+        -->
+    </head>
+    <body>
+        <div id="main"></div>
+    </body>
+</html>

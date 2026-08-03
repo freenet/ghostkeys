@@ -34,6 +34,26 @@ await page.waitForSelector('.identity-card', { timeout: 20000 });
 const cards = await page.locator('.identity-card').count();
 check('three example identities render', cards === 3, `got ${cards}`);
 
+// --- The way back to the app the user left ------------------------------
+const returnBanner = page.locator('.return-banner');
+check('return-to-app banner renders', (await returnBanner.count()) === 1);
+const returnLink = returnBanner.locator('a.return-link');
+const href = await returnLink.getAttribute('href');
+check('return link is a relative, same-origin contract path',
+  href === '/v1/contract/web/DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N/', href);
+const returnLabel = await returnLink.innerText();
+check('link is labelled by contract id only, never app-supplied text',
+  /^Return to DLog47hEsr/.test(returnLabel), returnLabel);
+check('label is truncated rather than showing the whole id',
+  !returnLabel.includes('2E1N'), returnLabel);
+const bannerBox = await returnBanner.boundingBox();
+const firstCard = await page.locator('.identity-card').first().boundingBox();
+check('banner sits above the identities', !!bannerBox && !!firstCard && bannerBox.y < firstCard.y);
+// Dismissable: a user who wants to stay must not be nagged to leave.
+await returnBanner.locator('button', { hasText: 'Stay here' }).click();
+await page.waitForTimeout(300);
+check('"Stay here" dismisses the banner', (await page.locator('.return-banner').count()) === 0);
+
 // --- The backup nag appears on exactly the un-backed-up ones -------------
 // Example data: 3xKm9Rvp is backed_up:true; the other two are false.
 const nags = await page.locator('.backup-nag').count();

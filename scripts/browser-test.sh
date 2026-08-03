@@ -8,16 +8,21 @@
 #
 # Runs with `--features example-data,no-sync`: no node connection, deterministic
 # identities, and both the backed-up and un-backed-up states present.
+#
+# Built `--release`, because that is the bundle that gets published. A debug
+# build can differ in ways that matter here -- asset hashing, what ends up in
+# the output directory, and anything template-related -- so checking debug
+# would be checking something users never receive.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 PORT="${VAULT_TEST_PORT:-8977}"
-echo "==> Building UI (example-data, no-sync)"
-(cd ui && dx build --features example-data,no-sync >/dev/null)
+echo "==> Building UI (release, example-data, no-sync)"
+(cd ui && dx build --release --features example-data,no-sync >/dev/null)
 
-BUNDLE="target/dx/ghostkey-ui/debug/web/public"
+BUNDLE="target/dx/ghostkey-ui/release/web/public"
 [ -f "$BUNDLE/index.html" ] || { echo "ERROR: no bundle at $BUNDLE" >&2; exit 1; }
 
 # The gateway serves a webapp under /v1/contract/web/<id>/, and dx bakes that
@@ -41,8 +46,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Serving $CONTRACT_PATH on :$PORT"
-(cd "$SERVE_ROOT" && exec python3 -m http.server "$PORT" >/dev/null 2>&1) &
+# Served under the gateway's real sandbox CSP, not a bare static server --
+# see ui/tests/browser/serve.py. Without it a CDN asset passes every check
+# here and is blocked for every actual user.
+echo "==> Serving $CONTRACT_PATH on :$PORT (with gateway CSP)"
+python3 ui/tests/browser/serve.py "$PORT" "$SERVE_ROOT" >/dev/null 2>&1 &
 SERVER_PID=$!
 
 URL="http://127.0.0.1:$PORT$CONTRACT_PATH/"

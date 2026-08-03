@@ -2,8 +2,25 @@ use std::fs;
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=build.rs");
+    // Cargo watches ONLY the paths named here once any `rerun-if-changed` is
+    // emitted. The script previously named just `build.rs` and the legacy
+    // table, so editing UI source did not re-run it and BUILD_TIMESTAMP_ISO /
+    // GIT_COMMIT kept whatever values they had the last time it happened to
+    // run. The vault then footered a stale "Built:" line -- the single thing
+    // someone checks to confirm a deploy landed. It read four hours old
+    // immediately after the 2026-08-03 publish of freshly built code, and
+    // very nearly passed for a failed deploy.
+    //
+    // Naming `src` (cargo walks directories recursively) covers the UI's own
+    // code; the other two live outside the package and so must be named
+    // individually.
+    println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../legacy_delegates.toml");
+    // Embedded by `api::delegate` via include_bytes!, so a delegate-only
+    // change ships in this bundle and must refresh the stamp too.
+    println!(
+        "cargo:rerun-if-changed=../target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm"
+    );
 
     // Build timestamp
     let now = chrono::Utc::now();

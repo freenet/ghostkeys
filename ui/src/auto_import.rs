@@ -1,4 +1,5 @@
 use dioxus::logger::tracing::{error, info, warn};
+use freenet_stdlib::prelude::ContractInstanceId;
 use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
 
 use crate::api;
@@ -17,19 +18,43 @@ pub struct PendingImport {
     certificate_pem: String,
     signing_key_pem: String,
     master_verifying_key_pem: Option<String>,
+    /// Where the user was before they went off to buy this key, as a validated
+    /// contract instance id. Offering the trip back is the whole point of the
+    /// round trip being tolerable.
+    return_to: Option<String>,
 }
 
 /// Parse an import payload out of the URL hash, if there is one.
 ///
 /// Fragment format: `#import=<base64_cert>.<base64_sk>`
 /// Optional master key: `#import=<base64_cert>.<base64_sk>.<base64_master_vk>`
+/// Optional return target: `...&return_to=<base58_contract_key>`
 ///
 /// The hash is left in place on purpose: it is cleared only once the key is
 /// safely in the delegate, so a reload can retry an import that did not land.
 pub fn pending_import_from_url() -> Option<PendingImport> {
     let hash = get_hash()?;
     let hash = hash.strip_prefix('#').unwrap_or(&hash);
-    let payload = hash.strip_prefix("import=")?;
+    parse_fragment(hash)
+}
+
+/// The parsing half of `pending_import_from_url`, split out so it can be
+/// tested without a browser.
+fn parse_fragment(hash: &str) -> Option<PendingImport> {
+    // `&`-separated params, so `return_to` can be added without disturbing the
+    // dot-separated positional shape of `import`'s own value.
+    let mut import_value = None;
+    let mut return_to_value = None;
+    for param in hash.split('&') {
+        if let Some(v) = param.strip_prefix("import=") {
+            import_value = Some(v);
+        } else if let Some(v) = param.strip_prefix("return_to=") {
+            return_to_value = Some(v);
+        }
+    }
+
+    let payload = import_value?;
+    let return_to = return_to_value.and_then(validated_return_to);
 
     info!("Auto-import detected in URL fragment");
 
@@ -64,7 +89,38 @@ pub fn pending_import_from_url() -> Option<PendingImport> {
         certificate_pem,
         signing_key_pem,
         master_verifying_key_pem,
+        return_to,
     })
+}
+
+/// Accept a return target only if it is a well-formed contract instance id.
+///
+/// The value arrives in a URL the user was sent from an external site, and it
+/// ends up in a link the vault renders. Parsing it with the same type the
+/// gateway uses -- rather than pattern-matching the string -- means the vault
+/// can only ever produce `/v1/contract/web/<valid key>/`, a same-origin path.
+/// There is no shape of input that turns it into an off-site redirect.
+fn validated_return_to(raw: &str) -> Option<String> {
+    let id = match ContractInstanceId::from_bytes(raw) {
+        Ok(id) => id,
+        Err(e) => {
+            warn!("Ignoring malformed return_to in import link: {e}");
+            return None;
+        }
+    };
+
+    // Parsing alone is not enough: `from_bytes` accepts a base58 string
+    // shorter than 32 bytes and pads it, so a truncated value decodes to a
+    // *different, valid-looking* contract id rather than failing. A clipped
+    // link would then send the user confidently to somewhere they have never
+    // been. Requiring the parse to round-trip rejects that, and every other
+    // non-canonical encoding, without needing a base58 dependency here.
+    let canonical = id.to_string();
+    if canonical != raw {
+        warn!("Ignoring non-canonical return_to in import link");
+        return None;
+    }
+    Some(canonical)
 }
 
 /// Report a malformed import link.
@@ -105,6 +161,9 @@ pub async fn import(pending: PendingImport) {
         pending.signing_key_pem.len()
     );
 
+    // Taken before the request moves the rest of the struct.
+    let return_to = pending.return_to;
+
     let result = api::delegate::send_request(GhostkeyRequest::ImportGhostKey {
         certificate_pem: pending.certificate_pem,
         signing_key_pem: pending.signing_key_pem,
@@ -133,6 +192,12 @@ pub async fn import(pending: PendingImport) {
                 format!("Ghostkey {fingerprint} imported successfully"),
                 ToastKind::Success,
             );
+            // Only after the key is actually in the delegate. Offering the way
+            // back while the import is still in doubt would walk the user away
+            // from the one tab holding their key.
+            if let Some(id) = return_to {
+                ghostkey_list::offer_return_to(id);
+            }
         }
         Ok(GhostkeyResponse::Error { message }) => {
             error!("Auto-import failed: {message}");
@@ -307,6 +372,83 @@ mod tests {
             out
         };
         standard.replace('+', "-").replace('/', "_")
+    }
+
+    /// A real contract instance id, in the shape the gateway uses.
+    const A_CONTRACT_ID: &str = "DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N";
+
+    fn a_fragment(extra: &str) -> String {
+        format!(
+            "import={}.{}{extra}",
+            url_safe("-----BEGIN CERT-----"),
+            url_safe("-----BEGIN KEY-----")
+        )
+    }
+
+    #[test]
+    fn a_link_with_no_return_to_still_imports() {
+        // The shape every link had before this existed. It must keep working
+        // unchanged -- a purchase link in someone's open tab predates the
+        // parameter entirely.
+        let p = parse_fragment(&a_fragment("")).expect("import should parse");
+        assert_eq!(p.certificate_pem, "-----BEGIN CERT-----");
+        assert_eq!(p.return_to, None);
+    }
+
+    #[test]
+    fn a_valid_return_to_is_carried_through() {
+        let p = parse_fragment(&a_fragment(&format!("&return_to={A_CONTRACT_ID}")))
+            .expect("import should parse");
+        assert_eq!(p.return_to.as_deref(), Some(A_CONTRACT_ID));
+    }
+
+    #[test]
+    fn return_to_order_does_not_matter() {
+        let frag = format!("return_to={A_CONTRACT_ID}&{}", a_fragment(""));
+        let p = parse_fragment(&frag).expect("import should parse");
+        assert_eq!(p.return_to.as_deref(), Some(A_CONTRACT_ID));
+        assert_eq!(p.certificate_pem, "-----BEGIN CERT-----");
+    }
+
+    /// The value arrives in a URL from an external site and ends up in a link
+    /// the vault renders, so anything that is not a contract id must be
+    /// dropped rather than passed through. A rejected `return_to` must never
+    /// take the import down with it: the key is the irreplaceable part.
+    #[test]
+    fn a_return_to_that_is_not_a_contract_id_is_dropped_and_the_key_still_imports() {
+        for hostile in [
+            "https://evil.example/steal",
+            "//evil.example",
+            "javascript:alert(1)",
+            "../../../v1/delegate/whatever",
+            "DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N/../../..",
+            "not base58 at all!!",
+            // The fragment is never URL-decoded, so percent-encoding cannot
+            // smuggle a path separator past the base58 check either.
+            "..%2F..%2Fv1%2Fdelegate",
+            "0OIl", // characters outside the base58 alphabet
+            // Right alphabet, too short. `ContractInstanceId::from_bytes`
+            // accepts this and pads it into a different, entirely valid id --
+            // so a clipped link would otherwise send the user confidently to
+            // somewhere they have never been.
+            "DLog47hEsr",
+            // Right alphabet, too long.
+            "DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1NDLog47hEsrtu",
+            "",
+        ] {
+            let p = parse_fragment(&a_fragment(&format!("&return_to={hostile}")))
+                .unwrap_or_else(|| panic!("import must survive return_to={hostile:?}"));
+            assert_eq!(p.return_to, None, "accepted a bad return_to: {hostile:?}");
+        }
+    }
+
+    #[test]
+    fn a_fragment_with_no_import_is_not_an_import() {
+        // `return_to` alone is not a purchase link and must not be treated as
+        // one, or a stray parameter would put a "return to app" banner in
+        // front of a user who imported nothing.
+        assert!(parse_fragment(&format!("return_to={A_CONTRACT_ID}")).is_none());
+        assert!(parse_fragment("").is_none());
     }
 
     #[test]
