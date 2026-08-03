@@ -425,6 +425,37 @@ body {
     border-color: rgba(126, 180, 255, 0.25);
 }
 
+/* Return-to-app banner. Deliberately the brightest thing on the page while it
+   is showing: the user came here from somewhere else to do one task, that task
+   is done, and getting back is the only thing they want next. */
+.return-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+    padding: 0.875rem 1rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(96, 216, 160, 0.25);
+    background: rgba(96, 216, 160, 0.07);
+}
+
+.return-banner-text {
+    font-size: 0.8125rem;
+    line-height: 1.4;
+    color: var(--text);
+    flex: 1 1 14rem;
+}
+
+/* The label carries a contract id, which does not wrap at sensible points. */
+.return-link {
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+
 /* Backup reminder -- deliberately warm rather than alarming. Losing a key is
    serious, but this is a nudge on something the user owns, not an error they
    caused, and a red banner on every un-exported key would train them to
