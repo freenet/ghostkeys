@@ -123,8 +123,15 @@ async fn mark_backed_up(fingerprints: Vec<String>) {
     }
 }
 
-/// Download a single identity and record that it has been backed up.
-fn export_one(fingerprint: String) {
+/// Download a single identity. Does NOT record it as backed up.
+///
+/// `a.click()` returning tells us the browser accepted the download, not that
+/// a file reached the disk -- a user with "ask where to save" enabled can
+/// still cancel the dialog. Marking here would silence the reminder for a key
+/// with no backup, which is the one failure that costs the key, so the marker
+/// is set only when the user says the copy exists. `on_downloaded` fires when
+/// the browser took the file, which is when it becomes reasonable to ask.
+fn export_one(fingerprint: String, mut on_downloaded: Signal<bool>) {
     spawn(async move {
         use super::toast::{self, ToastKind};
 
@@ -160,8 +167,7 @@ fn export_one(fingerprint: String) {
                 };
                 let json = serde_json::to_string_pretty(&exported).unwrap_or_default();
                 if trigger_download(&json, &format!("ghostkey-{fingerprint}.json")) {
-                    toast::show("Backup saved", ToastKind::Success);
-                    mark_backed_up(vec![fingerprint]).await;
+                    on_downloaded.set(true);
                 } else {
                     toast::show("Could not save the backup file", ToastKind::Error);
                 }
@@ -203,7 +209,8 @@ fn export_all() {
                         format!("Exported {} ghostkey(s)", keys.len()),
                         ToastKind::Success,
                     );
-                    mark_backed_up(keys.into_iter().map(|k| k.fingerprint).collect()).await;
+                    *CONFIRM_EXPORT_ALL.write() =
+                        Some(keys.into_iter().map(|k| k.fingerprint).collect());
                 } else {
                     // Previously this reported success regardless, so a
                     // failed download looked like a completed backup.
@@ -262,6 +269,10 @@ fn test_permission_prompt() {
     });
 }
 
+/// Fingerprints in a just-downloaded full export, awaiting the user's word
+/// that the file exists. `Some(..)` renders the confirmation bar.
+static CONFIRM_EXPORT_ALL: GlobalSignal<Option<Vec<String>>> = GlobalSignal::new(|| None);
+
 static SHOW_IMPORT: GlobalSignal<bool> = GlobalSignal::new(|| false);
 static SIGN_FINGERPRINT: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
 static DEFAULT_KEY: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
@@ -271,19 +282,7 @@ static DEFAULT_KEY: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
 /// `ListGhostKeys` never checks for the signing key, so these render as
 /// perfectly healthy cards right up until the user tries to sign. Asking the
 /// delegate directly is the only way the vault can tell.
-static UNUSABLE_COUNT: GlobalSignal<usize> = GlobalSignal::new(|| {
-    // Seeded under `example-data` so `cargo make dev` shows the warning state
-    // too. Without it the only way to see this banner is to genuinely lose a
-    // signing key, which is not something to reproduce on purpose.
-    #[cfg(feature = "example-data")]
-    {
-        1
-    }
-    #[cfg(not(feature = "example-data"))]
-    {
-        0
-    }
-});
+static UNUSABLE_COUNT: GlobalSignal<usize> = GlobalSignal::new(|| 0);
 
 /// Ask the delegate whether any stored identity has lost its signing key.
 pub fn load_identity_presence() {
@@ -314,6 +313,7 @@ pub fn GhostKeyList() -> Element {
     let show_import = SHOW_IMPORT.read();
     let sign_fp = SIGN_FINGERPRINT.read();
     let unusable = *UNUSABLE_COUNT.read();
+    let confirm_all = CONFIRM_EXPORT_ALL.read();
 
     rsx! {
         section { class: "vault-section",
@@ -357,6 +357,31 @@ pub fn GhostKeyList() -> Element {
                 SignDialog {
                     fingerprint: fp.clone(),
                     on_close: move || *SIGN_FINGERPRINT.write() = None,
+                }
+            }
+
+            if let Some(pending) = confirm_all.as_ref() {
+                div { class: "backup-nag",
+                    span { class: "backup-nag-text",
+                        "Downloaded {pending.len()} identity(s). Confirm you still have the file and the reminders will clear."
+                    }
+                    button {
+                        class: "action-btn action-backup",
+                        onclick: {
+                            let fps = pending.clone();
+                            move |_| {
+                                let fps = fps.clone();
+                                *CONFIRM_EXPORT_ALL.write() = None;
+                                spawn(async move { mark_backed_up(fps).await });
+                            }
+                        },
+                        "I have the file"
+                    }
+                    button {
+                        class: "action-btn",
+                        onclick: move |_| *CONFIRM_EXPORT_ALL.write() = None,
+                        "Dismiss"
+                    }
                 }
             }
 
@@ -508,6 +533,10 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
     let delay = format!("{}ms", index * 80);
     let mut label_input = use_signal(|| info.label.clone().unwrap_or_default());
     let mut confirming_delete = use_signal(|| false);
+    // Whether the browser has taken the backup file for this card. Local to
+    // the card, and reset by a reload -- a stale "confirm?" state that
+    // outlived the download would invite confirming a file nobody has.
+    let downloaded = use_signal(|| false);
 
     rsx! {
         div {
@@ -595,16 +624,33 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
 
                 if !info.backed_up {
                     div { class: "backup-nag",
-                        span { class: "backup-nag-text",
-                            "Only this vault holds this key. Save a copy so a lost node does not lose the identity."
-                        }
-                        button {
-                            class: "action-btn action-backup",
-                            onclick: {
-                                let fp = fp_for_backup.clone();
-                                move |_| export_one(fp.clone())
-                            },
-                            "Back up"
+                        if *downloaded.read() {
+                            span { class: "backup-nag-text",
+                                "Downloaded. Confirm you still have the file — this reminder is the only thing standing between a lost node and a lost identity."
+                            }
+                            button {
+                                class: "action-btn action-backup",
+                                onclick: {
+                                    let fp = fp_for_backup.clone();
+                                    move |_| {
+                                        let fp = fp.clone();
+                                        spawn(async move { mark_backed_up(vec![fp]).await });
+                                    }
+                                },
+                                "I have the file"
+                            }
+                        } else {
+                            span { class: "backup-nag-text",
+                                "Only this vault holds this key. Save a copy so a lost node does not lose the identity."
+                            }
+                            button {
+                                class: "action-btn action-backup",
+                                onclick: {
+                                    let fp = fp_for_backup.clone();
+                                    move |_| export_one(fp.clone(), downloaded)
+                                },
+                                "Back up"
+                            }
                         }
                     }
                 }

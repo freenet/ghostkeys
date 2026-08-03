@@ -554,6 +554,37 @@ pub(crate) fn resolve_default(ctx: &DelegateCtx, requestor: &SignatureRequestor)
     best.map(|(fp, _)| fp)
 }
 
+/// Every stored fingerprint, ordered the way `resolve_default` ranks them:
+/// highest donation tier first, ties broken by index (import) order.
+///
+/// The key picker can only show a handful of buttons. Offering `load_index`
+/// order would truncate by import time, so a user who bought a $5 key first
+/// and a $500 key tenth would be offered the $5 one and never the $500 one.
+/// Ranking first means truncation drops the least valuable keys instead.
+///
+/// Not permission-filtered: this exists for the prompt shown when the caller
+/// has no grant on anything, so filtering by grant would return nothing.
+pub(crate) fn fingerprints_by_tier_desc(ctx: &DelegateCtx) -> Vec<String> {
+    let with_tiers: Vec<(String, u32)> = load_index(ctx)
+        .into_iter()
+        .filter_map(|fp| {
+            let cert = load_cert(ctx, &fp)?;
+            let amount = extract_amount(&notary_info(&cert)).unwrap_or(0);
+            Some((fp, amount))
+        })
+        .collect();
+    rank_by_tier_desc(with_tiers)
+}
+
+/// Pure ranking behind `fingerprints_by_tier_desc`.
+fn rank_by_tier_desc(mut with_tiers: Vec<(String, u32)>) -> Vec<String> {
+    // Stable, so equal tiers keep index order and the prompt is reproducible.
+    // A picker whose buttons move between showings is one people click through
+    // without reading.
+    with_tiers.sort_by_key(|(_, amount)| std::cmp::Reverse(*amount));
+    with_tiers.into_iter().map(|(fp, _)| fp).collect()
+}
+
 /// Extract donation amount from notary info string.
 fn extract_amount(info: &str) -> Option<u32> {
     if info.starts_with('{') {
@@ -992,6 +1023,40 @@ fn handle_list_permissions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rank_puts_the_most_valuable_key_first() {
+        let ranked = rank_by_tier_desc(vec![
+            ("cheap".to_string(), 5),
+            ("rich".to_string(), 500),
+            ("mid".to_string(), 20),
+        ]);
+        assert_eq!(ranked, vec!["rich", "mid", "cheap"]);
+    }
+
+    #[test]
+    fn rank_is_stable_within_a_tier() {
+        // Equal tiers keep index order, so the same vault always produces the
+        // same picker -- a prompt whose buttons move between showings is a
+        // prompt people click through without reading.
+        let ranked = rank_by_tier_desc(vec![
+            ("a".to_string(), 20),
+            ("b".to_string(), 20),
+            ("c".to_string(), 20),
+        ]);
+        assert_eq!(ranked, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn rank_survives_truncation_without_dropping_the_best_key() {
+        // The picker shows at most a handful of buttons. This is the case the
+        // ranking exists for: an untiered key imported first must not push a
+        // $500 key past the cutoff.
+        let mut input: Vec<(String, u32)> = (0..12).map(|i| (format!("early{i}"), 0)).collect();
+        input.push(("rich".to_string(), 500));
+        let ranked = rank_by_tier_desc(input);
+        assert_eq!(ranked[0], "rich");
+    }
 
     #[test]
     fn tally_presence_empty_vault_reports_nothing() {

@@ -146,20 +146,23 @@ fn handle_request(
         return request_any_access(ctx, requestor);
     }
 
-    // `SignWithDefault` and `GetDefaultKey` need SOME key but name none, so
-    // the fingerprint-scoped check below cannot see them. Without this, a
-    // caller holding no grant fell through to `resolve_default`, which
-    // filters by `Sign` scope, found nothing, and answered
-    // `NoIdentityAvailable` -- telling an app that the user owns no ghostkey
-    // when the truth was that the app had never asked for permission. An app
-    // following that answer sends someone who already paid for a ghostkey off
-    // to buy a second one.
+    // `SignWithDefault` needs SOME key but names none, so the
+    // fingerprint-scoped check below cannot see it. Without this, a caller
+    // holding no grant fell through to `resolve_default`, which filters by
+    // `Sign` scope, found nothing, and answered `NoIdentityAvailable` --
+    // telling an app that the user owns no ghostkey when the truth was that
+    // the app had never asked for permission. An app following that answer
+    // sends someone who already paid for a ghostkey off to buy a second one.
     //
     // The honest split: if the vault is genuinely empty, `NoIdentityAvailable`
     // is correct and the handler below returns it. If it holds keys, ask the
     // user and replay.
-    if names_no_fingerprint_but_needs_one(&request) {
-        let fingerprints = handlers::load_index(ctx);
+    if acts_on_a_key_it_does_not_name(&request) {
+        // Ranked, not index order: the picker shows at most
+        // MAX_BUTTON_FINGERPRINTS buttons, and index order is import order, so
+        // truncating it would hide the user's most valuable key behind
+        // whichever ones they happened to import first.
+        let fingerprints = handlers::fingerprints_by_tier_desc(ctx);
         match default_key_route(
             handlers::resolve_default(ctx, requestor).is_some(),
             fingerprints.is_empty(),
@@ -652,13 +655,17 @@ fn handle_any_access_response(
     )])
 }
 
-/// Which requests need *some* ghostkey but name no fingerprint, so the
-/// fingerprint-scoped permission check further down cannot see them.
-fn names_no_fingerprint_but_needs_one(request: &GhostkeyRequest) -> bool {
-    matches!(
-        request,
-        GhostkeyRequest::SignWithDefault { .. } | GhostkeyRequest::GetDefaultKey
-    )
+/// Which requests take an action needing *some* ghostkey while naming no
+/// fingerprint, so the fingerprint-scoped permission check further down cannot
+/// see them.
+///
+/// `GetDefaultKey` is deliberately NOT here even though it also names no
+/// fingerprint. It is a question, not an action, and prompting on a question
+/// hands every app a way to raise a modal dialog on page load without the user
+/// doing anything. Its unhelpful `DefaultKeyResult { None }` for an ungranted
+/// caller is the thing `HasIdentity` exists to answer without a prompt.
+fn acts_on_a_key_it_does_not_name(request: &GhostkeyRequest) -> bool {
+    matches!(request, GhostkeyRequest::SignWithDefault { .. })
 }
 
 /// What to do with a request that needs a key but names none.
@@ -860,12 +867,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_vault_answers_get_default_key_without_prompting() {
-        // `GetDefaultKey` reports absence as `DefaultKeyResult { None }`
-        // rather than `NoIdentityAvailable` -- a shape that predates the
-        // prompt route. What matters here is the same as for
-        // `SignWithDefault`: an empty vault answers instead of raising a
-        // picker with nothing in it.
+    fn get_default_key_never_prompts() {
+        // `GetDefaultKey` reports absence as `DefaultKeyResult { None }`, and
+        // never raises a picker -- it is a question, and an app must not be
+        // able to put a dialog in front of the user just by asking one.
         let msgs = dispatch(&GhostkeyRequest::GetDefaultKey);
         match only_response(&msgs) {
             GhostkeyResponse::DefaultKeyResult { fingerprint } => {
@@ -906,34 +911,38 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_fingerprint_free_requests_take_the_prompt_route() {
-        assert!(names_no_fingerprint_but_needs_one(
+    fn only_sign_with_default_takes_the_prompt_route() {
+        assert!(acts_on_a_key_it_does_not_name(
             &GhostkeyRequest::SignWithDefault {
                 message: vec![1, 2, 3]
             }
         ));
-        assert!(names_no_fingerprint_but_needs_one(
+
+        // `GetDefaultKey` names no fingerprint either, but it is a question,
+        // not an action. Prompting on it would let any app raise a modal on
+        // page load without the user doing anything.
+        assert!(!acts_on_a_key_it_does_not_name(
             &GhostkeyRequest::GetDefaultKey
         ));
 
         // Requests that name a fingerprint must NOT be diverted here -- the
         // scoped check below handles them, and prompting twice for one
         // request would be worse than not prompting at all.
-        assert!(!names_no_fingerprint_but_needs_one(
+        assert!(!acts_on_a_key_it_does_not_name(
             &GhostkeyRequest::SignMessage {
                 fingerprint: "abc".into(),
                 message: vec![]
             }
         ));
-        assert!(!names_no_fingerprint_but_needs_one(
+        assert!(!acts_on_a_key_it_does_not_name(
             &GhostkeyRequest::ListGhostKeys
         ));
         // `RequestAnyAccess` also names no fingerprint, but it is routed
         // earlier to its own picker; diverting it here would double-prompt.
-        assert!(!names_no_fingerprint_but_needs_one(
+        assert!(!acts_on_a_key_it_does_not_name(
             &GhostkeyRequest::RequestAnyAccess
         ));
-        assert!(!names_no_fingerprint_but_needs_one(
+        assert!(!acts_on_a_key_it_does_not_name(
             &GhostkeyRequest::HasIdentity
         ));
     }

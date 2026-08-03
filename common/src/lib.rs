@@ -150,6 +150,13 @@ pub enum GhostkeyRequest {
     /// Set which ghostkey is the default for signing.
     SetDefaultKey { fingerprint: String },
     /// Get the current default ghostkey fingerprint.
+    ///
+    /// Returns `DefaultKeyResult { fingerprint: None }` when the caller has no
+    /// `Sign` grant on any key, which is NOT the same as the user having no
+    /// ghostkey -- use `HasIdentity` for that question. This request never
+    /// prompts: it is a question, and an app must not be able to put a dialog
+    /// in front of the user just by asking one. `SignWithDefault` is the one
+    /// that prompts, because it acts.
     GetDefaultKey,
     /// Verify a signed message produced by this delegate.
     VerifySignedMessage { signed_message: Vec<u8> },
@@ -197,8 +204,12 @@ pub enum GhostkeyRequest {
     /// user off to buy a ghostkey wants to notice when they come back, and
     /// polling a prompt is not an option.
     ///
-    /// Deliberately leaks only the bit that `NoIdentityAvailable` already
-    /// leaks -- counts, never fingerprints, labels or tiers.
+    /// What this discloses without consent is a count. That is more than the
+    /// bare existence bit `NoIdentityAvailable` already leaks to anyone who
+    /// asks for a signature, and the trade is deliberate: no fingerprints,
+    /// labels or tiers are exposed, a count cannot be correlated across users,
+    /// and the alternative is that the vault cannot tell a half-lost identity
+    /// from a healthy one.
     HasIdentity,
     /// Record that the user has exported this identity, so the vault can stop
     /// warning that it is the only copy. Requires `Export` scope, so only the
@@ -296,10 +307,10 @@ pub enum GhostkeyResponse {
     /// freenet.org/ghostkey to purchase one.
     ///
     /// Note this means what it says: the vault is empty. It is NOT returned
-    /// merely because the caller lacks permission — a request that needs a key
-    /// the caller has no grant for prompts the user instead. An app can treat
-    /// this as "offer to buy one" without first checking whether it was really
-    /// a permissions problem.
+    /// merely because the caller lacks permission — `SignWithDefault` prompts
+    /// the user instead when the vault holds keys the caller has no grant on.
+    /// An app can treat this as "offer to buy one" without first checking
+    /// whether it was really a permissions problem.
     NoIdentityAvailable,
     /// Reply to `HasIdentity`. Counts only — no fingerprints, labels or tiers.
     IdentityPresence {

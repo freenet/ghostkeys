@@ -65,8 +65,15 @@ echo "Built delegate hash: $CODE_HASH"
 # are empty). A hand-edited or mistyped entry points the sweep at a delegate
 # that never existed, so it probes, times out, and reports nothing wrong --
 # a silent hole in exactly the table that exists to prevent silent holes.
-mapfile -t ALL_HASHES < <(code_hashes_of "$LEGACY")
-mapfile -t ALL_KEYS < <(delegate_keys_of "$LEGACY")
+#
+# Read into arrays with a loop rather than `mapfile`: mapfile is bash 4+, and
+# macOS still ships bash 3.2, so a developer running `cargo make
+# check-migration` there would get "mapfile: command not found" instead of a
+# migration check.
+ALL_HASHES=()
+while IFS= read -r line; do ALL_HASHES+=("$line"); done < <(code_hashes_of "$LEGACY")
+ALL_KEYS=()
+while IFS= read -r line; do ALL_KEYS+=("$line"); done < <(delegate_keys_of "$LEGACY")
 
 if [ "${#ALL_HASHES[@]}" -eq 0 ]; then
     echo "ERROR: $LEGACY has no entries" >&2
@@ -127,24 +134,29 @@ fi
 
 # --- The check that matters: no recorded entry may disappear --------------
 
-MISSING=()
+# A plain counter and a temp file rather than an array: `${#arr[@]}` on an
+# empty array errors under `set -u` in bash < 4.4 -- the same macOS case the
+# loop above exists for.
+MISSING_COUNT=0
+MISSING_LIST="$(mktemp)"
 while read -r h; do
     [ -n "$h" ] || continue
     if ! grep -q "\"$h\"" "$LEGACY"; then
-        MISSING+=("$h")
+        MISSING_COUNT=$((MISSING_COUNT + 1))
+        echo "  missing: $h" >>"$MISSING_LIST"
     fi
 done < <(code_hashes_of "$BASE_LEGACY")
 
-if [ "${#MISSING[@]}" -ne 0 ]; then
-    echo "::error::This change drops ${#MISSING[@]} recorded delegate entry/entries."
+if [ "$MISSING_COUNT" -ne 0 ]; then
+    echo "::error::This change drops $MISSING_COUNT recorded delegate entry/entries."
     echo "::error::Every user still running one of them would be orphaned: the vault"
     echo "::error::only sweeps delegates listed in $LEGACY, so their ghostkeys become"
     echo "::error::unreachable with no error shown."
-    for h in "${MISSING[@]}"; do
-        echo "  missing: $h"
-    done
+    cat "$MISSING_LIST"
+    rm -f "$MISSING_LIST"
     exit 1
 fi
+rm -f "$MISSING_LIST"
 
 BASE_LAST=$(code_hashes_of "$BASE_LEGACY" | tail -1)
 echo "Deployed delegate hash (base branch tail): $BASE_LAST"

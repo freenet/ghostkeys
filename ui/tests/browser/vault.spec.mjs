@@ -63,6 +63,27 @@ check('nag text uses the warm accent, not the danger red', nagColor === 'rgb(232
 const actionsVisible = await unbackedCard.locator('.card-actions-row button', { hasText: 'Sign' }).isVisible();
 check('Sign action still visible under the nag', actionsVisible);
 
+// --- Backing up is two steps: the marker must not be set by a download ---
+// A browser gives no signal that a file reached the disk, so clicking "Back up"
+// alone must never clear the reminder -- that is the failure that costs the key.
+await backupBtn.click();
+await page.waitForTimeout(600);
+const confirmBtn = unbackedCard.locator('button', { hasText: 'I have the file' });
+check('download swaps the nag to an explicit confirmation', (await confirmBtn.count()) === 1);
+check('the nag is still showing before confirmation',
+  (await unbackedCard.locator('.backup-nag').count()) === 1);
+const confirmText = await unbackedCard.locator('.backup-nag-text').innerText();
+check('confirmation asks about the file, not the click',
+  /have the file|still have/i.test(confirmText), confirmText.slice(0, 60));
+
+// Confirming is what clears it -- and only for the key confirmed.
+await confirmBtn.click();
+await page.waitForTimeout(600);
+check('confirming clears that key\'s reminder',
+  (await unbackedCard.locator('.backup-nag').count()) === 0);
+check('the other un-backed-up key still nags',
+  (await page.locator('.backup-nag').count()) === 1);
+
 // --- The half-lost-identity warning renders and reads as serious ---------
 const warn = page.locator('.vault-warning');
 check('half-lost-identity warning renders', (await warn.count()) === 1);
@@ -80,7 +101,10 @@ await page.waitForTimeout(200);
 const overflow = await page.evaluate(() =>
   document.documentElement.scrollWidth - document.documentElement.clientWidth);
 check('no horizontal overflow at 380px', overflow <= 1, `overflow ${overflow}px`);
-const narrowBtnVisible = await unbackedCard.locator('button.action-backup').isVisible();
+// The card used above has been confirmed and no longer nags, so check the
+// other un-backed-up one.
+const stillNagging = page.locator('.identity-card', { has: page.locator('code', { hasText: 'Hv5sRe8x' }) });
+const narrowBtnVisible = await stillNagging.locator('button.action-backup').isVisible();
 check('Back up button still reachable at 380px', narrowBtnVisible);
 await page.setViewportSize({ width: 1280, height: 900 });
 

@@ -447,6 +447,27 @@ pub async fn send_request(request: GhostkeyRequest) -> Result<GhostkeyResponse, 
             fingerprint: "mock1234".to_string(),
             notary_info: "example_import".into(),
         }),
+        // Enough of a key to exercise the export -> confirm -> marked flow
+        // offline. The PEM bodies are placeholders; nothing in this path
+        // parses them, it only writes them to a file.
+        GhostkeyRequest::ExportGhostKey { fingerprint } => Ok(GhostkeyResponse::ExportResult {
+            fingerprint,
+            certificate_pem:
+                "-----BEGIN GHOSTKEY CERTIFICATE-----\nmock\n-----END GHOSTKEY CERTIFICATE-----"
+                    .into(),
+            signing_key_pem: "-----BEGIN SIGNING KEY-----\nmock\n-----END SIGNING KEY-----".into(),
+            label: None,
+        }),
+        GhostkeyRequest::MarkBackedUp { fingerprint } => {
+            Ok(GhostkeyResponse::BackedUpMarked { fingerprint })
+        }
+        // One identity that cannot sign, so `cargo make dev` shows the warning
+        // banner. Reproducing it for real would mean deliberately destroying a
+        // signing key.
+        GhostkeyRequest::HasIdentity => Ok(GhostkeyResponse::IdentityPresence {
+            usable: 3,
+            unusable: 1,
+        }),
         _ => Ok(GhostkeyResponse::Error {
             message: "Mock mode".into(),
         }),
