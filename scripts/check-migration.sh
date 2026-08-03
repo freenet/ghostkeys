@@ -105,6 +105,36 @@ if [ "$BAD" -ne 0 ]; then
 fi
 echo "OK: all ${#ALL_HASHES[@]} recorded entries are internally consistent."
 
+# --- A previous publish's record must not still be uncommitted ------------
+#
+# `record-migration` appends the published hash to the working tree and prints
+# a reminder to commit it. A reminder is not a guard: on 2026-08-03 exactly
+# that append sat uncommitted while the delegate it named was live, so the
+# next build would have shipped a migration table missing the delegate every
+# user was actually running -- silently unreachable ghostkeys, which is the
+# failure this whole table exists to prevent.
+#
+# Publishing again on top of that would bake the omission in, so refuse. Only
+# checked when a git tree is available; the CI path passes an explicit base.
+if [ -z "$BASE_LEGACY" ] && git rev-parse --git-dir >/dev/null 2>&1; then
+    # `git diff HEAD`, not plain `git diff`: the latter compares against the
+    # index, so `git add`-ing the record and stopping there would slip past
+    # this check while leaving it just as uncommitted. Verified by staging one
+    # and watching the guard pass.
+    if ! git diff HEAD --quiet -- "$LEGACY" 2>/dev/null; then
+        echo "ERROR: $LEGACY has uncommitted changes." >&2
+        echo "" >&2
+        echo "That usually means a previous publish recorded its delegate hash and the" >&2
+        echo "change was never committed. Publishing again would ship a migration table" >&2
+        echo "missing a delegate that users are running, and their ghostkeys would go" >&2
+        echo "quietly unreachable." >&2
+        echo "" >&2
+        echo "Commit $LEGACY, then re-run." >&2
+        git --no-pager diff --stat -- "$LEGACY" >&2
+        exit 1
+    fi
+fi
+
 # --- Resolve the base branch's copy, if we can ----------------------------
 
 CLEANUP_BASE=""

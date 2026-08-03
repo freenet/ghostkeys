@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/freenet/ghostkeys"
@@ -37,12 +37,19 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
-# `strip = true` removes debug symbols and source-path metadata from
-# the WASM binary. This is what makes the build byte-reproducible
-# across machines: without it, embedded paths and stack-trace info
-# differ between local dev and CI, producing divergent WASM hashes
-# (and therefore different delegate keys). River and Delta both pin
-# this for the same reason.
+# `strip = true` removes debug symbols, which is worth having.
+#
+# It does NOT make the build reproducible across machines, though this
+# comment used to claim exactly that. Measured on 2026-08-03: 50 absolute
+# registry paths survive `strip` in the release WASM, because `panic!`
+# embeds `file!()` as ordinary rodata rather than as debug info. The
+# claim was load-bearing -- it is why nobody looked further at
+# ghostkeys#9 -- so it is corrected rather than deleted.
+#
+# What actually makes the build reproducible is a committed Cargo.lock
+# plus the registry path remap in scripts/build-delegate.sh. Build the
+# delegate through that script (`cargo make build-delegate`), not with a
+# bare `cargo build`, or you will get a different delegate key.
 strip = true
 
 # Apply size+reproducibility optimisations to dependencies too, so a

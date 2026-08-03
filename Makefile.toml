@@ -32,9 +32,12 @@ command = "bash"
 args = ["scripts/record-migration.sh"]
 
 [tasks.build-delegate]
-description = "Build the ghostkey delegate WASM"
-command = "cargo"
-args = ["build", "--release", "--target", "${CONTRACT_TARGET}", "-p", "ghostkey-delegate"]
+description = "Build the ghostkey delegate WASM reproducibly"
+# Via the script, not a bare `cargo build`: the delegate key is BLAKE3 over
+# these bytes, and without the script's path remap the key comes out
+# machine-specific. See ghostkeys#9.
+command = "bash"
+args = ["scripts/build-delegate.sh"]
 
 [tasks.build-ui]
 description = "Build the Dioxus UI"

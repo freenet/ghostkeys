@@ -43,8 +43,12 @@ jobs:
       - name: Install b3sum
         run: cargo install b3sum
 
+      # Through the script, so the hash CI computes is the hash a developer
+      # gets locally. A bare `cargo build` embeds this runner's $CARGO_HOME
+      # paths and produces a different, runner-specific delegate key
+      # (ghostkeys#9). The printed hash is directly comparable to a local one.
       - name: Build delegate WASM
-        run: cargo build --target wasm32-unknown-unknown --release -p ghostkey-delegate
+        run: bash scripts/build-delegate.sh
 
       # Extracting the base file with `git show` rather than the previous
       # `git stash` / `git checkout -- file` / `git stash pop` dance: that

@@ -35,8 +35,11 @@ jobs:
 
       # The UI embeds the delegate WASM via include_bytes!, so the artifact has
       # to exist before the UI crate can be built or linted at all.
+      # Through the script: it also fails the build if any absolute
+      # $CARGO_HOME path is embedded, which is what keeps the delegate key
+      # machine-independent (ghostkeys#9).
       - name: Build delegate WASM
-        run: cargo build --target wasm32-unknown-unknown --release -p ghostkey-delegate
+        run: bash scripts/build-delegate.sh
 
       # Lint against wasm32 rather than the host. The UI's real code paths are
       # behind `#[cfg(target_arch = "wasm32")]`, so a native lint sees stubs

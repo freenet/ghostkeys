@@ -1,5 +1,13 @@
 /target
-Cargo.lock
+
+# Cargo.lock is COMMITTED on purpose, and must stay that way.
+#
+# The delegate key is BLAKE3 over the delegate WASM, so the exact dependency
+# versions are part of the key. While this file was ignored, two checkouts of
+# the same commit resolved differently (measured: 1699 differing lines) and
+# produced different delegate keys -- meaning a stray `cargo update` could
+# silently move every user's stored ghostkeys to a namespace nothing would
+# ever look in. See ghostkeys#9 and scripts/build-delegate.sh.
 
 # Secrets / credentials
 .env

@@ -18,7 +18,10 @@ WASM="target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm"
 
 if [ ! -f "$WASM" ]; then
     echo "Delegate WASM not found. Building..."
-    cargo build --target wasm32-unknown-unknown --release -p ghostkey-delegate
+    # Via the script: a bare `cargo build` here would hash a WASM carrying
+    # this machine's registry paths, recording a delegate key nobody else can
+    # reproduce (ghostkeys#9).
+    bash "$(dirname "${BASH_SOURCE[0]}")/build-delegate.sh"
 fi
 
 CODE_HASH=$(b3sum --no-names "$WASM")

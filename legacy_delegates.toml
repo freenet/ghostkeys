@@ -61,3 +61,8 @@ delegate_key = "66dafd5841e3701892927c044f9dc8799e4052e791457e3e8f0b1614e9b62bf9
 [[entry]]
 code_hash = "41820886ca1db199eca2a2b229c6051d1120ea909ddbe1bd3653bf1cd586f540"
 delegate_key = "33f4c631ac7d3fc725c9c0affa5a34a3618a4fa752d9cfbd5a1a94c2d242a2dc"
+
+# Added 2026-08-03 (post-publish, delegate API release -- see #12)
+[[entry]]
+code_hash = "b34ce87d77a2f5779a21d0adae69f56a80f620e00bb73169cb8d542928069324"
+delegate_key = "7763276e411b064a67fed05f9b0cb2062dd1e4ff78274c40a141eee262633719"
