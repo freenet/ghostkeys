@@ -8,16 +8,21 @@
 #
 # Runs with `--features example-data,no-sync`: no node connection, deterministic
 # identities, and both the backed-up and un-backed-up states present.
+#
+# Built `--release`, because that is the bundle that gets published. A debug
+# build can differ in ways that matter here -- asset hashing, what ends up in
+# the output directory, and anything template-related -- so checking debug
+# would be checking something users never receive.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 PORT="${VAULT_TEST_PORT:-8977}"
-echo "==> Building UI (example-data, no-sync)"
-(cd ui && dx build --features example-data,no-sync >/dev/null)
+echo "==> Building UI (release, example-data, no-sync)"
+(cd ui && dx build --release --features example-data,no-sync >/dev/null)
 
-BUNDLE="target/dx/ghostkey-ui/debug/web/public"
+BUNDLE="target/dx/ghostkey-ui/release/web/public"
 [ -f "$BUNDLE/index.html" ] || { echo "ERROR: no bundle at $BUNDLE" >&2; exit 1; }
 
 # The gateway serves a webapp under /v1/contract/web/<id>/, and dx bakes that

@@ -6,8 +6,13 @@
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta charset="UTF-8" />
         <!--
-            A custom template purely to drop dx's default `@import
-            url('https://fonts.googleapis.com/...Inter...')`.
+            A custom template for one reason: dx's default one opens with a
+            Google Fonts @import for Inter.
+
+            (Deliberately not quoting that URL here. This comment ships inside
+            index.html, and a literal fonts.googleapis.com string in the
+            published bundle reads as a live import to anyone grepping for
+            one -- it already fooled one such grep.)
 
             The gateway serves sandboxed webapp content under
             `default-src <origin> ...` with no other host allowed, so that

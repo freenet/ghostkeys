@@ -423,6 +423,9 @@ mod tests {
             "../../../v1/delegate/whatever",
             "DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N/../../..",
             "not base58 at all!!",
+            // The fragment is never URL-decoded, so percent-encoding cannot
+            // smuggle a path separator past the base58 check either.
+            "..%2F..%2Fv1%2Fdelegate",
             "0OIl", // characters outside the base58 alphabet
             // Right alphabet, too short. `ContractInstanceId::from_bytes`
             // accepts this and pads it into a different, entirely valid id --
