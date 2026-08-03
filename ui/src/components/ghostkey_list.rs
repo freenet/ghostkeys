@@ -271,7 +271,19 @@ static DEFAULT_KEY: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
 /// `ListGhostKeys` never checks for the signing key, so these render as
 /// perfectly healthy cards right up until the user tries to sign. Asking the
 /// delegate directly is the only way the vault can tell.
-static UNUSABLE_COUNT: GlobalSignal<usize> = GlobalSignal::new(|| 0);
+static UNUSABLE_COUNT: GlobalSignal<usize> = GlobalSignal::new(|| {
+    // Seeded under `example-data` so `cargo make dev` shows the warning state
+    // too. Without it the only way to see this banner is to genuinely lose a
+    // signing key, which is not something to reproduce on purpose.
+    #[cfg(feature = "example-data")]
+    {
+        1
+    }
+    #[cfg(not(feature = "example-data"))]
+    {
+        0
+    }
+});
 
 /// Ask the delegate whether any stored identity has lost its signing key.
 pub fn load_identity_presence() {
@@ -350,8 +362,18 @@ pub fn GhostKeyList() -> Element {
 
             if unusable > 0 {
                 div { class: "vault-warning",
-                    strong { "{unusable} identity(s) can no longer sign." }
-                    " Their certificate is still here but the private key is gone, so they cannot be used or backed up. Re-import from a backup to restore them."
+                    strong {
+                        if unusable == 1 {
+                            "One identity can no longer sign."
+                        } else {
+                            "{unusable} identities can no longer sign."
+                        }
+                    }
+                    if unusable == 1 {
+                        " Its certificate is still here but the private key is gone, so it cannot be used or backed up. Re-import it from a backup to restore it."
+                    } else {
+                        " Their certificates are still here but the private keys are gone, so they cannot be used or backed up. Re-import them from a backup to restore them."
+                    }
                 }
             }
 

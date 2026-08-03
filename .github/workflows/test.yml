@@ -56,3 +56,42 @@ jobs:
       # delegate's own tests.
       - name: Test
         run: cargo test --workspace
+
+  # The vault ships as a WASM bundle, so none of the Rust tests above can see
+  # whether a user can actually read or click anything: rendering a component
+  # tree in a native test does not exercise the compiled bundle, its event
+  # handlers, or its asset paths. This job loads the real bundle in Chromium.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Pinned to the version these checks were written against. Note it is
+      # ahead of the `dioxus = "=0.7.3"` library pin in Cargo.toml; 0.7.9 is
+      # what builds this bundle locally, and dx tolerates the gap. If you bump
+      # the library pin, re-run scripts/browser-test.sh before bumping here.
+      #
+      # binstall rather than `cargo install`: it fetches a prebuilt binary
+      # instead of compiling the CLI from source on every run.
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install dioxus-cli
+        run: cargo binstall -y dioxus-cli@0.7.9
+
+      - name: Install browser test deps
+        working-directory: ui/tests/browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Browser checks
+        run: bash scripts/browser-test.sh
