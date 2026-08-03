@@ -48,9 +48,15 @@
 pub(crate) struct MigrationOutcome {
     /// Keys recovered that the current delegate did not already hold.
     pub recovered: usize,
-    /// Legacy delegates that gave no definite answer, so we do not know
-    /// whether they hold keys.
+    /// Legacy delegates that never answered at all. Silence is the ordinary
+    /// case for a delegate the node does not have, so this is counted for the
+    /// log and deliberately not shown to the user.
     pub undetermined: usize,
+    /// Legacy delegates that DID answer, with a failure. Unlike silence this
+    /// is positive evidence: something is there and we could not read it --
+    /// a missing secret, or a refusal. Kept separate precisely so the
+    /// crying-wolf fix for silence does not also mute this.
+    pub answered_with_error: usize,
     /// Keys a legacy delegate handed over that would not re-import.
     pub failed_imports: usize,
 }
@@ -60,7 +66,7 @@ impl MigrationOutcome {
     /// re-imported. Purely a reporting distinction -- the sweep runs again on
     /// the next startup either way.
     pub(crate) fn is_conclusive(&self) -> bool {
-        self.undetermined == 0 && self.failed_imports == 0
+        self.undetermined == 0 && self.answered_with_error == 0 && self.failed_imports == 0
     }
 
     /// Whether the user needs telling.
@@ -79,12 +85,14 @@ impl MigrationOutcome {
     /// recoverable that was not recovered, it is rare, and the user can act on
     /// it by re-importing from their backup.
     pub(crate) fn needs_user_attention(&self) -> bool {
-        self.failed_imports > 0
+        self.failed_imports > 0 || self.answered_with_error > 0
     }
 
     pub(crate) fn record_probe(&mut self, verdict: &ProbeVerdict) {
-        if matches!(verdict, ProbeVerdict::Undetermined(_)) {
-            self.undetermined += 1;
+        match verdict {
+            ProbeVerdict::Undetermined(_) => self.undetermined += 1,
+            ProbeVerdict::AnsweredWithError(_) => self.answered_with_error += 1,
+            ProbeVerdict::Exported(_) | ProbeVerdict::Skipped => {}
         }
     }
 
@@ -112,9 +120,13 @@ pub(crate) enum ProbeVerdict {
     /// `DelegateCallError::NotRegistered`. Since the sweep seals nothing, a
     /// wrong read here costs one pass, not permanence.
     Skipped,
-    /// No usable answer. The delegate may be holding keys we could not see,
-    /// so the user is told rather than left with a silently partial sweep.
+    /// No answer at all. The delegate may be holding keys we could not see,
+    /// but silence is also exactly what a delegate the node does not have
+    /// looks like, so this alone is not news.
     Undetermined(String),
+    /// The delegate answered, with a failure. Something is there and we could
+    /// not read it, which IS worth telling the user about.
+    AnsweredWithError(String),
 }
 
 impl std::fmt::Debug for ProbeVerdict {
@@ -124,7 +136,43 @@ impl std::fmt::Debug for ProbeVerdict {
             Self::Exported(keys) => write!(f, "Exported({} key(s))", keys.len()),
             Self::Skipped => write!(f, "Skipped"),
             Self::Undetermined(reason) => write!(f, "Undetermined({reason})"),
+            Self::AnsweredWithError(reason) => write!(f, "AnsweredWithError({reason})"),
         }
+    }
+}
+
+/// Name a response variant WITHOUT formatting its payload.
+///
+/// `GhostkeyResponse` derives `Debug`, and `ExportResult` / `ExportAllResult`
+/// carry `signing_key_pem`. So `{response:?}` anywhere on this path would put
+/// private keys into the browser console. Every diagnostic here names the
+/// variant instead.
+pub(crate) fn response_kind(response: &ghostkey_common::GhostkeyResponse) -> &'static str {
+    use ghostkey_common::GhostkeyResponse as R;
+    match response {
+        R::ImportResult { .. } => "ImportResult",
+        R::GhostKeyList { .. } => "GhostKeyList",
+        R::GhostKeyDetail { .. } => "GhostKeyDetail",
+        R::Certificate { .. } => "Certificate",
+        R::SignResult { .. } => "SignResult",
+        R::DefaultKeyResult { .. } => "DefaultKeyResult",
+        R::DefaultKeySet { .. } => "DefaultKeySet",
+        R::VerifyResult { .. } => "VerifyResult",
+        R::Deleted { .. } => "Deleted",
+        R::LabelSet { .. } => "LabelSet",
+        R::PermissionGranted { .. } => "PermissionGranted",
+        R::PermissionRevoked { .. } => "PermissionRevoked",
+        R::PermissionList { .. } => "PermissionList",
+        R::ExportResult { .. } => "ExportResult",
+        R::ExportAllResult { .. } => "ExportAllResult",
+        R::PermissionDenied { .. } => "PermissionDenied",
+        R::AccessDenied { .. } => "AccessDenied",
+        R::NoIdentityAvailable => "NoIdentityAvailable",
+        R::KeyNotFound { .. } => "KeyNotFound",
+        R::Error { .. } => "Error",
+        // `GhostkeyResponse` is #[non_exhaustive]; a variant from a newer
+        // common must still not fall back to a payload-printing Debug.
+        _ => "unrecognised response",
     }
 }
 
@@ -143,11 +191,20 @@ pub(crate) fn classify(
     match reply {
         Ok(GhostkeyResponse::ExportAllResult { keys }) => ProbeVerdict::Exported(keys),
         Err(DelegateCallError::NotRegistered) => ProbeVerdict::Skipped,
-        Err(e) => ProbeVerdict::Undetermined(e.to_string()),
-        // A definite refusal ("unsupported request variant", `PermissionDenied`)
-        // is still undetermined for our purposes: it settles that we will get
-        // nothing from this delegate, not that it is holding nothing.
-        Ok(other) => ProbeVerdict::Undetermined(format!("unexpected reply: {other:?}")),
+        Err(DelegateCallError::TimedOut) => ProbeVerdict::Undetermined("no reply".into()),
+        // Transport and delegate-level failures came back FROM somewhere, so
+        // they are an answer, not silence.
+        Err(e) => ProbeVerdict::AnsweredWithError(e.to_string()),
+        // A refusal ("unsupported request variant", `PermissionDenied`) is
+        // also an answer: it settles that we get nothing from this delegate,
+        // not that it holds nothing.
+        //
+        // Only the variant NAME goes in the reason. `GhostkeyResponse` derives
+        // Debug and its export variants carry `signing_key_pem`, so formatting
+        // the payload here would put private keys in the browser console.
+        Ok(other) => {
+            ProbeVerdict::AnsweredWithError(format!("unexpected reply: {}", response_kind(&other)))
+        }
     }
 }
 
@@ -239,8 +296,15 @@ mod real {
                 ProbeVerdict::Exported(keys) => keys,
                 ProbeVerdict::Skipped => continue,
                 ProbeVerdict::Undetermined(reason) => {
+                    info!(
+                        "Legacy delegate {} did not answer ({reason})",
+                        legacy_key.encode()
+                    );
+                    continue;
+                }
+                ProbeVerdict::AnsweredWithError(reason) => {
                     warn!(
-                        "Legacy delegate {} undetermined: {reason}",
+                        "Legacy delegate {} answered with an error: {reason}",
                         legacy_key.encode()
                     );
                     continue;
@@ -300,11 +364,21 @@ mod real {
                     }
                     // The key is still only in the predecessor. Counting it as
                     // recovered would report a success that did not happen.
-                    other => {
-                        warn!("Could not re-import {}: {other:?}", key.fingerprint);
+                    Ok(other) => {
+                        warn!(
+                            "Could not re-import {}: {}",
+                            key.fingerprint,
+                            super::response_kind(&other)
+                        );
                         // Only a failure to bring over a key we do NOT already
                         // have is worth reporting; a failed refresh of one we
                         // already hold leaves the user no worse off.
+                        if !already_held {
+                            outcome.record_import(false);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Could not re-import {}: {e}", key.fingerprint);
                         if !already_held {
                             outcome.record_import(false);
                         }
@@ -338,12 +412,9 @@ mod real {
 
         if outcome.needs_user_attention() {
             toast::show(
-                format!(
-                    "Found {} ghostkey(s) in a previous vault version but could not \
-                     import them. Re-import from your backup, or reopen the vault \
-                     once your node is fully started.",
-                    outcome.failed_imports
-                ),
+                "A previous vault version may still be holding an identity that \
+                 could not be read. If one is missing, re-import it from your \
+                 backup, or reopen the vault once your node is fully started.",
                 ToastKind::Error,
             );
         }
@@ -358,6 +429,7 @@ mod tests {
         MigrationOutcome {
             recovered,
             undetermined,
+            answered_with_error: 0,
             failed_imports,
         }
     }
@@ -444,33 +516,80 @@ mod tests {
         ));
     }
 
+    /// Silence and a failure that came back FROM somewhere are different
+    /// things: silence is the ordinary case for a delegate the node lacks,
+    /// while an answered failure means something is there we could not read.
+    /// Collapsing them either warns everybody forever or warns nobody.
     #[test]
-    fn transport_and_delegate_failures_are_undetermined() {
+    fn silence_and_an_answered_failure_are_different_verdicts() {
+        assert!(matches!(
+            classify(Err(DelegateCallError::TimedOut)),
+            ProbeVerdict::Undetermined(_)
+        ));
+
         for err in [
-            DelegateCallError::TimedOut,
-            DelegateCallError::Failed("boom".into()),
-            DelegateCallError::Transport("gone".into()),
+            DelegateCallError::Failed("missing secret gk:sk:abc".into()),
+            DelegateCallError::Transport("socket closed".into()),
         ] {
             match classify(Err(err.clone())) {
-                // The reason is carried so the log names which delegate failed
-                // and why; an empty one would make an inconclusive sweep
-                // undiagnosable.
-                ProbeVerdict::Undetermined(reason) => {
+                ProbeVerdict::AnsweredWithError(reason) => {
                     assert!(!reason.is_empty(), "{err:?} produced no reason")
                 }
-                other => panic!("{err:?} should be undetermined, got {other:?}"),
+                other => panic!("{err:?} should be an answered failure, got {other:?}"),
             }
         }
     }
 
-    /// A definite refusal settles that we get nothing from this delegate, not
-    /// that it holds nothing -- so it must not read as a clean skip.
+    /// A refusal settles that we get nothing from this delegate, not that it
+    /// holds nothing -- so it must not read as a clean skip, and the user
+    /// should hear about it.
     #[test]
-    fn a_refusal_is_undetermined_not_skipped() {
+    fn a_refusal_is_an_answered_failure_not_a_skip() {
         let verdict = classify(Ok(GhostkeyResponse::Error {
             message: "Unsupported request variant for this delegate version".into(),
         }));
-        assert!(matches!(verdict, ProbeVerdict::Undetermined(_)));
+        assert!(matches!(verdict, ProbeVerdict::AnsweredWithError(_)));
+
+        let mut o = MigrationOutcome::default();
+        o.record_probe(&verdict);
+        assert!(
+            o.needs_user_attention(),
+            "an answered failure is reportable"
+        );
+    }
+
+    /// A legacy delegate holding a key whose signing key is gone answers
+    /// `MissingSecret`. That user has an unrecoverable identity and must be
+    /// told -- it is exactly the evidence the silence rule must not mute.
+    #[test]
+    fn a_missing_secret_reaches_the_user() {
+        let verdict = classify(Err(DelegateCallError::Failed("missing secret".into())));
+        let mut o = MigrationOutcome::default();
+        o.record_probe(&verdict);
+        assert!(o.needs_user_attention());
+    }
+
+    /// Diagnostics on this path must never format a response payload:
+    /// `GhostkeyResponse` derives Debug and its export variants carry the
+    /// private signing key, so one `{response:?}` would print it to the
+    /// browser console.
+    #[test]
+    fn a_reply_is_named_never_dumped() {
+        const SECRET: &str = "-----BEGIN ED25519_SIGNING_KEY_V1-----SUPERSECRET";
+        let reply = GhostkeyResponse::ExportResult {
+            fingerprint: "abc".into(),
+            certificate_pem: "cert".into(),
+            signing_key_pem: SECRET.into(),
+            label: None,
+        };
+        assert_eq!(response_kind(&reply), "ExportResult");
+
+        let verdict = classify(Ok(reply));
+        let rendered = format!("{verdict:?}");
+        assert!(
+            !rendered.contains("SUPERSECRET"),
+            "verdict leaked key material: {rendered}"
+        );
     }
 
     // --- Outcome accumulation -------------------------------------------
@@ -484,7 +603,13 @@ mod tests {
 
         o.record_probe(&ProbeVerdict::Undetermined("no answer".into()));
         assert_eq!(o.undetermined, 1);
+        assert_eq!(o.answered_with_error, 0);
         assert!(!o.needs_user_attention(), "counted, but not user-facing");
+
+        o.record_probe(&ProbeVerdict::AnsweredWithError("refused".into()));
+        assert_eq!(o.undetermined, 1, "silence and failures stay separate");
+        assert_eq!(o.answered_with_error, 1);
+        assert!(o.needs_user_attention());
     }
 
     /// A key that would not re-import is still only in the predecessor.

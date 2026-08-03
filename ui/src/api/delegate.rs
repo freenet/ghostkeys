@@ -84,28 +84,6 @@ pub(crate) fn attribute_error(err: &ClientError) -> Option<(DelegateKey, Delegat
     }
 }
 
-/// Decide whether an arriving reply is owed to a caller that already gave up.
-///
-/// Expired abandonments are dropped first: a reply that has not arrived within
-/// the grace period is treated as lost rather than late. That expiry is the
-/// whole point of this function existing. A first version tracked abandonments
-/// as a bare count with no expiry, and it wedged the vault permanently the
-/// first time a reply never arrived at all -- the count could only be drained
-/// by an incoming reply, so it stayed raised, consumed the next call's reply,
-/// that call timed out and raised it again, forever. An unattributable error
-/// hits exactly that case: it IS the reply, and it is dropped without draining
-/// anything.
-///
-/// Returns true when the caller must discard the reply.
-pub(crate) fn take_stale_abandonment(abandoned: &mut Vec<f64>, now: f64) -> bool {
-    abandoned.retain(|deadline| *deadline > now);
-    if abandoned.is_empty() {
-        return false;
-    }
-    abandoned.remove(0);
-    true
-}
-
 // Real implementation: only compiled for WASM without mock features
 #[cfg(all(
     target_family = "wasm",
@@ -140,72 +118,58 @@ mod real {
         sender: oneshot::Sender<PendingReply>,
     }
 
-    /// In-flight calls to one delegate.
-    ///
-    /// Delegate replies carry no request id (freenet-stdlib has a standing TODO
-    /// about this), so a reply can only be matched to a request by position.
-    /// That correspondence breaks the moment a caller gives up: the node's late
-    /// reply would otherwise be handed to whoever is waiting NOW.
-    ///
-    /// That is not a cosmetic mix-up here. In the migration sweep it would
-    /// resolve one key's `ImportGhostKey` with another key's result, counting a
-    /// key as recovered that was never imported.
+    /// In-flight calls to one delegate, oldest first. See `claim_waiter` for
+    /// how replies are matched to them and what that cannot handle.
     #[derive(Default)]
     struct DelegateCalls {
         waiters: VecDeque<Waiter>,
-        /// Deadlines (ms since epoch) for replies owed to callers that gave
-        /// up. The node answers in request order, so a reply arriving while
-        /// one of these is outstanding belongs to the abandoned call and must
-        /// be discarded rather than handed to whoever is waiting now.
-        ///
-        /// They EXPIRE, and that is the whole point. A first version counted
-        /// abandonments with no expiry, which wedged the vault permanently the
-        /// first time a reply never arrived at all: the count could only be
-        /// drained by an incoming reply, so it stayed raised, ate the next
-        /// call's reply, that call timed out and raised it again. An
-        /// unattributable error is exactly this case -- it IS the reply, and
-        /// it is dropped without draining anything.
-        ///
-        /// So a reply that has not arrived within the grace period is treated
-        /// as lost rather than late, and normal service resumes.
-        abandoned: Vec<f64>,
     }
-
-    /// How long after giving up a reply may still arrive and be recognised as
-    /// stale. Beyond this it is assumed lost. Comfortably longer than any
-    /// deadline in use, and bounded so a lost reply costs one grace period
-    /// rather than the lifetime of the page.
-    const STALE_REPLY_GRACE_MS: f64 = 10_000.0;
-
-    /// Ceiling on outstanding abandonments, so a pathological run cannot grow
-    /// this without bound.
-    const MAX_ABANDONED: usize = 8;
 
     /// Pending calls, keyed by delegate key bytes.
     static PENDING: LazyLock<Mutex<HashMap<Vec<u8>, DelegateCalls>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
-
-    fn now_ms() -> f64 {
-        js_sys::Date::now()
-    }
 
     fn next_token() -> u64 {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Take the reply that belongs to the next waiter, honouring abandonments
-    /// that have not yet expired.
+    /// Hand an arriving reply to the caller that has been waiting longest.
     ///
-    /// Returns `None` when the reply belongs to a caller that already gave up
-    /// (or to no one at all), in which case it must be dropped.
+    /// # The residual this does not solve, and why nothing here tries
+    ///
+    /// Delegate replies carry no request id (freenet-stdlib carries a standing
+    /// TODO for this), so a reply can only be matched to a call by arrival
+    /// order. That correspondence breaks when a caller gives up: the node's
+    /// late reply is then handed to whoever is waiting next.
+    ///
+    /// Two attempts were made to compensate in-band and BOTH made things
+    /// worse, so the third answer is not to try:
+    ///
+    /// 1. Counting abandoned replies and discarding that many. The count could
+    ///    only be drained by an arriving reply, so a reply that never came left
+    ///    it raised forever -- it ate the next call's reply, that call timed
+    ///    out and raised it again. One dropped reply wedged the delegate for
+    ///    the life of the page.
+    /// 2. Giving those abandonments an expiry. The expiry is anchored at the
+    ///    give-up instant, the next call is issued immediately, and a healthy
+    ///    reply lands ~100ms later -- inside the grace window every time. So
+    ///    the entry is drained by the live reply rather than by expiry, and the
+    ///    loop sustains itself exactly as before. Simulated: six consecutive
+    ///    healthy calls destroyed, no recovery.
+    ///
+    /// The problem is undecidable from arrival timing: "is this the abandoned
+    /// call's reply or the current one's?" has no answer without an id. So the
+    /// residual is accepted and bounded instead. It cannot cause lasting harm
+    /// here, because nothing durable is derived from it -- the sweep seals
+    /// nothing, and the set of keys it skips comes from `ListGhostKeys`, i.e.
+    /// the delegate's own state, re-read on every startup. A mis-delivered
+    /// reply costs one run's counts, and the next open corrects them.
+    ///
+    /// A real fix needs request ids on the wire.
     fn claim_waiter(key_bytes: &[u8]) -> Option<oneshot::Sender<PendingReply>> {
         let mut pending = PENDING.lock().ok()?;
         let calls = pending.get_mut(key_bytes)?;
-
-        if super::take_stale_abandonment(&mut calls.abandoned, now_ms()) {
-            return None;
-        }
         calls.waiters.pop_front().map(|w| w.sender)
     }
 
@@ -263,15 +227,15 @@ mod real {
 
     /// Send a request to a specific delegate key (for migration).
     ///
-    /// Invariant the reply-matching depends on: at most one call per delegate
-    /// key is in flight at a time, and calls to one key all use the same
-    /// deadline. Replies carry no request id, so they are matched by arrival
-    /// order; mixing deadlines on a single key would let a later call time out
-    /// first and cross-deliver an earlier call's reply. Today the legacy
-    /// probes (3s) only target legacy keys and `send_request` (10s) only the
-    /// current one, which keeps each key homogeneous. If that ever stops being
-    /// true, the abandonment bookkeeping needs a per-call identity rather than
-    /// a queue position.
+    /// What the reply-matching actually depends on: the node answers a given
+    /// delegate's requests in the order it received them, and calls to one key
+    /// share a deadline. Concurrent calls on one key DO happen -- the sweep
+    /// runs in the background while the UI stays interactive -- and FIFO
+    /// matching handles that correctly. What it cannot handle is a caller
+    /// giving up, since replies carry no id; mixing deadlines on a single key
+    /// would make that more likely by letting a later call time out first.
+    /// Today the legacy probes (3s) only target legacy keys and `send_request`
+    /// (10s) only the current one, so each key stays homogeneous.
     pub async fn send_to_delegate(
         delegate_key: &DelegateKey,
         request: GhostkeyRequest,
@@ -338,20 +302,18 @@ mod real {
                 )),
             },
             Either::Right((_, _)) => {
-                // Give up on this call. Remove OUR waiter by token -- popping
-                // the front would discard a concurrent call's waiter, and the
-                // front is not necessarily ours once deadlines differ.
+                // Give up on this call, removing OUR waiter by token. Popping
+                // the front would discard a different call's waiter -- the
+                // front is not necessarily ours, since the sweep runs in the
+                // background while the UI stays interactive and both talk to
+                // the current delegate.
                 //
-                // A reply may still be in flight, so record that one incoming
-                // reply is owed to a caller who is no longer there -- with an
-                // expiry, so a reply that never comes cannot wedge the key.
+                // Nothing is recorded about the reply that may still be in
+                // flight; see `claim_waiter` for why every attempt to
+                // compensate for that made things worse.
                 if let Ok(mut pending) = PENDING.lock() {
                     if let Some(calls) = pending.get_mut(&key_bytes) {
-                        let waiting = calls.waiters.len();
                         calls.waiters.retain(|w| w.token != token);
-                        if calls.waiters.len() < waiting && calls.abandoned.len() < MAX_ABANDONED {
-                            calls.abandoned.push(now_ms() + STALE_REPLY_GRACE_MS);
-                        }
                     }
                 }
                 Err(DelegateCallError::TimedOut)
@@ -524,62 +486,5 @@ mod tests {
 
         let unrelated: ClientError = ErrorKind::NodeUnavailable.into();
         assert_eq!(attribute_error(&unrelated), None);
-    }
-
-    // --- Stale-reply bookkeeping ----------------------------------------
-
-    #[test]
-    fn with_nothing_abandoned_a_reply_is_delivered() {
-        let mut abandoned = Vec::new();
-        assert!(!take_stale_abandonment(&mut abandoned, 1_000.0));
-    }
-
-    /// The case the mechanism exists for: a caller gave up, its reply then
-    /// arrives, and must not be handed to whoever is waiting now.
-    #[test]
-    fn a_late_reply_is_discarded_once() {
-        let mut abandoned = vec![5_000.0];
-        assert!(take_stale_abandonment(&mut abandoned, 1_000.0));
-        assert!(abandoned.is_empty(), "one abandonment covers one reply");
-        assert!(!take_stale_abandonment(&mut abandoned, 1_000.0));
-    }
-
-    /// Regression for a permanent wedge. An abandonment whose reply never
-    /// arrives must expire: the previous version could only drain the counter
-    /// on an incoming reply, so a lost reply left it raised forever, ate the
-    /// next call's reply, and that call's timeout raised it again -- the vault
-    /// silently stopped working on a healthy socket until the page reloaded.
-    #[test]
-    fn an_abandonment_whose_reply_never_arrives_expires() {
-        let mut abandoned = vec![5_000.0];
-
-        // Still within the grace period: the reply could genuinely be late.
-        assert!(take_stale_abandonment(&mut abandoned.clone(), 4_999.0));
-
-        // Past it: assume lost, and deliver normally again.
-        assert!(!take_stale_abandonment(&mut abandoned, 5_001.0));
-        assert!(abandoned.is_empty(), "expired entries are dropped");
-    }
-
-    /// The wedge was self-sustaining, so pin that it cannot re-establish
-    /// itself: repeated give-ups whose replies never arrive must not leave a
-    /// backlog that keeps eating live replies.
-    #[test]
-    fn repeated_lost_replies_do_not_accumulate_into_a_wedge() {
-        let mut abandoned = Vec::new();
-        let mut clock = 0.0;
-
-        for _ in 0..20 {
-            // A call gives up, recording an abandonment that will expire.
-            abandoned.push(clock + 10_000.0);
-            // Its reply never comes; time passes beyond the grace period.
-            clock += 30_000.0;
-            // The next call's reply must be delivered, not eaten.
-            assert!(
-                !take_stale_abandonment(&mut abandoned, clock),
-                "a live reply was discarded at t={clock}"
-            );
-        }
-        assert!(abandoned.is_empty());
     }
 }
