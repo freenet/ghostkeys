@@ -13,6 +13,9 @@ on:
       # user's data". Without it, a toolchain-bump-only PR re-keys the
       # delegate and skips this guard entirely.
       - 'rust-toolchain.toml'
+      # The guard's main job is catching a PR that drops a recorded entry, and
+      # a PR can drop one by editing nothing but this file.
+      - 'legacy_delegates.toml'
 
 jobs:
   check-migration:
