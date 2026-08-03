@@ -1,11 +1,14 @@
-// Only the mock/native stubs at the bottom of this file name these types
-// directly; the wasm implementation imports its own inside `mod real`.
+use freenet_stdlib::client_api::{ClientError, DelegateError, ErrorKind, RequestError};
+use freenet_stdlib::prelude::DelegateKey;
+
+// Only the mock/native stubs at the bottom of this file name these directly;
+// the wasm implementation imports its own inside `mod real`.
 #[cfg(any(
     not(target_family = "wasm"),
     feature = "no-sync",
     feature = "example-data"
 ))]
-use freenet_stdlib::client_api::{ClientError, HostResponse};
+use freenet_stdlib::client_api::HostResponse;
 #[cfg(any(
     not(target_family = "wasm"),
     feature = "no-sync",
@@ -54,6 +57,33 @@ impl std::fmt::Display for DelegateCallError {
     }
 }
 
+/// Map a node error onto the delegate call it concerns, when it names one.
+///
+/// Deliberately narrow. `ExecutionError` and `ForbiddenSecretAccess` carry no
+/// delegate key at all, and `RegisterError` names one but corresponds to no
+/// waiting call -- `register_delegate` returns as soon as the send succeeds and
+/// never enqueues a waiter, so attributing it would resolve some *other*
+/// in-flight request for that delegate with a registration failure and leave
+/// the queue misaligned from then on. All three are left to the deadline.
+///
+/// Lives outside the wasm-only module so it can be tested: the
+/// `NotRegistered`-vs-anything-else split it produces is what decides whether
+/// the migration sweep passes over a delegate or warns the user about it.
+pub(crate) fn attribute_error(err: &ClientError) -> Option<(DelegateKey, DelegateCallError)> {
+    let ErrorKind::RequestError(RequestError::DelegateError(delegate_error)) = err.kind() else {
+        return None;
+    };
+
+    match delegate_error {
+        DelegateError::Missing(key) => Some((key.clone(), DelegateCallError::NotRegistered)),
+        DelegateError::MissingSecret { key, secret } => Some((
+            key.clone(),
+            DelegateCallError::Failed(format!("missing secret {secret}")),
+        )),
+        _ => None,
+    }
+}
+
 // Real implementation: only compiled for WASM without mock features
 #[cfg(all(
     target_family = "wasm",
@@ -65,9 +95,7 @@ mod real {
 
     use dioxus::logger::tracing::{error, info, warn};
     use freenet_stdlib::client_api::ClientRequest::DelegateOp;
-    use freenet_stdlib::client_api::{
-        ClientError, DelegateError, DelegateRequest, ErrorKind, HostResponse, RequestError,
-    };
+    use freenet_stdlib::client_api::{ClientError, DelegateRequest, HostResponse};
     use freenet_stdlib::prelude::{
         Delegate, DelegateCode, DelegateContainer, DelegateKey, DelegateWasmAPIVersion,
         OutboundDelegateMsg, Parameters,
@@ -318,7 +346,7 @@ mod real {
     /// is the errors the node *does* send (a throttled key, a missing secret),
     /// which previously vanished into the console.
     pub fn handle_client_error(err: &ClientError) {
-        let Some((key, call_error)) = attribute_error(err) else {
+        let Some((key, call_error)) = super::attribute_error(err) else {
             // Not attributable to a specific delegate, so there is no way to
             // know which pending request it belongs to. Resolving a guess
             // would fail the wrong call; let the timeout handle it.
@@ -334,31 +362,6 @@ mod real {
             None => {
                 warn!("Discarding delegate error with no waiting caller: {err}");
             }
-        }
-    }
-
-    /// Map a node error onto the delegate call it concerns, when it names one.
-    ///
-    /// Deliberately narrow. `ExecutionError` and `ForbiddenSecretAccess` carry
-    /// no delegate key at all, and `RegisterError` names one but corresponds to
-    /// no waiting call -- `register_delegate` returns as soon as the send
-    /// succeeds and never enqueues a waiter, so attributing it would resolve
-    /// some *other* in-flight request for that delegate with a registration
-    /// failure and leave the queue misaligned from then on. All three are left
-    /// to the timeout instead.
-    fn attribute_error(err: &ClientError) -> Option<(DelegateKey, DelegateCallError)> {
-        let ErrorKind::RequestError(RequestError::DelegateError(delegate_error)) = err.kind()
-        else {
-            return None;
-        };
-
-        match delegate_error {
-            DelegateError::Missing(key) => Some((key.clone(), DelegateCallError::NotRegistered)),
-            DelegateError::MissingSecret { key, secret } => Some((
-                key.clone(),
-                DelegateCallError::Failed(format!("missing secret {secret}")),
-            )),
-            _ => None,
         }
     }
 }
@@ -413,3 +416,60 @@ pub fn handle_delegate_response(_response: &HostResponse) {}
     feature = "example-data"
 ))]
 pub fn handle_client_error(_err: &ClientError) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freenet_stdlib::prelude::{Delegate, DelegateCode, Parameters};
+
+    fn a_delegate_key() -> DelegateKey {
+        let code = DelegateCode::from(vec![0u8, 1, 2, 3]);
+        let params = Parameters::from(Vec::<u8>::new());
+        Delegate::from((&code, &params)).key().clone()
+    }
+
+    fn client_error(inner: DelegateError) -> ClientError {
+        ErrorKind::RequestError(RequestError::DelegateError(inner)).into()
+    }
+
+    /// The distinction the migration sweep turns on: a node that has no such
+    /// delegate is passed over, anything else warns the user.
+    #[test]
+    fn a_missing_delegate_maps_to_not_registered() {
+        let key = a_delegate_key();
+        let attributed = attribute_error(&client_error(DelegateError::Missing(key.clone())));
+        assert_eq!(attributed, Some((key, DelegateCallError::NotRegistered)));
+    }
+
+    #[test]
+    fn a_missing_secret_is_a_failure_not_an_absent_delegate() {
+        let key = a_delegate_key();
+        let secret = freenet_stdlib::prelude::SecretsId::new(b"gk:cert:abc".to_vec());
+        let attributed =
+            attribute_error(&client_error(DelegateError::MissingSecret { key, secret }));
+        match attributed {
+            Some((_, DelegateCallError::Failed(_))) => {}
+            other => panic!("expected a Failed attribution, got {other:?}"),
+        }
+    }
+
+    /// `register_delegate` never enqueues a waiter, so attributing its failure
+    /// would resolve an unrelated in-flight call and misalign the queue from
+    /// then on. It must stay unattributed.
+    #[test]
+    fn a_registration_failure_is_never_attributed() {
+        let err = client_error(DelegateError::RegisterError(a_delegate_key()));
+        assert_eq!(attribute_error(&err), None);
+    }
+
+    /// Errors that name no delegate cannot be matched to a caller; guessing
+    /// would fail whichever request happened to be waiting.
+    #[test]
+    fn errors_without_a_delegate_key_are_not_attributed() {
+        let err = client_error(DelegateError::ExecutionError("boom".into()));
+        assert_eq!(attribute_error(&err), None);
+
+        let unrelated: ClientError = ErrorKind::NodeUnavailable.into();
+        assert_eq!(attribute_error(&unrelated), None);
+    }
+}

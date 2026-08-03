@@ -104,10 +104,38 @@ description = "Run all tests"
 command = "cargo"
 args = ["test", "--workspace"]
 
+# Two invocations, because neither target alone covers the code.
+#
+# wasm32 is what ships: the UI's real code paths are behind
+# cfg(target_arch = "wasm32"), so a native lint sees only stubs and reports the
+# entire delegate API as dead code. But #[cfg(test)] code is not compiled for
+# wasm32, so the test modules are linted natively instead.
+#
+# Kept in step with .github/workflows/test.yml deliberately: this task used to
+# be a native --all-targets run that failed with more than a dozen dead-code
+# errors, so anyone running it by hand could not tell their own mistakes from
+# the standing noise.
 [tasks.clippy]
-description = "Run clippy on all targets"
+description = "Run clippy for the shipped target and for test code"
+dependencies = ["clippy-wasm", "clippy-tests"]
+
+[tasks.clippy-wasm]
+description = "Lint the code that actually ships"
 command = "cargo"
-args = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+args = [
+  "clippy",
+  "--target",
+  "wasm32-unknown-unknown",
+  "--workspace",
+  "--",
+  "-D",
+  "warnings",
+]
+
+[tasks.clippy-tests]
+description = "Lint test code, which wasm32 does not compile"
+command = "cargo"
+args = ["clippy", "--workspace", "--tests", "--", "-D", "warnings"]
 
 # --- Utility ---
 

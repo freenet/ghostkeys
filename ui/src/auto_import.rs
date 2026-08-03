@@ -193,9 +193,16 @@ fn decode_base64(input: &str) -> Option<String> {
 
     // Add padding if needed
     let padded = match standard.len() % 4 {
+        0 => standard,
         2 => format!("{standard}=="),
         3 => format!("{standard}="),
-        _ => standard,
+        // 4n+1 cannot be valid base64 -- no whole number of 6-bit groups
+        // produces that length. This used to fall through unpadded and decode
+        // to short garbage, so a truncated import link (a wrapped email, a
+        // clipped copy-paste) surfaced as a confusing certificate error from
+        // the delegate instead of the "this link is malformed, use your
+        // backup" message the caller is waiting to show.
+        _ => return None,
     };
 
     // Decode
@@ -251,4 +258,89 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     }
 
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact shape `donation-success.js` produces: standard base64 with
+    /// `+/` swapped for `-_` and trailing `=` stripped.
+    fn url_safe(input: &str) -> String {
+        #[allow(deprecated)]
+        let standard = {
+            // Tiny local encoder; the crate deliberately carries no base64
+            // dependency, and the decoder under test is hand-rolled.
+            const ALPHABET: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let bytes = input.as_bytes();
+            let mut out = String::new();
+            for chunk in bytes.chunks(3) {
+                let b = [
+                    chunk[0],
+                    *chunk.get(1).unwrap_or(&0),
+                    *chunk.get(2).unwrap_or(&0),
+                ];
+                let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+                let idx = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
+                let keep = chunk.len() + 1;
+                for (i, ix) in idx.iter().enumerate() {
+                    if i < keep {
+                        out.push(ALPHABET[*ix as usize] as char);
+                    }
+                }
+            }
+            out
+        };
+        standard.replace('+', "-").replace('/', "_")
+    }
+
+    #[test]
+    fn round_trips_a_pem_shaped_payload() {
+        let pem = "-----BEGIN GHOSTKEY_CERTIFICATE_V1-----\nabc+def/ghi\n-----END-----";
+        assert_eq!(decode_base64(&url_safe(pem)).as_deref(), Some(pem));
+    }
+
+    /// Every input length except 4n+1 is decodable; the encoder never emits
+    /// 4n+1, so any input of that length has been damaged in transit.
+    #[test]
+    fn round_trips_every_payload_length() {
+        for len in 1..40 {
+            let payload = "x".repeat(len);
+            assert_eq!(
+                decode_base64(&url_safe(&payload)).as_deref(),
+                Some(payload.as_str()),
+                "failed at length {len}"
+            );
+        }
+    }
+
+    /// A clipped link must be refused, not decoded into short garbage. Before
+    /// this, a 4n+1 payload fell through unpadded and produced a confusing
+    /// certificate error from the delegate instead of a "use your backup"
+    /// message.
+    #[test]
+    fn refuses_a_truncated_payload() {
+        let full = url_safe("some ghostkey material here");
+        // Largest 4n+1 length that fits, so this is a genuine prefix of a real
+        // payload rather than a synthetic string.
+        let clipped_len = ((full.len() - 1) / 4) * 4 + 1;
+        let truncated: String = full.chars().take(clipped_len).collect();
+        assert_eq!(truncated.len() % 4, 1, "test needs a 4n+1 length");
+        assert_eq!(decode_base64(&truncated), None);
+    }
+
+    #[test]
+    fn refuses_characters_outside_the_alphabet() {
+        assert_eq!(decode_base64("abcd!efg"), None);
+        assert_eq!(decode_base64("ab*d"), None);
+    }
+
+    /// The URL-safe alphabet must map back to `+` and `/`, or any payload
+    /// containing those bytes decodes wrongly.
+    #[test]
+    fn maps_the_url_safe_alphabet_back() {
+        let with_both = decode_base64(&url_safe("??>")).unwrap();
+        assert_eq!(with_both, "??>");
+    }
 }

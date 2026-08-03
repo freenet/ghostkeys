@@ -67,6 +67,61 @@ impl MigrationOutcome {
     pub(crate) fn needs_user_attention(&self) -> bool {
         !self.is_conclusive()
     }
+
+    pub(crate) fn record_probe(&mut self, verdict: &ProbeVerdict) {
+        if matches!(verdict, ProbeVerdict::Undetermined(_)) {
+            self.undetermined += 1;
+        }
+    }
+
+    pub(crate) fn record_import(&mut self, recovered: bool) {
+        if recovered {
+            self.recovered += 1;
+        } else {
+            self.failed_imports += 1;
+        }
+    }
+}
+
+/// What a probe of one legacy delegate established.
+///
+/// No `PartialEq`: `ExportedGhostKey` carries key material and does not
+/// implement it, and a derive here would invite comparing secrets by value.
+#[derive(Debug, Clone)]
+pub(crate) enum ProbeVerdict {
+    /// The delegate answered with the keys it holds, possibly none.
+    Exported(Vec<ghostkey_common::ExportedGhostKey>),
+    /// Nothing actionable, and nothing to worry about right now. Notably NOT
+    /// a claim that the delegate holds nothing -- see
+    /// `DelegateCallError::NotRegistered`. Since the sweep seals nothing, a
+    /// wrong read here costs one pass, not permanence.
+    Skipped,
+    /// No usable answer. The delegate may be holding keys we could not see,
+    /// so the user is told rather than left with a silently partial sweep.
+    Undetermined(String),
+}
+
+/// Decide what one probe reply means.
+///
+/// Split out from the sweep because this is the judgement that can lose keys,
+/// and inside the wasm-only module it was reachable by no test at all: a
+/// mutation that stopped counting undetermined delegates, and counted failed
+/// re-imports as recoveries, passed fmt, clippy and the entire suite.
+pub(crate) fn classify(
+    reply: Result<ghostkey_common::GhostkeyResponse, crate::api::delegate::DelegateCallError>,
+) -> ProbeVerdict {
+    use crate::api::delegate::DelegateCallError;
+    use ghostkey_common::GhostkeyResponse;
+
+    match reply {
+        Ok(GhostkeyResponse::ExportAllResult { keys }) => ProbeVerdict::Exported(keys),
+        Err(DelegateCallError::NotRegistered) => ProbeVerdict::Skipped,
+        Err(e) => ProbeVerdict::Undetermined(e.to_string()),
+        // A definite refusal ("unsupported request variant", `PermissionDenied`)
+        // is still undetermined for our purposes: it settles that we will get
+        // nothing from this delegate, not that it is holding nothing.
+        Ok(other) => ProbeVerdict::Undetermined(format!("unexpected reply: {other:?}")),
+    }
 }
 
 /// Recover ghostkeys stored under earlier delegate versions.
@@ -99,9 +154,8 @@ mod real {
     use freenet_stdlib::prelude::{CodeHash, DelegateKey};
     use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
 
-    use super::MigrationOutcome;
+    use super::{MigrationOutcome, ProbeVerdict};
     use crate::api;
-    use crate::api::delegate::DelegateCallError;
     use crate::components::ghostkey_list;
     use crate::components::toast::{self, ToastKind};
 
@@ -144,27 +198,24 @@ mod real {
                 continue;
             }
 
-            let exported = match api::delegate::send_to_delegate(
-                &legacy_key,
-                GhostkeyRequest::ExportAllGhostKeys,
-                LEGACY_PROBE_TIMEOUT_SECS,
-            )
-            .await
-            {
-                Ok(GhostkeyResponse::ExportAllResult { keys }) => keys,
-                // Skip cheaply, but do NOT read this as "nothing is stored
-                // here": the node synthesizes it from a backoff throttle, and
-                // an unregistered delegate can still own secrets. Nothing is
-                // sealed on the strength of it -- the next startup asks again.
-                Err(DelegateCallError::NotRegistered) => continue,
-                Err(e) => {
-                    warn!("Legacy delegate {} undetermined: {e}", legacy_key.encode());
-                    outcome.undetermined += 1;
-                    continue;
-                }
-                Ok(other) => {
-                    warn!("Unexpected reply from legacy delegate: {other:?}");
-                    outcome.undetermined += 1;
+            let verdict = super::classify(
+                api::delegate::send_to_delegate(
+                    &legacy_key,
+                    GhostkeyRequest::ExportAllGhostKeys,
+                    LEGACY_PROBE_TIMEOUT_SECS,
+                )
+                .await,
+            );
+            outcome.record_probe(&verdict);
+
+            let exported = match verdict {
+                ProbeVerdict::Exported(keys) => keys,
+                ProbeVerdict::Skipped => continue,
+                ProbeVerdict::Undetermined(reason) => {
+                    warn!(
+                        "Legacy delegate {} undetermined: {reason}",
+                        legacy_key.encode()
+                    );
                     continue;
                 }
             };
@@ -196,7 +247,7 @@ mod real {
                             notary_info,
                             verifying_key_bytes: None,
                         });
-                        outcome.recovered += 1;
+                        outcome.record_import(true);
 
                         if let Some(label) = &key.label {
                             let _ = api::delegate::send_request(GhostkeyRequest::SetLabel {
@@ -210,7 +261,7 @@ mod real {
                     // recovered would report a success that did not happen.
                     other => {
                         warn!("Could not re-import {}: {other:?}", key.fingerprint);
-                        outcome.failed_imports += 1;
+                        outcome.record_import(false);
                     }
                 }
             }
@@ -292,5 +343,98 @@ mod tests {
     fn recovery_does_not_mask_an_unchecked_delegate() {
         let o = outcome(5, 1, 0);
         assert!(o.needs_user_attention());
+    }
+
+    // --- Probe classification -------------------------------------------
+    //
+    // These exist because a review mutation proved the previous suite could
+    // not see this code at all: dropping the undetermined count and counting
+    // failed re-imports as recoveries passed fmt, clippy and every test, while
+    // reproducing the stranded-keys symptom of #3.
+
+    use crate::api::delegate::DelegateCallError;
+    use ghostkey_common::GhostkeyResponse;
+
+    #[test]
+    fn an_export_reply_carries_its_keys_through() {
+        let verdict = classify(Ok(GhostkeyResponse::ExportAllResult { keys: Vec::new() }));
+        match verdict {
+            ProbeVerdict::Exported(keys) => assert!(keys.is_empty()),
+            other => panic!("expected Exported, got {other:?}"),
+        }
+    }
+
+    /// The load-bearing distinction: "the node has no such delegate" and "the
+    /// node did not answer" must NOT collapse into the same verdict. Treating
+    /// a silence as a skip is how a delegate still holding keys gets passed
+    /// over; treating a skip as undetermined warns every user forever.
+    #[test]
+    fn not_registered_and_no_answer_are_different_verdicts() {
+        assert!(matches!(
+            classify(Err(DelegateCallError::NotRegistered)),
+            ProbeVerdict::Skipped
+        ));
+        assert!(matches!(
+            classify(Err(DelegateCallError::TimedOut)),
+            ProbeVerdict::Undetermined(_)
+        ));
+    }
+
+    #[test]
+    fn transport_and_delegate_failures_are_undetermined() {
+        for err in [
+            DelegateCallError::TimedOut,
+            DelegateCallError::Failed("boom".into()),
+            DelegateCallError::Transport("gone".into()),
+        ] {
+            match classify(Err(err.clone())) {
+                // The reason is carried so the log names which delegate failed
+                // and why; an empty one would make an inconclusive sweep
+                // undiagnosable.
+                ProbeVerdict::Undetermined(reason) => {
+                    assert!(!reason.is_empty(), "{err:?} produced no reason")
+                }
+                other => panic!("{err:?} should be undetermined, got {other:?}"),
+            }
+        }
+    }
+
+    /// A definite refusal settles that we get nothing from this delegate, not
+    /// that it holds nothing -- so it must not read as a clean skip.
+    #[test]
+    fn a_refusal_is_undetermined_not_skipped() {
+        let verdict = classify(Ok(GhostkeyResponse::Error {
+            message: "Unsupported request variant for this delegate version".into(),
+        }));
+        assert!(matches!(verdict, ProbeVerdict::Undetermined(_)));
+    }
+
+    // --- Outcome accumulation -------------------------------------------
+
+    #[test]
+    fn only_undetermined_probes_count_as_undetermined() {
+        let mut o = MigrationOutcome::default();
+        o.record_probe(&ProbeVerdict::Exported(Vec::new()));
+        o.record_probe(&ProbeVerdict::Skipped);
+        assert_eq!(o.undetermined, 0);
+
+        o.record_probe(&ProbeVerdict::Undetermined("no answer".into()));
+        assert_eq!(o.undetermined, 1);
+        assert!(o.needs_user_attention());
+    }
+
+    /// A key that would not re-import is still only in the predecessor.
+    /// Counting it as recovered reports a success that did not happen.
+    #[test]
+    fn a_failed_import_is_never_counted_as_recovered() {
+        let mut o = MigrationOutcome::default();
+        o.record_import(false);
+        assert_eq!(o.recovered, 0);
+        assert_eq!(o.failed_imports, 1);
+        assert!(o.needs_user_attention());
+
+        o.record_import(true);
+        assert_eq!(o.recovered, 1);
+        assert_eq!(o.failed_imports, 1);
     }
 }

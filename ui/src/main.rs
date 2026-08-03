@@ -1,3 +1,12 @@
+// This crate is a wasm binary. A native build exists only so the pure logic
+// can be unit-tested, and in that build most of the crate is genuinely unused:
+// every real code path is behind `cfg(target_arch = "wasm32")`, leaving native
+// compilation looking at stubs. Saying so here is what lets `cargo clippy
+// --tests` run natively with `-D warnings` and actually mean something about
+// the test code, instead of drowning in dead-code reports about the delegate
+// API. Dead code in the code that SHIPS is still caught, by the wasm32 lint.
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
 mod api;
 mod auto_import;
 mod components;
