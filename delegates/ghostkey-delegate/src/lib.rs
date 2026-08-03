@@ -36,6 +36,18 @@ enum PendingPrompt {
         /// The trailing button is the deny button and has no entry here.
         fingerprints: Vec<String>,
     },
+    /// A request that needs *some* ghostkey but names none
+    /// (`SignWithDefault`, `GetDefaultKey`) from a caller with no grant yet.
+    ///
+    /// Same picker as `AnyAccess`, but the original request is replayed once
+    /// the user chooses, so the caller gets the signature it asked for rather
+    /// than a key list it then has to act on.
+    AnyAccessThenReplay {
+        request_id: u32,
+        requestor: SignatureRequestor,
+        fingerprints: Vec<String>,
+        original_payload: Vec<u8>,
+    },
 }
 
 pub struct GhostkeyDelegate;
@@ -134,6 +146,34 @@ fn handle_request(
         return request_any_access(ctx, requestor);
     }
 
+    // `SignWithDefault` and `GetDefaultKey` need SOME key but name none, so
+    // the fingerprint-scoped check below cannot see them. Without this, a
+    // caller holding no grant fell through to `resolve_default`, which
+    // filters by `Sign` scope, found nothing, and answered
+    // `NoIdentityAvailable` -- telling an app that the user owns no ghostkey
+    // when the truth was that the app had never asked for permission. An app
+    // following that answer sends someone who already paid for a ghostkey off
+    // to buy a second one.
+    //
+    // The honest split: if the vault is genuinely empty, `NoIdentityAvailable`
+    // is correct and the handler below returns it. If it holds keys, ask the
+    // user and replay.
+    if names_no_fingerprint_but_needs_one(&request) {
+        let fingerprints = handlers::load_index(ctx);
+        match default_key_route(
+            handlers::resolve_default(ctx, requestor).is_some(),
+            fingerprints.is_empty(),
+        ) {
+            DefaultKeyRoute::Prompt => {
+                return request_any_access_then_replay(ctx, requestor, payload, fingerprints)
+            }
+            // Both fall through to the handler: it answers with the resolved
+            // key, or with `NoIdentityAvailable` when the vault is genuinely
+            // empty.
+            DefaultKeyRoute::Proceed | DefaultKeyRoute::NoIdentity => {}
+        }
+    }
+
     // Permission-sensitive operations check the appropriate scope.
     if let Some(scope) = required_scope(&request) {
         if let Some(fp) = get_fingerprint(&request) {
@@ -195,7 +235,14 @@ fn required_scope(request: &GhostkeyRequest) -> Option<GhostkeyScope> {
             Some(GhostkeyScope::ReadPublic)
         }
         GhostkeyRequest::SignMessage { .. } => Some(GhostkeyScope::Sign),
-        GhostkeyRequest::ExportGhostKey { .. } => Some(GhostkeyScope::Export),
+        // `MarkBackedUp` writes a flag that suppresses a backup warning, so
+        // it is gated on the vault-only `Export` scope: an app that cannot
+        // export the key has no backup of it and no business silencing the
+        // warning. `handle_mark_backed_up` enforces this too -- declaring it
+        // here keeps the table complete rather than relying on the catch-all.
+        GhostkeyRequest::ExportGhostKey { .. } | GhostkeyRequest::MarkBackedUp { .. } => {
+            Some(GhostkeyScope::Export)
+        }
         GhostkeyRequest::DeleteGhostKey { .. } | GhostkeyRequest::SetLabel { .. } => {
             Some(GhostkeyScope::Delete)
         }
@@ -215,6 +262,7 @@ fn get_fingerprint(request: &GhostkeyRequest) -> Option<String> {
         | GhostkeyRequest::DeleteGhostKey { fingerprint }
         | GhostkeyRequest::SetLabel { fingerprint, .. }
         | GhostkeyRequest::ExportGhostKey { fingerprint }
+        | GhostkeyRequest::MarkBackedUp { fingerprint }
         | GhostkeyRequest::GrantPermission { fingerprint, .. }
         | GhostkeyRequest::RevokePermission { fingerprint, .. } => Some(fingerprint.clone()),
         _ => None,
@@ -387,6 +435,64 @@ fn request_any_access(
     Ok(vec![user_request])
 }
 
+/// Emit the key picker for a request that needs a key but names none, keeping
+/// the original request so it can be replayed on approval.
+fn request_any_access_then_replay(
+    ctx: &mut DelegateCtx,
+    requestor: &SignatureRequestor,
+    original_payload: &[u8],
+    fingerprints: Vec<String>,
+) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    use freenet_stdlib::prelude::{ClientResponse, UserInputRequest};
+
+    const MAX_BUTTON_FINGERPRINTS: usize = 9;
+    let fingerprints: Vec<String> = fingerprints
+        .into_iter()
+        .take(MAX_BUTTON_FINGERPRINTS)
+        .collect();
+
+    let request_id = next_prompt_request_id();
+    let requestor_desc = requestor_short_label(requestor);
+
+    let mut body = format!(
+        "{requestor_desc} wants to sign with one of your ghostkey identities.\n\n\
+         Pick a key to use, or deny."
+    );
+    for (i, fp) in fingerprints.iter().enumerate() {
+        body.push_str(&format!("\n  {}. {fp}", i + 1));
+    }
+
+    logging::info(&format!("Requesting sign-with-default prompt: {body}"));
+
+    let pending = PendingPrompt::AnyAccessThenReplay {
+        request_id,
+        requestor: requestor.clone(),
+        fingerprints: fingerprints.clone(),
+        original_payload: original_payload.to_vec(),
+    };
+    let pending_bytes =
+        to_cbor(&pending).map_err(|e| DelegateError::Other(format!("serialize pending: {e}")))?;
+    ctx.write(&pending_bytes);
+
+    let mut responses: Vec<ClientResponse<'static>> = fingerprints
+        .iter()
+        .map(|fp| ClientResponse::new(format!("Share {fp}").into_bytes()))
+        .collect();
+    responses.push(ClientResponse::new(b"Deny".to_vec()));
+
+    Ok(vec![OutboundDelegateMsg::RequestUserInput(
+        UserInputRequest {
+            request_id,
+            message: {
+                let json = serde_json::json!(body);
+                freenet_stdlib::prelude::NotificationMessage::try_from(&json)
+                    .expect("string to NotificationMessage")
+            },
+            responses,
+        },
+    )])
+}
+
 /// Handle the user's response to a permission prompt.
 fn handle_user_response(
     ctx: &mut DelegateCtx,
@@ -417,6 +523,18 @@ fn handle_user_response(
             fingerprints,
             ..
         } => handle_any_access_response(ctx, user_resp, requestor, fingerprints),
+        PendingPrompt::AnyAccessThenReplay {
+            requestor,
+            fingerprints,
+            original_payload,
+            ..
+        } => handle_any_access_then_replay_response(
+            ctx,
+            user_resp,
+            requestor,
+            fingerprints,
+            original_payload,
+        ),
     }
 }
 
@@ -534,6 +652,113 @@ fn handle_any_access_response(
     )])
 }
 
+/// Which requests need *some* ghostkey but name no fingerprint, so the
+/// fingerprint-scoped permission check further down cannot see them.
+fn names_no_fingerprint_but_needs_one(request: &GhostkeyRequest) -> bool {
+    matches!(
+        request,
+        GhostkeyRequest::SignWithDefault { .. } | GhostkeyRequest::GetDefaultKey
+    )
+}
+
+/// What to do with a request that needs a key but names none.
+#[derive(Debug, PartialEq, Eq)]
+enum DefaultKeyRoute {
+    /// The caller already has a usable key; the handler answers directly.
+    Proceed,
+    /// The vault holds keys the caller has no grant on. Ask the user.
+    Prompt,
+    /// The vault is genuinely empty; `NoIdentityAvailable` is the truth.
+    NoIdentity,
+}
+
+/// The three-way split that keeps `NoIdentityAvailable` honest.
+///
+/// Before this existed, a caller with no grant fell through to
+/// `resolve_default`, which filters by `Sign` scope, found nothing, and got
+/// `NoIdentityAvailable` -- telling an app the user owns no ghostkey when the
+/// truth was that the app had never asked. An app following that answer sends
+/// someone who already paid off to buy a second key.
+fn default_key_route(has_resolvable_default: bool, index_empty: bool) -> DefaultKeyRoute {
+    match (has_resolvable_default, index_empty) {
+        (true, _) => DefaultKeyRoute::Proceed,
+        (false, false) => DefaultKeyRoute::Prompt,
+        (false, true) => DefaultKeyRoute::NoIdentity,
+    }
+}
+
+/// The user's answer to a key-picker prompt.
+#[derive(Debug, PartialEq, Eq)]
+enum AnyAccessChoice {
+    Chose(String),
+    Denied,
+    /// The response matched neither `Deny` nor any offered fingerprint.
+    /// Treated as a denial: granting on an unrecognised button would mean
+    /// acting on a choice the user was never shown.
+    Unrecognized,
+}
+
+/// Match a prompt response back to a fingerprint the delegate actually
+/// offered, rather than parsing the label's suffix. The offered list is the
+/// truncated one stored with the pending prompt, so a fingerprint that never
+/// made it onto a button can never be selected.
+fn match_offered_fingerprint(response: &[u8], offered: &[String]) -> AnyAccessChoice {
+    if response == b"Deny" {
+        return AnyAccessChoice::Denied;
+    }
+    match offered
+        .iter()
+        .find(|fp| response == format!("Share {fp}").as_bytes())
+    {
+        Some(fp) => AnyAccessChoice::Chose(fp.clone()),
+        None => AnyAccessChoice::Unrecognized,
+    }
+}
+
+/// Approval flow for a request that needed a key but named none. Grants the
+/// third-party scope set on the chosen key, then replays the original request
+/// so the caller receives what it actually asked for.
+fn handle_any_access_then_replay_response(
+    ctx: &mut DelegateCtx,
+    user_resp: &freenet_stdlib::prelude::UserInputResponse<'_>,
+    requestor: SignatureRequestor,
+    fingerprints: Vec<String>,
+    original_payload: Vec<u8>,
+) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    let fp = match match_offered_fingerprint(user_resp.response.bytes(), &fingerprints) {
+        AnyAccessChoice::Chose(fp) => fp,
+        other => {
+            match other {
+                AnyAccessChoice::Denied => logging::info("User denied sign-with-default request"),
+                _ => logging::info("Sign-with-default response matched no offered fingerprint"),
+            }
+            let response = ghostkey_common::GhostkeyResponse::AccessDenied { requestor };
+            let response_bytes = to_cbor(&response)
+                .map_err(|e| DelegateError::Other(format!("serialize response: {e}")))?;
+            return Ok(vec![OutboundDelegateMsg::ApplicationMessage(
+                ApplicationMessage::new(response_bytes),
+            )]);
+        }
+    };
+
+    logging::info(&format!(
+        "User approved sign-with-default: granting third-party scopes on {fp}"
+    ));
+    permissions::grant_third_party(ctx, &fp, &requestor);
+
+    // Replay. `resolve_default` will now find this key, because the grant
+    // above gives the caller `Sign` on it.
+    let request: GhostkeyRequest = from_cbor(&original_payload)
+        .map_err(|e| DelegateError::Other(format!("deserialize original request: {e}")))?;
+    let response = handlers::handle(ctx, request, &requestor);
+
+    let response_bytes =
+        to_cbor(&response).map_err(|e| DelegateError::Other(format!("serialize response: {e}")))?;
+    Ok(vec![OutboundDelegateMsg::ApplicationMessage(
+        ApplicationMessage::new(response_bytes),
+    )])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,7 +789,13 @@ mod tests {
             requestor: webapp(0xcd),
             fingerprints: vec!["fp1".into(), "fp2".into()],
         };
-        for variant in [&fp, &any] {
+        let replay = PendingPrompt::AnyAccessThenReplay {
+            request_id: 9,
+            requestor: webapp(0xef),
+            fingerprints: vec!["fp1".into(), "fp2".into()],
+            original_payload: vec![4, 5, 6],
+        };
+        for variant in [&fp, &any, &replay] {
             let bytes = to_cbor(variant).unwrap();
             // Round-trip exactly.
             let _decoded: PendingPrompt = from_cbor(&bytes).unwrap();
@@ -580,6 +811,216 @@ mod tests {
         assert!(
             any_json.starts_with(r#"{"AnyAccess":"#),
             "AnyAccess variant name shifted: {any_json}"
+        );
+        let replay_json = serde_json::to_string(&replay).unwrap();
+        assert!(
+            replay_json.starts_with(r#"{"AnyAccessThenReplay":"#),
+            "AnyAccessThenReplay variant name shifted: {replay_json}"
+        );
+    }
+
+    use ghostkey_common::GhostkeyResponse;
+
+    /// A native `DelegateCtx` whose secret store is a permanent no-op (reads
+    /// return `None`, writes are dropped). That models exactly one real
+    /// situation -- an empty vault -- which is the situation these tests are
+    /// about, and the one where answering wrongly does the most damage.
+    ///
+    /// # Safety
+    /// `__new` only fabricates a handle. Off wasm the host functions it would
+    /// call are stubbed out, so no runtime environment is required.
+    fn empty_vault_ctx() -> DelegateCtx {
+        unsafe { DelegateCtx::__new() }
+    }
+
+    fn only_response(msgs: &[OutboundDelegateMsg]) -> GhostkeyResponse {
+        assert_eq!(msgs.len(), 1, "expected exactly one outbound message");
+        match &msgs[0] {
+            OutboundDelegateMsg::ApplicationMessage(app) => from_cbor(&app.payload).unwrap(),
+            other => panic!("expected an ApplicationMessage, got {other:?}"),
+        }
+    }
+
+    fn dispatch(request: &GhostkeyRequest) -> Vec<OutboundDelegateMsg> {
+        let payload = to_cbor(request).unwrap();
+        handle_request(&mut empty_vault_ctx(), &payload, &webapp(0x11)).unwrap()
+    }
+
+    #[test]
+    fn empty_vault_answers_sign_with_default_without_prompting() {
+        // End-to-end through the real dispatch, not just the pure router:
+        // an empty vault must answer, never raise a picker with no keys in it.
+        let msgs = dispatch(&GhostkeyRequest::SignWithDefault {
+            message: b"hello".to_vec(),
+        });
+        assert!(
+            matches!(only_response(&msgs), GhostkeyResponse::NoIdentityAvailable),
+            "empty vault must still answer NoIdentityAvailable"
+        );
+    }
+
+    #[test]
+    fn empty_vault_answers_get_default_key_without_prompting() {
+        // `GetDefaultKey` reports absence as `DefaultKeyResult { None }`
+        // rather than `NoIdentityAvailable` -- a shape that predates the
+        // prompt route. What matters here is the same as for
+        // `SignWithDefault`: an empty vault answers instead of raising a
+        // picker with nothing in it.
+        let msgs = dispatch(&GhostkeyRequest::GetDefaultKey);
+        match only_response(&msgs) {
+            GhostkeyResponse::DefaultKeyResult { fingerprint } => {
+                assert_eq!(fingerprint, None, "empty vault has no default key");
+            }
+            other => panic!("expected DefaultKeyResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn has_identity_never_prompts_and_reports_an_empty_vault() {
+        // The whole point of `HasIdentity` is that an app can ask "is there
+        // anything here?" without a consent dialog. A prompt here would make
+        // it useless for deciding whether to show a buy-a-key button.
+        let msgs = dispatch(&GhostkeyRequest::HasIdentity);
+        match only_response(&msgs) {
+            GhostkeyResponse::IdentityPresence { usable, unusable } => {
+                assert_eq!((usable, unusable), (0, 0));
+            }
+            other => panic!("expected IdentityPresence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mark_backed_up_from_an_ungranted_app_is_denied_not_prompted() {
+        // Prompting would invite the user to click Allow on something the
+        // replay still denies, because `Export` is never granted to an app.
+        let msgs = dispatch(&GhostkeyRequest::MarkBackedUp {
+            fingerprint: "abc123".into(),
+        });
+        assert!(
+            matches!(
+                only_response(&msgs),
+                GhostkeyResponse::PermissionDenied { .. }
+            ),
+            "MarkBackedUp must be refused outright for a caller without Export"
+        );
+    }
+
+    #[test]
+    fn only_the_two_fingerprint_free_requests_take_the_prompt_route() {
+        assert!(names_no_fingerprint_but_needs_one(
+            &GhostkeyRequest::SignWithDefault {
+                message: vec![1, 2, 3]
+            }
+        ));
+        assert!(names_no_fingerprint_but_needs_one(
+            &GhostkeyRequest::GetDefaultKey
+        ));
+
+        // Requests that name a fingerprint must NOT be diverted here -- the
+        // scoped check below handles them, and prompting twice for one
+        // request would be worse than not prompting at all.
+        assert!(!names_no_fingerprint_but_needs_one(
+            &GhostkeyRequest::SignMessage {
+                fingerprint: "abc".into(),
+                message: vec![]
+            }
+        ));
+        assert!(!names_no_fingerprint_but_needs_one(
+            &GhostkeyRequest::ListGhostKeys
+        ));
+        // `RequestAnyAccess` also names no fingerprint, but it is routed
+        // earlier to its own picker; diverting it here would double-prompt.
+        assert!(!names_no_fingerprint_but_needs_one(
+            &GhostkeyRequest::RequestAnyAccess
+        ));
+        assert!(!names_no_fingerprint_but_needs_one(
+            &GhostkeyRequest::HasIdentity
+        ));
+    }
+
+    #[test]
+    fn empty_vault_still_answers_no_identity_available() {
+        // The honest case: there is genuinely nothing to prompt about, so the
+        // app should be told to send the user to buy a key.
+        assert_eq!(
+            default_key_route(false, true),
+            DefaultKeyRoute::NoIdentity,
+            "an empty vault must keep answering NoIdentityAvailable"
+        );
+    }
+
+    #[test]
+    fn keys_present_but_no_grant_prompts_instead_of_denying_existence() {
+        // The bug being fixed: this used to answer NoIdentityAvailable, which
+        // sends a user who already paid off to buy a second ghostkey.
+        assert_eq!(default_key_route(false, false), DefaultKeyRoute::Prompt);
+    }
+
+    #[test]
+    fn resolvable_default_never_prompts() {
+        // Prompting a caller that already holds a grant would mean a consent
+        // dialog on every signature.
+        assert_eq!(default_key_route(true, false), DefaultKeyRoute::Proceed);
+        assert_eq!(default_key_route(true, true), DefaultKeyRoute::Proceed);
+    }
+
+    #[test]
+    fn deny_button_is_a_denial() {
+        let offered = vec!["fpA".to_string(), "fpB".to_string()];
+        assert_eq!(
+            match_offered_fingerprint(b"Deny", &offered),
+            AnyAccessChoice::Denied
+        );
+    }
+
+    #[test]
+    fn share_button_selects_the_matching_offered_key() {
+        let offered = vec!["fpA".to_string(), "fpB".to_string()];
+        assert_eq!(
+            match_offered_fingerprint(b"Share fpB", &offered),
+            AnyAccessChoice::Chose("fpB".to_string())
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_never_offered_cannot_be_selected() {
+        // The response arrives from outside the delegate. Parsing the suffix
+        // instead of matching the offered list would let a crafted response
+        // grant access to a key the user was never shown.
+        let offered = vec!["fpA".to_string()];
+        assert_eq!(
+            match_offered_fingerprint(b"Share fpZ", &offered),
+            AnyAccessChoice::Unrecognized
+        );
+        assert_eq!(
+            match_offered_fingerprint(b"Share ", &offered),
+            AnyAccessChoice::Unrecognized
+        );
+        assert_eq!(
+            match_offered_fingerprint(b"", &offered),
+            AnyAccessChoice::Unrecognized
+        );
+        // Prefix of a real button, and the real button plus a suffix.
+        assert_eq!(
+            match_offered_fingerprint(b"Share fp", &offered),
+            AnyAccessChoice::Unrecognized
+        );
+        assert_eq!(
+            match_offered_fingerprint(b"Share fpAA", &offered),
+            AnyAccessChoice::Unrecognized
+        );
+    }
+
+    #[test]
+    fn nothing_can_be_selected_when_nothing_was_offered() {
+        assert_eq!(
+            match_offered_fingerprint(b"Share fpA", &[]),
+            AnyAccessChoice::Unrecognized
+        );
+        // Deny still works with an empty offer list.
+        assert_eq!(
+            match_offered_fingerprint(b"Deny", &[]),
+            AnyAccessChoice::Denied
         );
     }
 }

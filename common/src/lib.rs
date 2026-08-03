@@ -89,6 +89,19 @@ pub struct GhostKeyInfo {
     /// that need the raw key (e.g. Harvest store contract parameters).
     #[serde(default)]
     pub verifying_key_bytes: Option<Vec<u8>>,
+    /// Whether the user has ever exported this identity.
+    ///
+    /// On most nodes the vault holds the only copy of a ghostkey, so an
+    /// identity that has never left it is one lost disk away from gone. The
+    /// vault marks un-exported identities so the reminder sits where someone
+    /// is looking at something they own, rather than mid-purchase where it is
+    /// just an obstacle between them and finishing.
+    ///
+    /// `#[serde(default)]` so a record written by an older delegate reads back
+    /// as "not backed up" -- the safe direction, since over-warning costs a
+    /// nudge and under-warning costs the key.
+    #[serde(default)]
+    pub backed_up: bool,
 }
 
 /// A ghostkey exported for backup (includes private signing key).
@@ -173,6 +186,25 @@ pub enum GhostkeyRequest {
     /// purpose to the user should do so in their own UI before this
     /// flow runs.
     RequestAnyAccess,
+    /// Ask whether the user holds any ghostkey at all, WITHOUT prompting.
+    ///
+    /// Apps need this and today have no way to get it. `RequestAnyAccess`
+    /// always prompts, so it cannot be polled. `ListGhostKeys` is filtered by
+    /// permission, so an app with no grant yet sees an empty list and cannot
+    /// tell "the user has none" from "I have not been granted access".
+    ///
+    /// The motivating case is the purchase round trip: an app that sends a
+    /// user off to buy a ghostkey wants to notice when they come back, and
+    /// polling a prompt is not an option.
+    ///
+    /// Deliberately leaks only the bit that `NoIdentityAvailable` already
+    /// leaks -- counts, never fingerprints, labels or tiers.
+    HasIdentity,
+    /// Record that the user has exported this identity, so the vault can stop
+    /// warning that it is the only copy. Requires `Export` scope, so only the
+    /// vault can set it -- a third-party app must not be able to silence a
+    /// warning about a key it does not hold a backup of.
+    MarkBackedUp { fingerprint: String },
 }
 
 /// Responses from the ghostkey delegate.
@@ -262,7 +294,28 @@ pub enum GhostkeyResponse {
     },
     /// The user has no ghostkeys. Apps should direct the user to
     /// freenet.org/ghostkey to purchase one.
+    ///
+    /// Note this means what it says: the vault is empty. It is NOT returned
+    /// merely because the caller lacks permission — a request that needs a key
+    /// the caller has no grant for prompts the user instead. An app can treat
+    /// this as "offer to buy one" without first checking whether it was really
+    /// a permissions problem.
     NoIdentityAvailable,
+    /// Reply to `HasIdentity`. Counts only — no fingerprints, labels or tiers.
+    IdentityPresence {
+        /// Identities that can actually sign: certificate AND signing key both
+        /// present.
+        usable: usize,
+        /// Identities whose certificate loads but whose signing key is gone.
+        /// These still appear in `ListGhostKeys`, which never checks for the
+        /// signing key, so without this count a half-lost identity looks
+        /// perfectly healthy right up until it fails to sign.
+        unusable: usize,
+    },
+    /// Confirms `MarkBackedUp`.
+    BackedUpMarked {
+        fingerprint: String,
+    },
     /// The requested ghostkey fingerprint was not found.
     KeyNotFound {
         fingerprint: String,

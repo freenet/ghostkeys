@@ -18,6 +18,15 @@ fn sk_key(fp: &str) -> Vec<u8> {
 fn label_key(fp: &str) -> Vec<u8> {
     format!("gk:label:{fp}").into_bytes()
 }
+/// Marker recording that the user has exported this identity at least once.
+/// Presence is the whole signal; the value is never read.
+fn backed_up_key(fp: &str) -> Vec<u8> {
+    format!("gk:backedup:{fp}").into_bytes()
+}
+
+fn is_backed_up(ctx: &DelegateCtx, fp: &str) -> bool {
+    ctx.get_secret(&backed_up_key(fp)).is_some()
+}
 
 /// Load the fingerprint index from secrets. Exposed at crate visibility
 /// so the `RequestAnyAccess` prompt path in `lib.rs` can list keys for
@@ -65,6 +74,12 @@ pub fn handle(
         ),
 
         GhostkeyRequest::ListGhostKeys => handle_list(ctx, requestor),
+
+        GhostkeyRequest::HasIdentity => handle_has_identity(ctx),
+
+        GhostkeyRequest::MarkBackedUp { fingerprint } => {
+            handle_mark_backed_up(ctx, &fingerprint, requestor)
+        }
 
         GhostkeyRequest::GetGhostKey { fingerprint } => {
             handle_get_detail(ctx, &fingerprint, requestor)
@@ -250,6 +265,7 @@ pub(crate) fn lookup_single_key(ctx: &DelegateCtx, fp: &str) -> GhostkeyResponse
                     label,
                     notary_info: notary_info(&cert),
                     verifying_key_bytes: Some(cert.verifying_key.as_bytes().to_vec()),
+                    backed_up: is_backed_up(ctx, fp),
                 }],
             }
         }
@@ -261,6 +277,81 @@ pub(crate) fn lookup_single_key(ctx: &DelegateCtx, fp: &str) -> GhostkeyResponse
         None => GhostkeyResponse::KeyNotFound {
             fingerprint: fp.to_string(),
         },
+    }
+}
+
+/// Answer "does the user hold a ghostkey?" without prompting and without
+/// naming anything.
+///
+/// Deliberately NOT permission-filtered. The whole point is that an app with
+/// no grant can ask — otherwise it cannot distinguish "the user has none, send
+/// them to buy one" from "I have not been granted access yet", and would send
+/// a user who already owns a key off to buy a second one. The only thing
+/// disclosed is a count, which is the bit `NoIdentityAvailable` already
+/// reveals to anyone who asks for a signature.
+fn handle_has_identity(ctx: &DelegateCtx) -> GhostkeyResponse {
+    let slots: Vec<(bool, bool)> = load_index(ctx)
+        .iter()
+        .map(|fp| {
+            (
+                load_cert(ctx, fp).is_some(),
+                ctx.get_secret(&sk_key(fp)).is_some(),
+            )
+        })
+        .collect();
+
+    let (usable, unusable) = tally_presence(&slots);
+    GhostkeyResponse::IdentityPresence { usable, unusable }
+}
+
+/// Pure tally behind `handle_has_identity`. One `(has_certificate,
+/// has_signing_key)` entry per indexed fingerprint; returns `(usable,
+/// unusable)`.
+///
+/// A certificate with no signing key is listed by `handle_list` and looks
+/// healthy, but cannot sign. Counting it separately is what lets the vault
+/// warn about it rather than offer a broken identity. An index entry whose
+/// certificate is gone is counted as neither -- there is nothing left to
+/// recover, and reporting it as `unusable` would nag about a key that no
+/// longer exists.
+fn tally_presence(slots: &[(bool, bool)]) -> (usize, usize) {
+    let mut usable = 0usize;
+    let mut unusable = 0usize;
+    for &(has_cert, has_sk) in slots {
+        match (has_cert, has_sk) {
+            (true, true) => usable += 1,
+            (true, false) => unusable += 1,
+            (false, _) => {}
+        }
+    }
+    (usable, unusable)
+}
+
+/// Record that the user holds a copy of this identity outside the vault.
+///
+/// Gated on `Export` — the scope that is only ever granted to the vault — so a
+/// third-party app cannot silence a warning about a key it has no backup of.
+fn handle_mark_backed_up(
+    ctx: &mut DelegateCtx,
+    fp: &str,
+    requestor: &SignatureRequestor,
+) -> GhostkeyResponse {
+    if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Export) {
+        return GhostkeyResponse::PermissionDenied {
+            fingerprint: fp.to_string(),
+            requestor: requestor.clone(),
+        };
+    }
+
+    if load_cert(ctx, fp).is_none() {
+        return GhostkeyResponse::KeyNotFound {
+            fingerprint: fp.to_string(),
+        };
+    }
+
+    ctx.set_secret(&backed_up_key(fp), b"1");
+    GhostkeyResponse::BackedUpMarked {
+        fingerprint: fp.to_string(),
     }
 }
 
@@ -285,6 +376,7 @@ fn handle_list(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyRes
                 label,
                 notary_info: notary_info(&cert),
                 verifying_key_bytes: Some(cert.verifying_key.as_bytes().to_vec()),
+                backed_up: is_backed_up(ctx, fp),
             });
         }
     }
@@ -427,7 +519,7 @@ fn handle_set_label(
 const DEFAULT_KEY: &[u8] = b"gk:default";
 
 /// Resolve the default ghostkey fingerprint: explicit default, or highest-tier.
-fn resolve_default(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> Option<String> {
+pub(crate) fn resolve_default(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> Option<String> {
     // The "default key" is selected for signing, so the requestor needs
     // Sign on it. ReadPublic alone wouldn't be enough -- a third-party
     // app that hasn't been granted Sign for any key shouldn't get a
@@ -900,6 +992,35 @@ fn handle_list_permissions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tally_presence_empty_vault_reports_nothing() {
+        assert_eq!(tally_presence(&[]), (0, 0));
+    }
+
+    #[test]
+    fn tally_presence_splits_signable_from_half_present() {
+        // Two complete keys, one certificate whose signing key is gone.
+        let slots = [(true, true), (true, false), (true, true)];
+        assert_eq!(tally_presence(&slots), (2, 1));
+    }
+
+    #[test]
+    fn tally_presence_ignores_index_entries_with_no_certificate() {
+        // A stale index entry must not be reported as an unusable identity --
+        // there is nothing to recover, so nagging about it is pure noise.
+        let slots = [(false, false), (false, true), (true, true)];
+        assert_eq!(tally_presence(&slots), (1, 0));
+    }
+
+    #[test]
+    fn tally_presence_all_half_present_is_not_reported_as_usable() {
+        // The bug this guards: reporting `usable > 0` for a vault that can
+        // list keys but sign with none would tell an app to go ahead and
+        // then fail at signing time, with no way to explain why.
+        let slots = [(true, false), (true, false)];
+        assert_eq!(tally_presence(&slots), (0, 2));
+    }
 
     #[test]
     fn test_verify_rejects_invalid_data() {

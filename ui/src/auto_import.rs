@@ -123,6 +123,10 @@ pub async fn import(pending: PendingImport) {
                 label: None,
                 notary_info,
                 verifying_key_bytes: None,
+                // Optimistic placeholder; the delegate is the authority and
+                // overwrites it on the next `ListGhostKeys`. A key that just
+                // arrived via a purchase URL has no backup anywhere.
+                backed_up: false,
             });
             clear_hash();
             toast::show(
