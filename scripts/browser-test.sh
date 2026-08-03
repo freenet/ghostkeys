@@ -41,8 +41,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Serving $CONTRACT_PATH on :$PORT"
-(cd "$SERVE_ROOT" && exec python3 -m http.server "$PORT" >/dev/null 2>&1) &
+# Served under the gateway's real sandbox CSP, not a bare static server --
+# see ui/tests/browser/serve.py. Without it a CDN asset passes every check
+# here and is blocked for every actual user.
+echo "==> Serving $CONTRACT_PATH on :$PORT (with gateway CSP)"
+python3 ui/tests/browser/serve.py "$PORT" "$SERVE_ROOT" >/dev/null 2>&1 &
 SERVER_PID=$!
 
 URL="http://127.0.0.1:$PORT$CONTRACT_PATH/"

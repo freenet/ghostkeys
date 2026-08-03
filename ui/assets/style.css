@@ -2,7 +2,21 @@
    Aesthetic: spectral/ethereal -- identities floating in a deep void
    Fonts: Newsreader (serif headings), Source Code Pro (crypto data), Outfit (body) */
 
-@import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,300;6..72,400;6..72,600&family=Source+Code+Pro:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap');
+/* No webfont @import.
+ *
+ * The gateway serves every webapp under a same-origin CSP that blocks
+ * fonts.googleapis.com, so this import never loaded in production -- verified
+ * against the live vault on 2026-08-03, which reported
+ * "Loading the stylesheet ... violates the following Content Security Policy
+ * directive" on every page load. Production has always rendered in the
+ * fallback stacks below.
+ *
+ * Keeping the import only made `dx serve` show developers a design users
+ * never saw, while adding a failed request and a console error to every real
+ * load. Removing it changes nothing a user sees.
+ *
+ * To actually ship these faces they must be vendored as data: URIs (see
+ * ghostkeys#13) -- a CDN link cannot work here whatever its URL. */
 
 :root {
     --void: #06080d;
