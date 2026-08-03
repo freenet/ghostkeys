@@ -63,9 +63,23 @@ impl MigrationOutcome {
         self.undetermined == 0 && self.failed_imports == 0
     }
 
-    /// Whether the user needs telling that something could not be checked.
+    /// Whether the user needs telling.
+    ///
+    /// Deliberately NOT "the sweep was inconclusive". A node does not answer a
+    /// probe for a delegate it does not have -- measured rather than assumed:
+    /// nine legacy entries produced nine timeouts and no error response for
+    /// any of them. So an undetermined probe is the NORMAL case on any node
+    /// that has not run every previous vault version, which is essentially
+    /// every node. Warning on it would put a red error in front of every user
+    /// on every open, forever, and train them to dismiss the one warning that
+    /// would matter. It stays counted and logged, but it is not news.
+    ///
+    /// A failed import is different: a legacy delegate handed us a key and we
+    /// could not bring it over. That is positive evidence of something
+    /// recoverable that was not recovered, it is rare, and the user can act on
+    /// it by re-importing from their backup.
     pub(crate) fn needs_user_attention(&self) -> bool {
-        !self.is_conclusive()
+        self.failed_imports > 0
     }
 
     pub(crate) fn record_probe(&mut self, verdict: &ProbeVerdict) {
@@ -85,9 +99,11 @@ impl MigrationOutcome {
 
 /// What a probe of one legacy delegate established.
 ///
-/// No `PartialEq`: `ExportedGhostKey` carries key material and does not
-/// implement it, and a derive here would invite comparing secrets by value.
-#[derive(Debug, Clone)]
+/// Neither `PartialEq` nor a derived `Debug`: `ExportedGhostKey` carries the
+/// private signing key, so a derive would print it into the browser console
+/// the first time anyone formatted a verdict, and an `==` would invite
+/// comparing secrets by value.
+#[derive(Clone)]
 pub(crate) enum ProbeVerdict {
     /// The delegate answered with the keys it holds, possibly none.
     Exported(Vec<ghostkey_common::ExportedGhostKey>),
@@ -99,6 +115,17 @@ pub(crate) enum ProbeVerdict {
     /// No usable answer. The delegate may be holding keys we could not see,
     /// so the user is told rather than left with a silently partial sweep.
     Undetermined(String),
+}
+
+impl std::fmt::Debug for ProbeVerdict {
+    /// Hand-written so the key count is visible and the key material is not.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exported(keys) => write!(f, "Exported({} key(s))", keys.len()),
+            Self::Skipped => write!(f, "Skipped"),
+            Self::Undetermined(reason) => write!(f, "Undetermined({reason})"),
+        }
+    }
 }
 
 /// Decide what one probe reply means.
@@ -221,12 +248,19 @@ mod real {
             };
 
             for key in &exported {
-                // Already in the current delegate: skip, so a predecessor that
-                // keeps its copy forever does not re-import and re-announce
-                // the same identities on every startup.
-                if held.contains(&key.fingerprint) {
-                    continue;
-                }
+                // Import even a fingerprint the current delegate already
+                // lists. `ListGhostKeys` reports a key whenever its
+                // CERTIFICATE loads and never checks the signing key, while a
+                // legacy delegate only ever offers a complete pair -- so a key
+                // whose cert survived but whose signing key did not looks
+                // present, cannot sign, and skipping it would strand it in
+                // that state forever. Re-importing overwrites both halves and
+                // heals it; `handle_import` is idempotent and dedupes.
+                //
+                // What must NOT repeat is the announcing: counting it as a
+                // recovery, or restoring the legacy label over a name the user
+                // has since chosen.
+                let already_held = held.contains(&key.fingerprint);
 
                 match api::delegate::send_request(GhostkeyRequest::ImportGhostKey {
                     certificate_pem: key.certificate_pem.clone(),
@@ -239,7 +273,6 @@ mod real {
                         fingerprint,
                         notary_info,
                     }) => {
-                        info!("Recovered ghostkey {fingerprint}");
                         held.insert(fingerprint.clone());
                         ghostkey_list::add_ghostkey(GhostKeyInfo {
                             fingerprint: fingerprint.clone(),
@@ -247,6 +280,14 @@ mod real {
                             notary_info,
                             verifying_key_bytes: None,
                         });
+
+                        if already_held {
+                            // Refreshed an identity we already had; nothing to
+                            // announce and no label to restore.
+                            continue;
+                        }
+
+                        info!("Recovered ghostkey {fingerprint}");
                         outcome.record_import(true);
 
                         if let Some(label) = &key.label {
@@ -261,7 +302,12 @@ mod real {
                     // recovered would report a success that did not happen.
                     other => {
                         warn!("Could not re-import {}: {other:?}", key.fingerprint);
-                        outcome.record_import(false);
+                        // Only a failure to bring over a key we do NOT already
+                        // have is worth reporting; a failed refresh of one we
+                        // already hold leaves the user no worse off.
+                        if !already_held {
+                            outcome.record_import(false);
+                        }
                     }
                 }
             }
@@ -281,15 +327,23 @@ mod real {
             );
         }
 
-        if outcome.needs_user_attention() {
+        if !outcome.is_conclusive() {
+            // Logged, not shown. On a healthy node most legacy entries simply
+            // do not answer, so this is the ordinary case rather than a fault.
             warn!(
                 "Migration sweep incomplete: {} undetermined delegate(s), {} failed import(s)",
                 outcome.undetermined, outcome.failed_imports
             );
+        }
+
+        if outcome.needs_user_attention() {
             toast::show(
-                "Could not check every previous vault version for stored ghostkeys. \
-                 If an identity is missing, reopen the vault once your node is fully \
-                 started, or re-import it from your backup.",
+                format!(
+                    "Found {} ghostkey(s) in a previous vault version but could not \
+                     import them. Re-import from your backup, or reopen the vault \
+                     once your node is fully started.",
+                    outcome.failed_imports
+                ),
                 ToastKind::Error,
             );
         }
@@ -320,29 +374,39 @@ mod tests {
         assert!(!outcome(3, 0, 0).needs_user_attention());
     }
 
-    /// A legacy delegate we could not reach may still be holding keys, so the
-    /// user has to be told rather than left with a silently partial sweep.
+    /// A delegate that did not answer is recorded, but must NOT reach the
+    /// user. A node does not answer a probe for a delegate it does not have,
+    /// so on any node that has not run every previous vault version -- which
+    /// is essentially every node -- this is the ordinary case. Warning on it
+    /// puts a red error in front of everyone on every open, forever.
     #[test]
-    fn an_undetermined_delegate_needs_user_attention() {
-        let o = outcome(0, 1, 0);
-        assert!(!o.is_conclusive());
-        assert!(o.needs_user_attention());
+    fn an_undetermined_delegate_is_recorded_but_not_reported() {
+        let o = outcome(0, 9, 0);
+        assert!(!o.is_conclusive(), "still counted for the log");
+        assert!(!o.needs_user_attention(), "must not warn the user");
     }
 
     /// A key pulled out of a predecessor but not re-imported is still only in
-    /// the predecessor, even though the sweep otherwise completed.
+    /// the predecessor. That is positive evidence of something recoverable
+    /// that was not recovered, and the user can act on it.
     #[test]
-    fn a_failed_import_needs_user_attention() {
+    fn a_failed_import_is_reported() {
         let o = outcome(1, 0, 1);
         assert!(!o.is_conclusive());
         assert!(o.needs_user_attention());
     }
 
-    /// Recovering keys does not excuse an entry we could not check.
+    /// Recovering keys does not excuse one we could not bring over.
     #[test]
-    fn recovery_does_not_mask_an_unchecked_delegate() {
-        let o = outcome(5, 1, 0);
-        assert!(o.needs_user_attention());
+    fn recovery_does_not_mask_a_failed_import() {
+        assert!(outcome(5, 0, 1).needs_user_attention());
+    }
+
+    /// The two signals are independent: silence never promotes itself into a
+    /// warning by piling up.
+    #[test]
+    fn undetermined_probes_never_add_up_to_a_warning() {
+        assert!(!outcome(0, 100, 0).needs_user_attention());
     }
 
     // --- Probe classification -------------------------------------------
@@ -420,7 +484,7 @@ mod tests {
 
         o.record_probe(&ProbeVerdict::Undetermined("no answer".into()));
         assert_eq!(o.undetermined, 1);
-        assert!(o.needs_user_attention());
+        assert!(!o.needs_user_attention(), "counted, but not user-facing");
     }
 
     /// A key that would not re-import is still only in the predecessor.
