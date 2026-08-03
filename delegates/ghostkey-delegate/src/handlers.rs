@@ -18,6 +18,15 @@ fn sk_key(fp: &str) -> Vec<u8> {
 fn label_key(fp: &str) -> Vec<u8> {
     format!("gk:label:{fp}").into_bytes()
 }
+/// Marker recording that the user has exported this identity at least once.
+/// Presence is the whole signal; the value is never read.
+fn backed_up_key(fp: &str) -> Vec<u8> {
+    format!("gk:backedup:{fp}").into_bytes()
+}
+
+fn is_backed_up(ctx: &DelegateCtx, fp: &str) -> bool {
+    ctx.get_secret(&backed_up_key(fp)).is_some()
+}
 
 /// Load the fingerprint index from secrets. Exposed at crate visibility
 /// so the `RequestAnyAccess` prompt path in `lib.rs` can list keys for
@@ -65,6 +74,12 @@ pub fn handle(
         ),
 
         GhostkeyRequest::ListGhostKeys => handle_list(ctx, requestor),
+
+        GhostkeyRequest::HasIdentity => handle_has_identity(ctx),
+
+        GhostkeyRequest::MarkBackedUp { fingerprint } => {
+            handle_mark_backed_up(ctx, &fingerprint, requestor)
+        }
 
         GhostkeyRequest::GetGhostKey { fingerprint } => {
             handle_get_detail(ctx, &fingerprint, requestor)
@@ -250,6 +265,7 @@ pub(crate) fn lookup_single_key(ctx: &DelegateCtx, fp: &str) -> GhostkeyResponse
                     label,
                     notary_info: notary_info(&cert),
                     verifying_key_bytes: Some(cert.verifying_key.as_bytes().to_vec()),
+                    backed_up: is_backed_up(ctx, fp),
                 }],
             }
         }
@@ -261,6 +277,81 @@ pub(crate) fn lookup_single_key(ctx: &DelegateCtx, fp: &str) -> GhostkeyResponse
         None => GhostkeyResponse::KeyNotFound {
             fingerprint: fp.to_string(),
         },
+    }
+}
+
+/// Answer "does the user hold a ghostkey?" without prompting and without
+/// naming anything.
+///
+/// Deliberately NOT permission-filtered. The whole point is that an app with
+/// no grant can ask — otherwise it cannot distinguish "the user has none, send
+/// them to buy one" from "I have not been granted access yet", and would send
+/// a user who already owns a key off to buy a second one. The only thing
+/// disclosed is a count, which is the bit `NoIdentityAvailable` already
+/// reveals to anyone who asks for a signature.
+fn handle_has_identity(ctx: &DelegateCtx) -> GhostkeyResponse {
+    let slots: Vec<(bool, bool)> = load_index(ctx)
+        .iter()
+        .map(|fp| {
+            (
+                load_cert(ctx, fp).is_some(),
+                ctx.get_secret(&sk_key(fp)).is_some(),
+            )
+        })
+        .collect();
+
+    let (usable, unusable) = tally_presence(&slots);
+    GhostkeyResponse::IdentityPresence { usable, unusable }
+}
+
+/// Pure tally behind `handle_has_identity`. One `(has_certificate,
+/// has_signing_key)` entry per indexed fingerprint; returns `(usable,
+/// unusable)`.
+///
+/// A certificate with no signing key is listed by `handle_list` and looks
+/// healthy, but cannot sign. Counting it separately is what lets the vault
+/// warn about it rather than offer a broken identity. An index entry whose
+/// certificate is gone is counted as neither -- there is nothing left to
+/// recover, and reporting it as `unusable` would nag about a key that no
+/// longer exists.
+fn tally_presence(slots: &[(bool, bool)]) -> (usize, usize) {
+    let mut usable = 0usize;
+    let mut unusable = 0usize;
+    for &(has_cert, has_sk) in slots {
+        match (has_cert, has_sk) {
+            (true, true) => usable += 1,
+            (true, false) => unusable += 1,
+            (false, _) => {}
+        }
+    }
+    (usable, unusable)
+}
+
+/// Record that the user holds a copy of this identity outside the vault.
+///
+/// Gated on `Export` — the scope that is only ever granted to the vault — so a
+/// third-party app cannot silence a warning about a key it has no backup of.
+fn handle_mark_backed_up(
+    ctx: &mut DelegateCtx,
+    fp: &str,
+    requestor: &SignatureRequestor,
+) -> GhostkeyResponse {
+    if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Export) {
+        return GhostkeyResponse::PermissionDenied {
+            fingerprint: fp.to_string(),
+            requestor: requestor.clone(),
+        };
+    }
+
+    if load_cert(ctx, fp).is_none() {
+        return GhostkeyResponse::KeyNotFound {
+            fingerprint: fp.to_string(),
+        };
+    }
+
+    ctx.set_secret(&backed_up_key(fp), b"1");
+    GhostkeyResponse::BackedUpMarked {
+        fingerprint: fp.to_string(),
     }
 }
 
@@ -285,6 +376,7 @@ fn handle_list(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyRes
                 label,
                 notary_info: notary_info(&cert),
                 verifying_key_bytes: Some(cert.verifying_key.as_bytes().to_vec()),
+                backed_up: is_backed_up(ctx, fp),
             });
         }
     }
@@ -427,7 +519,7 @@ fn handle_set_label(
 const DEFAULT_KEY: &[u8] = b"gk:default";
 
 /// Resolve the default ghostkey fingerprint: explicit default, or highest-tier.
-fn resolve_default(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> Option<String> {
+pub(crate) fn resolve_default(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> Option<String> {
     // The "default key" is selected for signing, so the requestor needs
     // Sign on it. ReadPublic alone wouldn't be enough -- a third-party
     // app that hasn't been granted Sign for any key shouldn't get a
@@ -460,6 +552,43 @@ fn resolve_default(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> Option<
     }
 
     best.map(|(fp, _)| fp)
+}
+
+/// Fingerprints that can actually sign, ordered the way `resolve_default`
+/// ranks them: highest donation tier first, ties broken by index order.
+///
+/// Both filters matter for the signing picker this feeds:
+///
+/// - **Ranked, not index order.** The picker shows at most a handful of
+///   buttons, so truncating import order would offer someone who bought a $5
+///   key first and a $500 key tenth only the $5 one.
+/// - **Signing key required, not just a certificate.** A half-lost identity
+///   still has a certificate and would otherwise appear in the picker; the
+///   user would approve it and get "signing key not found" back. Consent
+///   should not be collected for something that cannot work.
+///
+/// Not permission-filtered: this exists for the prompt shown when the caller
+/// has no grant on anything, so filtering by grant would return nothing.
+pub(crate) fn signable_fingerprints_by_tier_desc(ctx: &DelegateCtx) -> Vec<String> {
+    let with_tiers: Vec<(String, u32)> = load_index(ctx)
+        .into_iter()
+        .filter_map(|fp| {
+            let cert = load_cert(ctx, &fp)?;
+            ctx.get_secret(&sk_key(&fp))?;
+            let amount = extract_amount(&notary_info(&cert)).unwrap_or(0);
+            Some((fp, amount))
+        })
+        .collect();
+    rank_by_tier_desc(with_tiers)
+}
+
+/// Pure ranking behind `fingerprints_by_tier_desc`.
+fn rank_by_tier_desc(mut with_tiers: Vec<(String, u32)>) -> Vec<String> {
+    // Stable, so equal tiers keep index order and the prompt is reproducible.
+    // A picker whose buttons move between showings is one people click through
+    // without reading.
+    with_tiers.sort_by_key(|(_, amount)| std::cmp::Reverse(*amount));
+    with_tiers.into_iter().map(|(fp, _)| fp).collect()
 }
 
 /// Extract donation amount from notary info string.
@@ -900,6 +1029,69 @@ fn handle_list_permissions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rank_puts_the_most_valuable_key_first() {
+        let ranked = rank_by_tier_desc(vec![
+            ("cheap".to_string(), 5),
+            ("rich".to_string(), 500),
+            ("mid".to_string(), 20),
+        ]);
+        assert_eq!(ranked, vec!["rich", "mid", "cheap"]);
+    }
+
+    #[test]
+    fn rank_is_stable_within_a_tier() {
+        // Equal tiers keep index order, so the same vault always produces the
+        // same picker -- a prompt whose buttons move between showings is a
+        // prompt people click through without reading.
+        let ranked = rank_by_tier_desc(vec![
+            ("a".to_string(), 20),
+            ("b".to_string(), 20),
+            ("c".to_string(), 20),
+        ]);
+        assert_eq!(ranked, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn rank_survives_truncation_without_dropping_the_best_key() {
+        // The picker shows at most a handful of buttons. This is the case the
+        // ranking exists for: an untiered key imported first must not push a
+        // $500 key past the cutoff.
+        let mut input: Vec<(String, u32)> = (0..12).map(|i| (format!("early{i}"), 0)).collect();
+        input.push(("rich".to_string(), 500));
+        let ranked = rank_by_tier_desc(input);
+        assert_eq!(ranked[0], "rich");
+    }
+
+    #[test]
+    fn tally_presence_empty_vault_reports_nothing() {
+        assert_eq!(tally_presence(&[]), (0, 0));
+    }
+
+    #[test]
+    fn tally_presence_splits_signable_from_half_present() {
+        // Two complete keys, one certificate whose signing key is gone.
+        let slots = [(true, true), (true, false), (true, true)];
+        assert_eq!(tally_presence(&slots), (2, 1));
+    }
+
+    #[test]
+    fn tally_presence_ignores_index_entries_with_no_certificate() {
+        // A stale index entry must not be reported as an unusable identity --
+        // there is nothing to recover, so nagging about it is pure noise.
+        let slots = [(false, false), (false, true), (true, true)];
+        assert_eq!(tally_presence(&slots), (1, 0));
+    }
+
+    #[test]
+    fn tally_presence_all_half_present_is_not_reported_as_usable() {
+        // The bug this guards: reporting `usable > 0` for a vault that can
+        // list keys but sign with none would tell an app to go ahead and
+        // then fail at signing time, with no way to explain why.
+        let slots = [(true, false), (true, false)];
+        assert_eq!(tally_presence(&slots), (0, 2));
+    }
 
     #[test]
     fn test_verify_rejects_invalid_data() {

@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
+use ghostkey_common::{ExportedGhostKey, GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
@@ -23,18 +23,21 @@ pub static GHOSTKEYS: GlobalSignal<Vec<GhostKeyInfo>> = GlobalSignal::new(|| {
                 label: Some("Trading Identity".into()),
                 notary_info: "donation_amount:100".into(),
                 verifying_key_bytes: None,
+                backed_up: true,
             },
             GhostKeyInfo {
                 fingerprint: "7bNq2Wft".into(),
                 label: Some("Chat Identity".into()),
                 notary_info: "donation_amount:20".into(),
                 verifying_key_bytes: None,
+                backed_up: false,
             },
             GhostKeyInfo {
                 fingerprint: "Hv5sRe8x".into(),
                 label: None,
                 notary_info: "donation_amount:5".into(),
                 verifying_key_bytes: None,
+                backed_up: false,
             },
         ]
     }
@@ -52,6 +55,142 @@ pub fn add_ghostkey(info: GhostKeyInfo) {
     }
 }
 
+/// Hand `json` to the browser as a file download. Returns whether a download
+/// was actually triggered.
+///
+/// The return value matters: `export_all` used to claim success even when no
+/// file was written, and the backup marker must never be set for a backup the
+/// user does not have.
+#[cfg(target_arch = "wasm32")]
+fn trigger_download(json: &str, filename: &str) -> bool {
+    let bag = web_sys::BlobPropertyBag::new();
+    bag.set_type("application/json");
+    let Ok(blob) = web_sys::Blob::new_with_str_sequence_and_options(
+        &js_sys::Array::of1(&wasm_bindgen::JsValue::from_str(json)),
+        &bag,
+    ) else {
+        return false;
+    };
+    let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+        return false;
+    };
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        let _ = web_sys::Url::revoke_object_url(&url);
+        return false;
+    };
+    let Ok(a) = doc.create_element("a") else {
+        let _ = web_sys::Url::revoke_object_url(&url);
+        return false;
+    };
+    let _ = a.set_attribute("href", &url);
+    let _ = a.set_attribute("download", filename);
+    let a: web_sys::HtmlElement = a.unchecked_into();
+    a.click();
+    let _ = web_sys::Url::revoke_object_url(&url);
+    true
+}
+
+/// Off wasm there is no browser to download into, so nothing is ever saved.
+/// Saying so is what stops the caller marking keys as backed up.
+#[cfg(not(target_arch = "wasm32"))]
+fn trigger_download(_json: &str, _filename: &str) -> bool {
+    false
+}
+
+/// Tell the delegate the user now holds a copy of these identities outside
+/// the vault, and clear their reminders locally.
+///
+/// Only ever called after a download actually fired: a marker set for a
+/// backup that was never written would silence the one warning standing
+/// between the user and a lost key.
+async fn mark_backed_up(fingerprints: Vec<String>) {
+    for fp in fingerprints {
+        let marked = matches!(
+            crate::api::delegate::send_request(GhostkeyRequest::MarkBackedUp {
+                fingerprint: fp.clone(),
+            })
+            .await,
+            Ok(GhostkeyResponse::BackedUpMarked { .. })
+        );
+        // Mirror into the local list only on confirmation, so a failed write
+        // leaves the reminder showing rather than hiding it until reload.
+        if marked {
+            let mut keys = GHOSTKEYS.write();
+            if let Some(k) = keys.iter_mut().find(|k| k.fingerprint == fp) {
+                k.backed_up = true;
+            }
+        }
+    }
+}
+
+/// Download a single identity. Does NOT record it as backed up.
+///
+/// `a.click()` returning tells us the browser accepted the download, not that
+/// a file reached the disk -- a user with "ask where to save" enabled can
+/// still cancel the dialog. Marking here would silence the reminder for a key
+/// with no backup, which is the one failure that costs the key, so the marker
+/// is set only when the user says the copy exists. `on_downloaded` fires when
+/// the browser took the file, which is when it becomes reasonable to ask.
+fn export_one(fingerprint: String, mut on_downloaded: Signal<Option<String>>) {
+    spawn(async move {
+        use super::toast::{self, ToastKind};
+
+        let result = crate::api::delegate::send_request(GhostkeyRequest::ExportGhostKey {
+            fingerprint: fingerprint.clone(),
+        })
+        .await;
+
+        match result {
+            Ok(GhostkeyResponse::ExportResult {
+                fingerprint,
+                certificate_pem,
+                signing_key_pem,
+                label,
+            }) => {
+                // `ExportResult` does not carry the notary info, but
+                // `ExportAllGhostKeys` does. Fill it from the listed card so a
+                // single-key backup file is byte-identical in shape to an
+                // entry in a full one -- a backup format that varies by which
+                // button produced it is a trap for whatever reads it later.
+                let notary_info = GHOSTKEYS
+                    .read()
+                    .iter()
+                    .find(|k| k.fingerprint == fingerprint)
+                    .map(|k| k.notary_info.clone())
+                    .unwrap_or_default();
+                let exported = ExportedGhostKey {
+                    fingerprint: fingerprint.clone(),
+                    certificate_pem,
+                    signing_key_pem,
+                    label,
+                    notary_info,
+                };
+                let json = serde_json::to_string_pretty(&exported).unwrap_or_default();
+                if trigger_download(&json, &format!("ghostkey-{fingerprint}.json")) {
+                    on_downloaded.set(Some(fingerprint));
+                } else {
+                    toast::show("Could not save the backup file", ToastKind::Error);
+                }
+            }
+            Ok(GhostkeyResponse::Error { message }) => {
+                toast::show(format!("Backup failed: {message}"), ToastKind::Error);
+            }
+            Err(e) => {
+                toast::show(format!("Backup failed: {e}"), ToastKind::Error);
+            }
+            Ok(other) => {
+                toast::show(
+                    format!(
+                        "Backup failed: unexpected response {}",
+                        crate::api::delegate::response_kind(&other)
+                    ),
+                    ToastKind::Error,
+                );
+            }
+        }
+    });
+}
+
 fn export_all() {
     spawn(async {
         use super::toast::{self, ToastKind};
@@ -64,34 +203,19 @@ fn export_all() {
                     toast::show("No ghostkeys to export", ToastKind::Info);
                     return;
                 }
-                // Serialize to JSON and trigger download
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let json = serde_json::to_string_pretty(&keys).unwrap_or_default();
-                    let bag = web_sys::BlobPropertyBag::new();
-                    bag.set_type("application/json");
-                    let blob = web_sys::Blob::new_with_str_sequence_and_options(
-                        &js_sys::Array::of1(&wasm_bindgen::JsValue::from_str(&json)),
-                        &bag,
+                let json = serde_json::to_string_pretty(&keys).unwrap_or_default();
+                if trigger_download(&json, "ghostkeys-backup.json") {
+                    toast::show(
+                        format!("Exported {} ghostkey(s)", keys.len()),
+                        ToastKind::Success,
                     );
-                    if let Ok(blob) = blob {
-                        if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
-                            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                                if let Ok(a) = doc.create_element("a") {
-                                    let _ = a.set_attribute("href", &url);
-                                    let _ = a.set_attribute("download", "ghostkeys-backup.json");
-                                    let a: web_sys::HtmlElement = a.unchecked_into();
-                                    a.click();
-                                    let _ = web_sys::Url::revoke_object_url(&url);
-                                }
-                            }
-                        }
-                    }
+                    *CONFIRM_EXPORT_ALL.write() =
+                        Some(keys.into_iter().map(|k| k.fingerprint).collect());
+                } else {
+                    // Previously this reported success regardless, so a
+                    // failed download looked like a completed backup.
+                    toast::show("Could not save the backup file", ToastKind::Error);
                 }
-                toast::show(
-                    format!("Exported {} ghostkey(s)", keys.len()),
-                    ToastKind::Success,
-                );
             }
             Ok(GhostkeyResponse::Error { message }) => {
                 toast::show(format!("Export failed: {message}"), ToastKind::Error);
@@ -145,9 +269,31 @@ fn test_permission_prompt() {
     });
 }
 
+/// Fingerprints in a just-downloaded full export, awaiting the user's word
+/// that the file exists. `Some(..)` renders the confirmation bar.
+static CONFIRM_EXPORT_ALL: GlobalSignal<Option<Vec<String>>> = GlobalSignal::new(|| None);
+
 static SHOW_IMPORT: GlobalSignal<bool> = GlobalSignal::new(|| false);
 static SIGN_FINGERPRINT: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
 static DEFAULT_KEY: GlobalSignal<Option<String>> = GlobalSignal::new(|| None);
+
+/// Identities whose certificate is present but whose signing key is gone.
+///
+/// `ListGhostKeys` never checks for the signing key, so these render as
+/// perfectly healthy cards right up until the user tries to sign. Asking the
+/// delegate directly is the only way the vault can tell.
+static UNUSABLE_COUNT: GlobalSignal<usize> = GlobalSignal::new(|| 0);
+
+/// Ask the delegate whether any stored identity has lost its signing key.
+pub fn load_identity_presence() {
+    spawn(async {
+        if let Ok(GhostkeyResponse::IdentityPresence { unusable, .. }) =
+            crate::api::delegate::send_request(GhostkeyRequest::HasIdentity).await
+        {
+            *UNUSABLE_COUNT.write() = unusable;
+        }
+    });
+}
 
 /// Load the default key from the delegate on startup.
 pub fn load_default_key() {
@@ -166,6 +312,8 @@ pub fn GhostKeyList() -> Element {
     let keys = GHOSTKEYS.read();
     let show_import = SHOW_IMPORT.read();
     let sign_fp = SIGN_FINGERPRINT.read();
+    let unusable = *UNUSABLE_COUNT.read();
+    let confirm_all = CONFIRM_EXPORT_ALL.read();
 
     rsx! {
         section { class: "vault-section",
@@ -212,6 +360,48 @@ pub fn GhostKeyList() -> Element {
                 }
             }
 
+            if let Some(pending) = confirm_all.as_ref() {
+                div { class: "backup-nag",
+                    span { class: "backup-nag-text",
+                        "Downloaded {pending.len()} identity(s). Confirm you still have the file and the reminders will clear."
+                    }
+                    button {
+                        class: "action-btn action-backup",
+                        onclick: {
+                            let fps = pending.clone();
+                            move |_| {
+                                let fps = fps.clone();
+                                *CONFIRM_EXPORT_ALL.write() = None;
+                                spawn(async move { mark_backed_up(fps).await });
+                            }
+                        },
+                        "I have the file"
+                    }
+                    button {
+                        class: "action-btn",
+                        onclick: move |_| *CONFIRM_EXPORT_ALL.write() = None,
+                        "Dismiss"
+                    }
+                }
+            }
+
+            if unusable > 0 {
+                div { class: "vault-warning",
+                    strong {
+                        if unusable == 1 {
+                            "One identity can no longer sign."
+                        } else {
+                            "{unusable} identities can no longer sign."
+                        }
+                    }
+                    if unusable == 1 {
+                        " Its certificate is still here but the private key is gone, so it cannot be used or backed up. Re-import it from a backup to restore it."
+                    } else {
+                        " Their certificates are still here but the private keys are gone, so they cannot be used or backed up. Re-import them from a backup to restore them."
+                    }
+                }
+            }
+
             if keys.is_empty() {
                 div { class: "empty-vault",
                     div { class: "empty-icon" }
@@ -231,7 +421,7 @@ pub fn GhostKeyList() -> Element {
             } else {
                 div { class: "identity-stack",
                     for (i, gk) in keys.iter().enumerate() {
-                        GhostKeyCard { info: gk.clone(), index: i }
+                        GhostKeyCard { key: "{gk.fingerprint}", info: gk.clone(), index: i }
                     }
                 }
             }
@@ -334,6 +524,7 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
     let fp_for_delete = info.fingerprint.clone();
     let fp_for_label = info.fingerprint.clone();
     let fp_for_default = info.fingerprint.clone();
+    let fp_for_backup = info.fingerprint.clone();
     let tier_class = tier_level(&info.notary_info);
     let is_default = DEFAULT_KEY
         .read()
@@ -342,6 +533,18 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
     let delay = format!("{}ms", index * 80);
     let mut label_input = use_signal(|| info.label.clone().unwrap_or_default());
     let mut confirming_delete = use_signal(|| false);
+    // Which fingerprint the browser has taken a backup file for.
+    //
+    // Holds the fingerprint rather than a bool because Dioxus reuses component
+    // state across a re-render: deleting a card shifts the rest up, so a plain
+    // flag could land on a card that was never downloaded and offer to mark it
+    // backed up. Comparing against the card's own fingerprint makes that
+    // impossible regardless of how the list moves.
+    let downloaded = use_signal(|| None::<String>);
+    let is_downloaded = downloaded
+        .read()
+        .as_deref()
+        .is_some_and(|fp| fp == info.fingerprint);
 
     rsx! {
         div {
@@ -424,6 +627,39 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                                 });
                             }
                         },
+                    }
+                }
+
+                if !info.backed_up {
+                    div { class: "backup-nag",
+                        if is_downloaded {
+                            span { class: "backup-nag-text",
+                                "Downloaded. Confirm you still have the file — this reminder is the only thing standing between a lost node and a lost identity."
+                            }
+                            button {
+                                class: "action-btn action-backup",
+                                onclick: {
+                                    let fp = fp_for_backup.clone();
+                                    move |_| {
+                                        let fp = fp.clone();
+                                        spawn(async move { mark_backed_up(vec![fp]).await });
+                                    }
+                                },
+                                "I have the file"
+                            }
+                        } else {
+                            span { class: "backup-nag-text",
+                                "Only this vault holds this key. Save a copy so a lost node does not lose the identity."
+                            }
+                            button {
+                                class: "action-btn action-backup",
+                                onclick: {
+                                    let fp = fp_for_backup.clone();
+                                    move |_| export_one(fp.clone(), downloaded)
+                                },
+                                "Back up"
+                            }
+                        }
                     }
                 }
 

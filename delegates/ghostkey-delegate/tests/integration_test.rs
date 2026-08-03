@@ -135,6 +135,7 @@ fn test_request_response_serialization() {
                 label: Some("Test".into()),
                 notary_info: "info".into(),
                 verifying_key_bytes: None,
+                backed_up: false,
             }],
         },
         GhostkeyResponse::Error {

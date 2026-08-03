@@ -1,0 +1,12 @@
+{
+  "name": "ghostkey-vault-browser-tests",
+  "private": true,
+  "type": "module",
+  "description": "Browser checks for the vault UI. Run via scripts/browser-test.sh.",
+  "scripts": {
+    "test": "node vault.spec.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.56.1"
+  }
+}

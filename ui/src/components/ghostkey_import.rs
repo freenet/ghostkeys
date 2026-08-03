@@ -359,6 +359,11 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
                                             label: None,
                                             notary_info,
                                             verifying_key_bytes: None,
+                                            // Optimistic placeholder, corrected by
+                                            // the delegate on the next list. False
+                                            // is the safe direction: over-warning
+                                            // costs a nudge, under-warning the key.
+                                            backed_up: false,
                                         });
                                     }
                                     Ok(GhostkeyResponse::Error { message }) => {

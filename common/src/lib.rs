@@ -89,6 +89,19 @@ pub struct GhostKeyInfo {
     /// that need the raw key (e.g. Harvest store contract parameters).
     #[serde(default)]
     pub verifying_key_bytes: Option<Vec<u8>>,
+    /// Whether the user has ever exported this identity.
+    ///
+    /// On most nodes the vault holds the only copy of a ghostkey, so an
+    /// identity that has never left it is one lost disk away from gone. The
+    /// vault marks un-exported identities so the reminder sits where someone
+    /// is looking at something they own, rather than mid-purchase where it is
+    /// just an obstacle between them and finishing.
+    ///
+    /// `#[serde(default)]` so a record written by an older delegate reads back
+    /// as "not backed up" -- the safe direction, since over-warning costs a
+    /// nudge and under-warning costs the key.
+    #[serde(default)]
+    pub backed_up: bool,
 }
 
 /// A ghostkey exported for backup (includes private signing key).
@@ -137,6 +150,13 @@ pub enum GhostkeyRequest {
     /// Set which ghostkey is the default for signing.
     SetDefaultKey { fingerprint: String },
     /// Get the current default ghostkey fingerprint.
+    ///
+    /// Returns `DefaultKeyResult { fingerprint: None }` when the caller has no
+    /// `Sign` grant on any key, which is NOT the same as the user having no
+    /// ghostkey -- use `HasIdentity` for that question. This request never
+    /// prompts: it is a question, and an app must not be able to put a dialog
+    /// in front of the user just by asking one. `SignWithDefault` is the one
+    /// that prompts, because it acts.
     GetDefaultKey,
     /// Verify a signed message produced by this delegate.
     VerifySignedMessage { signed_message: Vec<u8> },
@@ -173,6 +193,29 @@ pub enum GhostkeyRequest {
     /// purpose to the user should do so in their own UI before this
     /// flow runs.
     RequestAnyAccess,
+    /// Ask whether the user holds any ghostkey at all, WITHOUT prompting.
+    ///
+    /// Apps need this and today have no way to get it. `RequestAnyAccess`
+    /// always prompts, so it cannot be polled. `ListGhostKeys` is filtered by
+    /// permission, so an app with no grant yet sees an empty list and cannot
+    /// tell "the user has none" from "I have not been granted access".
+    ///
+    /// The motivating case is the purchase round trip: an app that sends a
+    /// user off to buy a ghostkey wants to notice when they come back, and
+    /// polling a prompt is not an option.
+    ///
+    /// What this discloses without consent is a count. That is more than the
+    /// bare existence bit `NoIdentityAvailable` already leaks to anyone who
+    /// asks for a signature, and the trade is deliberate: no fingerprints,
+    /// labels or tiers are exposed, a count cannot be correlated across users,
+    /// and the alternative is that the vault cannot tell a half-lost identity
+    /// from a healthy one.
+    HasIdentity,
+    /// Record that the user has exported this identity, so the vault can stop
+    /// warning that it is the only copy. Requires `Export` scope, so only the
+    /// vault can set it -- a third-party app must not be able to silence a
+    /// warning about a key it does not hold a backup of.
+    MarkBackedUp { fingerprint: String },
 }
 
 /// Responses from the ghostkey delegate.
@@ -262,7 +305,34 @@ pub enum GhostkeyResponse {
     },
     /// The user has no ghostkeys. Apps should direct the user to
     /// freenet.org/ghostkey to purchase one.
+    ///
+    /// It is NOT returned merely because the caller lacks permission —
+    /// `SignWithDefault` prompts the user instead when the vault holds keys
+    /// the caller has no grant on. So an app can treat this as "offer to buy
+    /// one" without first checking whether it was really a permissions
+    /// problem.
+    ///
+    /// Precisely, it means no identity is *available to sign with*: either the
+    /// vault is empty, or every identity in it has lost its signing key. Use
+    /// `HasIdentity` to tell those apart — its `unusable` count is non-zero in
+    /// the second case, which is worth a different message, since buying
+    /// another key is not what that user needs.
     NoIdentityAvailable,
+    /// Reply to `HasIdentity`. Counts only — no fingerprints, labels or tiers.
+    IdentityPresence {
+        /// Identities that can actually sign: certificate AND signing key both
+        /// present.
+        usable: usize,
+        /// Identities whose certificate loads but whose signing key is gone.
+        /// These still appear in `ListGhostKeys`, which never checks for the
+        /// signing key, so without this count a half-lost identity looks
+        /// perfectly healthy right up until it fails to sign.
+        unusable: usize,
+    },
+    /// Confirms `MarkBackedUp`.
+    BackedUpMarked {
+        fingerprint: String,
+    },
     /// The requested ghostkey fingerprint was not found.
     KeyNotFound {
         fingerprint: String,

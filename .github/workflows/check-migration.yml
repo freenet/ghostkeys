@@ -43,31 +43,18 @@ jobs:
       - name: Build delegate WASM
         run: cargo build --target wasm32-unknown-unknown --release -p ghostkey-delegate
 
-      - name: Check migration entry exists
+      # Extracting the base file with `git show` rather than the previous
+      # `git stash` / `git checkout -- file` / `git stash pop` dance: that
+      # sequence mutated the working tree mid-check and swallowed both stash
+      # failures with `|| true`, so a failed pop would have left later steps
+      # reading the wrong tree while reporting success.
+      - name: Extract base branch's legacy_delegates.toml
         run: |
-          WASM="target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm"
-          CODE_HASH=$(b3sum --no-names "$WASM")
+          git show "${{ github.event.pull_request.base.sha }}:legacy_delegates.toml" \
+            > /tmp/base_legacy_delegates.toml
 
-          echo "Delegate WASM code_hash: $CODE_HASH"
-
-          if grep -q "$CODE_HASH" legacy_delegates.toml; then
-            echo "Migration entry found for current WASM hash."
-          else
-            # Check if the WASM actually changed compared to the base branch
-            git stash
-            git checkout ${{ github.event.pull_request.base.sha }} -- legacy_delegates.toml 2>/dev/null || true
-            BASE_LAST_HASH=$(grep 'code_hash' legacy_delegates.toml | tail -1 | grep -o '"[^"]*"' | tr -d '"')
-            git stash pop 2>/dev/null || true
-
-            if [ "$CODE_HASH" = "$BASE_LAST_HASH" ]; then
-              echo "WASM unchanged from base branch, no migration needed."
-            else
-              echo "::error::Delegate WASM changed but no migration entry found!"
-              echo "::error::Run 'cargo make add-migration' BEFORE making delegate/common changes,"
-              echo "::error::then commit legacy_delegates.toml with your PR."
-              echo ""
-              echo "Current WASM hash: $CODE_HASH"
-              echo "Last recorded hash: $BASE_LAST_HASH"
-              exit 1
-            fi
-          fi
+      # One implementation, called from both CI and `cargo make check-migration`,
+      # so the rule cannot drift between what blocks a PR and what blocks a
+      # publish.
+      - name: Check migration coverage
+        run: bash scripts/check-migration.sh /tmp/base_legacy_delegates.toml

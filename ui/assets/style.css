@@ -411,6 +411,57 @@ body {
     border-color: rgba(126, 180, 255, 0.25);
 }
 
+/* Backup reminder -- deliberately warm rather than alarming. Losing a key is
+   serious, but this is a nudge on something the user owns, not an error they
+   caused, and a red banner on every un-exported key would train them to
+   dismiss it. */
+.backup-nag {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin: 0.5rem 0 0.25rem;
+    padding: 0.5rem 0.625rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(232, 160, 96, 0.18);
+    background: rgba(232, 160, 96, 0.06);
+}
+
+.backup-nag-text {
+    font-size: 0.75rem;
+    line-height: 1.35;
+    color: var(--accent-warm);
+    flex: 1 1 14rem;
+}
+
+.action-backup {
+    color: var(--accent-warm) !important;
+    border-color: rgba(232, 160, 96, 0.3) !important;
+    flex: 0 0 auto;
+}
+.action-backup:hover {
+    background: rgba(232, 160, 96, 0.12) !important;
+}
+
+/* An identity that can no longer sign is not a nudge -- it is already broken,
+   and the user cannot fix it from inside the vault. */
+.vault-warning {
+    margin-bottom: 1rem;
+    padding: 0.75rem 0.875rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(232, 96, 96, 0.25);
+    background: var(--danger-dim);
+    color: var(--text);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+}
+
+.vault-warning strong {
+    color: var(--danger);
+    font-weight: 600;
+}
+
 .action-delete:hover {
     color: var(--danger);
     border-color: rgba(232, 96, 96, 0.25);

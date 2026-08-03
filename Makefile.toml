@@ -21,6 +21,11 @@ dependencies = ["build-delegate"]
 command = "bash"
 args = ["scripts/check-migration.sh"]
 
+[tasks.browser-test]
+description = "Build the UI and drive it in a real browser (Playwright + Chromium)"
+command = "bash"
+args = ["scripts/browser-test.sh"]
+
 [tasks.record-migration]
 description = "Append just-published delegate hash to legacy_delegates.toml"
 command = "bash"
