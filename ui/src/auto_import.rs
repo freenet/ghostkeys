@@ -135,7 +135,10 @@ pub async fn import(pending: PendingImport) {
             toast::show(format!("Import failed: {message}"), ToastKind::Error);
         }
         Ok(other) => {
-            error!("Auto-import: unexpected response: {other:?}");
+            error!(
+                "Auto-import: unexpected response: {}",
+                api::delegate::response_kind(&other)
+            );
             toast::show("Import failed: unexpected response", ToastKind::Error);
         }
         Err(e) => {

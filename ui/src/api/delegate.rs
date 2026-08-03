@@ -57,6 +57,41 @@ impl std::fmt::Display for DelegateCallError {
     }
 }
 
+/// Name a response variant WITHOUT formatting its payload.
+///
+/// `GhostkeyResponse` derives `Debug`, and `ExportResult` / `ExportAllResult`
+/// carry `signing_key_pem`. So `{response:?}` anywhere on this path would put
+/// private keys into the browser console. Every diagnostic here names the
+/// variant instead.
+pub(crate) fn response_kind(response: &ghostkey_common::GhostkeyResponse) -> &'static str {
+    use ghostkey_common::GhostkeyResponse as R;
+    match response {
+        R::ImportResult { .. } => "ImportResult",
+        R::GhostKeyList { .. } => "GhostKeyList",
+        R::GhostKeyDetail { .. } => "GhostKeyDetail",
+        R::Certificate { .. } => "Certificate",
+        R::SignResult { .. } => "SignResult",
+        R::DefaultKeyResult { .. } => "DefaultKeyResult",
+        R::DefaultKeySet { .. } => "DefaultKeySet",
+        R::VerifyResult { .. } => "VerifyResult",
+        R::Deleted { .. } => "Deleted",
+        R::LabelSet { .. } => "LabelSet",
+        R::PermissionGranted { .. } => "PermissionGranted",
+        R::PermissionRevoked { .. } => "PermissionRevoked",
+        R::PermissionList { .. } => "PermissionList",
+        R::ExportResult { .. } => "ExportResult",
+        R::ExportAllResult { .. } => "ExportAllResult",
+        R::PermissionDenied { .. } => "PermissionDenied",
+        R::AccessDenied { .. } => "AccessDenied",
+        R::NoIdentityAvailable => "NoIdentityAvailable",
+        R::KeyNotFound { .. } => "KeyNotFound",
+        R::Error { .. } => "Error",
+        // `GhostkeyResponse` is #[non_exhaustive]; a variant from a newer
+        // common must still not fall back to a payload-printing Debug.
+        _ => "unrecognised response",
+    }
+}
+
 /// Map a node error onto the delegate call it concerns, when it names one.
 ///
 /// Deliberately narrow. `ExecutionError` and `ForbiddenSecretAccess` carry no

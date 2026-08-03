@@ -140,7 +140,10 @@ pub fn SignDialog(fingerprint: String, on_close: EventHandler<()>) -> Element {
                                                     error_msg.set(Some(message));
                                                 }
                                                 Ok(other) => {
-                                                    error_msg.set(Some(format!("Unexpected: {other:?}")));
+                                                    error_msg.set(Some(format!(
+                                                        "Unexpected: {}",
+                                                        crate::api::delegate::response_kind(&other)
+                                                    )));
                                                 }
                                                 Err(e) => {
                                                     error_msg.set(Some(e.to_string()));

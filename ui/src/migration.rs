@@ -141,41 +141,6 @@ impl std::fmt::Debug for ProbeVerdict {
     }
 }
 
-/// Name a response variant WITHOUT formatting its payload.
-///
-/// `GhostkeyResponse` derives `Debug`, and `ExportResult` / `ExportAllResult`
-/// carry `signing_key_pem`. So `{response:?}` anywhere on this path would put
-/// private keys into the browser console. Every diagnostic here names the
-/// variant instead.
-pub(crate) fn response_kind(response: &ghostkey_common::GhostkeyResponse) -> &'static str {
-    use ghostkey_common::GhostkeyResponse as R;
-    match response {
-        R::ImportResult { .. } => "ImportResult",
-        R::GhostKeyList { .. } => "GhostKeyList",
-        R::GhostKeyDetail { .. } => "GhostKeyDetail",
-        R::Certificate { .. } => "Certificate",
-        R::SignResult { .. } => "SignResult",
-        R::DefaultKeyResult { .. } => "DefaultKeyResult",
-        R::DefaultKeySet { .. } => "DefaultKeySet",
-        R::VerifyResult { .. } => "VerifyResult",
-        R::Deleted { .. } => "Deleted",
-        R::LabelSet { .. } => "LabelSet",
-        R::PermissionGranted { .. } => "PermissionGranted",
-        R::PermissionRevoked { .. } => "PermissionRevoked",
-        R::PermissionList { .. } => "PermissionList",
-        R::ExportResult { .. } => "ExportResult",
-        R::ExportAllResult { .. } => "ExportAllResult",
-        R::PermissionDenied { .. } => "PermissionDenied",
-        R::AccessDenied { .. } => "AccessDenied",
-        R::NoIdentityAvailable => "NoIdentityAvailable",
-        R::KeyNotFound { .. } => "KeyNotFound",
-        R::Error { .. } => "Error",
-        // `GhostkeyResponse` is #[non_exhaustive]; a variant from a newer
-        // common must still not fall back to a payload-printing Debug.
-        _ => "unrecognised response",
-    }
-}
-
 /// Decide what one probe reply means.
 ///
 /// Split out from the sweep because this is the judgement that can lose keys,
@@ -191,9 +156,15 @@ pub(crate) fn classify(
     match reply {
         Ok(GhostkeyResponse::ExportAllResult { keys }) => ProbeVerdict::Exported(keys),
         Err(DelegateCallError::NotRegistered) => ProbeVerdict::Skipped,
+        // Neither of these is an answer. `TimedOut` is silence, and
+        // `Transport` is produced entirely locally -- a serialize failure, a
+        // dead socket -- meaning we never got to ask. Counting it as an
+        // answered failure would put the red toast in front of a user whose
+        // websocket dropped mid-sweep, on a node that may hold no legacy
+        // delegates at all, while the connection banner already says so.
         Err(DelegateCallError::TimedOut) => ProbeVerdict::Undetermined("no reply".into()),
-        // Transport and delegate-level failures came back FROM somewhere, so
-        // they are an answer, not silence.
+        Err(DelegateCallError::Transport(reason)) => ProbeVerdict::Undetermined(reason),
+        // A delegate-level failure DID come back from somewhere.
         Err(e) => ProbeVerdict::AnsweredWithError(e.to_string()),
         // A refusal ("unsupported request variant", `PermissionDenied`) is
         // also an answer: it settles that we get nothing from this delegate,
@@ -202,9 +173,10 @@ pub(crate) fn classify(
         // Only the variant NAME goes in the reason. `GhostkeyResponse` derives
         // Debug and its export variants carry `signing_key_pem`, so formatting
         // the payload here would put private keys in the browser console.
-        Ok(other) => {
-            ProbeVerdict::AnsweredWithError(format!("unexpected reply: {}", response_kind(&other)))
-        }
+        Ok(other) => ProbeVerdict::AnsweredWithError(format!(
+            "unexpected reply: {}",
+            crate::api::delegate::response_kind(&other)
+        )),
     }
 }
 
@@ -355,11 +327,32 @@ mod real {
                         outcome.record_import(true);
 
                         if let Some(label) = &key.label {
-                            let _ = api::delegate::send_request(GhostkeyRequest::SetLabel {
-                                fingerprint,
-                                label: label.clone(),
-                            })
-                            .await;
+                            // Only label the key we actually asked to import.
+                            // This fingerprint is echoed by the delegate, and a
+                            // mis-delivered reply (see `claim_waiter`) would
+                            // otherwise write THIS key's label onto ANOTHER
+                            // key. That is a durable write, and the one case
+                            // that does NOT self-correct: the next startup sees
+                            // that key as already held and skips this path, so
+                            // a silently renamed identity stays renamed.
+                            //
+                            // Comparing rather than substituting, because a
+                            // legacy delegate is not guaranteed to compute
+                            // fingerprints the way the current one does; on a
+                            // mismatch the safe action is to skip a cosmetic
+                            // write, not to guess a target for it.
+                            if fingerprint == key.fingerprint {
+                                let _ = api::delegate::send_request(GhostkeyRequest::SetLabel {
+                                    fingerprint,
+                                    label: label.clone(),
+                                })
+                                .await;
+                            } else {
+                                warn!(
+                                    "Not labelling {}: delegate echoed a different fingerprint ({fingerprint})",
+                                    key.fingerprint
+                                );
+                            }
                         }
                     }
                     // The key is still only in the predecessor. Counting it as
@@ -368,7 +361,7 @@ mod real {
                         warn!(
                             "Could not re-import {}: {}",
                             key.fingerprint,
-                            super::response_kind(&other)
+                            crate::api::delegate::response_kind(&other)
                         );
                         // Only a failure to bring over a key we do NOT already
                         // have is worth reporting; a failed refresh of one we
@@ -410,11 +403,25 @@ mod real {
             );
         }
 
-        if outcome.needs_user_attention() {
+        if !outcome.needs_user_attention() {
+            return;
+        }
+
+        if outcome.failed_imports > 0 {
             toast::show(
-                "A previous vault version may still be holding an identity that \
-                 could not be read. If one is missing, re-import it from your \
-                 backup, or reopen the vault once your node is fully started.",
+                format!(
+                    "Found {} ghostkey(s) in a previous vault version but could not \
+                     import them. Re-import from your backup, or reopen the vault \
+                     once your node is fully started.",
+                    outcome.failed_imports
+                ),
+                ToastKind::Error,
+            );
+        } else if outcome.answered_with_error > 0 {
+            toast::show(
+                "A previous vault version reported a problem reading one of its \
+                 stored identities. If one is missing here, re-import it from \
+                 your backup.",
                 ToastKind::Error,
             );
         }
@@ -527,10 +534,14 @@ mod tests {
             ProbeVerdict::Undetermined(_)
         ));
 
-        for err in [
-            DelegateCallError::Failed("missing secret gk:sk:abc".into()),
-            DelegateCallError::Transport("socket closed".into()),
-        ] {
+        // A local transport failure means we never got to ask, so it belongs
+        // with silence rather than with answers.
+        assert!(matches!(
+            classify(Err(DelegateCallError::Transport("socket closed".into()))),
+            ProbeVerdict::Undetermined(_)
+        ));
+
+        for err in [DelegateCallError::Failed("missing secret gk:sk:abc".into())] {
             match classify(Err(err.clone())) {
                 ProbeVerdict::AnsweredWithError(reason) => {
                     assert!(!reason.is_empty(), "{err:?} produced no reason")
@@ -582,7 +593,7 @@ mod tests {
             signing_key_pem: SECRET.into(),
             label: None,
         };
-        assert_eq!(response_kind(&reply), "ExportResult");
+        assert_eq!(crate::api::delegate::response_kind(&reply), "ExportResult");
 
         let verdict = classify(Ok(reply));
         let rendered = format!("{verdict:?}");
