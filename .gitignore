@@ -7,3 +7,8 @@ Cargo.lock
 *.pem
 *.key
 secrets/
+
+# Agent worktrees live here (.claude/worktrees/<name>), and committing one
+# adds it as an embedded git repo rather than files. Easy to do by accident
+# with `git add -A`.
+.claude/

@@ -398,8 +398,8 @@ mod real {
             // Logged, not shown. On a healthy node most legacy entries simply
             // do not answer, so this is the ordinary case rather than a fault.
             warn!(
-                "Migration sweep incomplete: {} undetermined delegate(s), {} failed import(s)",
-                outcome.undetermined, outcome.failed_imports
+                "Migration sweep incomplete: {} silent delegate(s), {} answered with an error, {} failed import(s)",
+                outcome.undetermined, outcome.answered_with_error, outcome.failed_imports
             );
         }
 
