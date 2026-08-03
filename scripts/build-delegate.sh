@@ -56,13 +56,16 @@ if command -v b3sum >/dev/null 2>&1; then
 fi
 
 # Fail loudly rather than silently shipping a machine-specific binary.
-if command -v strings >/dev/null 2>&1; then
-    LEAKED="$(strings "$WASM" | grep -c "$CARGO_HOME_DIR" || true)"
-    if [ "$LEAKED" -ne 0 ]; then
-        echo "ERROR: $LEAKED absolute path(s) from $CARGO_HOME_DIR are embedded in the WASM." >&2
-        echo "The delegate key is therefore machine-specific: this build cannot be" >&2
-        echo "reproduced elsewhere, and publishing it would move every user's secrets" >&2
-        echo "to a namespace nobody else can recompute. See ghostkeys#9." >&2
-        exit 1
-    fi
+#
+# `grep -a` on the binary rather than `strings`: this check is the only thing
+# standing between a machine-specific build and a publish, and gating it on a
+# binutils tool being installed would mean it silently does not run on the one
+# machine that lacks it. grep is everywhere.
+LEAKED="$(grep -a -c -F "$CARGO_HOME_DIR" "$WASM" || true)"
+if [ "${LEAKED:-0}" -ne 0 ]; then
+    echo "ERROR: absolute path(s) from $CARGO_HOME_DIR are embedded in the WASM." >&2
+    echo "The delegate key is therefore machine-specific: this build cannot be" >&2
+    echo "reproduced elsewhere, and publishing it would move every user's secrets" >&2
+    echo "to a namespace nobody else can recompute. See ghostkeys#9." >&2
+    exit 1
 fi

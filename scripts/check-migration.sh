@@ -117,7 +117,11 @@ echo "OK: all ${#ALL_HASHES[@]} recorded entries are internally consistent."
 # Publishing again on top of that would bake the omission in, so refuse. Only
 # checked when a git tree is available; the CI path passes an explicit base.
 if [ -z "$BASE_LEGACY" ] && git rev-parse --git-dir >/dev/null 2>&1; then
-    if ! git diff --quiet -- "$LEGACY" 2>/dev/null; then
+    # `git diff HEAD`, not plain `git diff`: the latter compares against the
+    # index, so `git add`-ing the record and stopping there would slip past
+    # this check while leaving it just as uncommitted. Verified by staging one
+    # and watching the guard pass.
+    if ! git diff HEAD --quiet -- "$LEGACY" 2>/dev/null; then
         echo "ERROR: $LEGACY has uncommitted changes." >&2
         echo "" >&2
         echo "That usually means a previous publish recorded its delegate hash and the" >&2
