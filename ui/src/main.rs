@@ -64,6 +64,7 @@ fn App() -> Element {
             // renders immediately and the sweep below knows what it can skip.
             let held = load_ghostkeys().await;
             components::ghostkey_list::load_default_key();
+            components::ghostkey_list::load_identity_presence();
 
             // Import a just-purchased key BEFORE sweeping legacy delegates.
             // It exists nowhere else, and the sweep can take seconds per
@@ -75,6 +76,10 @@ fn App() -> Element {
 
             // Recover ghostkeys stranded under previous delegate versions.
             migration::try_migrate(held).await;
+
+            // Re-check after the sweep: it can import keys, and a half-lost
+            // identity recovered from a legacy delegate changes the count.
+            components::ghostkey_list::load_identity_presence();
         });
     });
 

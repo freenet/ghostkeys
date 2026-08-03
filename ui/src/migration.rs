@@ -315,6 +315,12 @@ mod real {
                             label: key.label.clone(),
                             notary_info,
                             verifying_key_bytes: None,
+                            // The backup marker lives in the delegate's own
+                            // secret namespace, which a re-key moves, so a
+                            // recovered key always starts un-marked. That
+                            // over-warns rather than under-warns, which is the
+                            // direction to err in when the cost is the key.
+                            backed_up: false,
                         });
 
                         if already_held {
