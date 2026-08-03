@@ -9,7 +9,7 @@ mod real {
     use dioxus::logger::tracing::{error, info, warn};
     use freenet_stdlib::client_api::{ClientError, HostResponse, WebApi};
 
-    use crate::api::delegate::handle_delegate_response;
+    use crate::api::delegate::{handle_client_error, handle_delegate_response};
     use crate::api::state::WEB_API;
 
     /// Derive the WebSocket URL from the current page location.
@@ -48,7 +48,12 @@ mod real {
                     handle_delegate_response(&response);
                 }
                 Err(e) => {
+                    // Route the error to whichever request is waiting on it.
+                    // Previously this only logged, so the caller waited out its
+                    // full timeout and then reported "timed out" for what the
+                    // node had already explained.
                     warn!("API error: {e}");
+                    handle_client_error(&e);
                 }
             },
             {

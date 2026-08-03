@@ -479,7 +479,15 @@ body {
 
 .link-text {
     color: var(--glow);
-    opacity: 0.7;
+    opacity: 0.85;
+    text-decoration: underline;
+    text-underline-offset: 0.15em;
+    cursor: pointer;
+}
+
+.link-text:hover,
+.link-text:focus-visible {
+    opacity: 1;
 }
 
 /* Build footer */

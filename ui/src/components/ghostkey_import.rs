@@ -365,10 +365,13 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
                                         error_msg.set(Some(message));
                                     }
                                     Ok(other) => {
-                                        error_msg.set(Some(format!("Unexpected response: {other:?}")));
+                                        error_msg.set(Some(format!(
+                                            "Unexpected response: {}",
+                                            crate::api::delegate::response_kind(&other)
+                                        )));
                                     }
                                     Err(e) => {
-                                        error_msg.set(Some(e));
+                                        error_msg.set(Some(e.to_string()));
                                     }
                                 }
                             });

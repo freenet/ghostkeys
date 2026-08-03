@@ -7,6 +7,12 @@ on:
       - 'common/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      # rust-toolchain.toml belongs here for the same reason as the rest: its
+      # own comment says a different rustc produces different WASM bytes and
+      # therefore a different delegate key, which "silently orphans every
+      # user's data". Without it, a toolchain-bump-only PR re-keys the
+      # delegate and skips this guard entirely.
+      - 'rust-toolchain.toml'
 
 jobs:
   check-migration:
@@ -16,7 +22,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned rather than @stable so the version this job builds with is
+      # visible here, next to the hash it computes.
+      #
+      # To be accurate about what this does and does not fix: it was NOT
+      # previously building with the wrong compiler. The action sets a rustup
+      # DEFAULT, and `rust-toolchain.toml` outranks the default, so cargo
+      # already resolved to the pinned channel either way (checked: with a
+      # `rust-toolchain.toml` present, `rustc --version` reports the pinned
+      # version while `rustup default` reports stable). The pin is
+      # belt-and-braces, not a bug fix — the real gap this commit closes is the
+      # path filter below.
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: wasm32-unknown-unknown
 

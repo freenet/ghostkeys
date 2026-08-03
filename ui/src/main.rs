@@ -1,3 +1,12 @@
+// This crate is a wasm binary. A native build exists only so the pure logic
+// can be unit-tested, and in that build most of the crate is genuinely unused:
+// every real code path is behind `cfg(target_arch = "wasm32")`, leaving native
+// compilation looking at stubs. Saying so here is what lets `cargo clippy
+// --tests` run natively with `-D warnings` and actually mean something about
+// the test code, instead of drowning in dead-code reports about the delegate
+// API. Dead code in the code that SHIPS is still caught, by the wasm32 lint.
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
 mod api;
 mod auto_import;
 mod components;
@@ -37,38 +46,35 @@ fn App() -> Element {
         }
 
         spawn(async {
-            if let Err(e) = connection::connect().await {
-                dioxus::logger::tracing::error!("Connection failed: {e}");
-                return;
-            }
+            // Take any import payload off the URL BEFORE anything that can
+            // fail. It carries a just-purchased ghostkey that exists nowhere
+            // else yet, and each bail-out below used to drop it with nothing
+            // but a console line to say so.
+            let pending_import = auto_import::pending_import_from_url();
 
-            // Wait for WebSocket handshake to complete
-            for _ in 0..50 {
-                if *api::state::CONNECTION_STATUS.read() == ConnectionStatus::Connected {
-                    break;
+            if let Err(e) = connect_and_register().await {
+                dioxus::logger::tracing::error!("Vault startup failed: {e}");
+                if pending_import.is_some() {
+                    auto_import::warn_not_imported();
                 }
-                gloo_timers::future::sleep(std::time::Duration::from_millis(100)).await;
-            }
-
-            if *api::state::CONNECTION_STATUS.read() != ConnectionStatus::Connected {
-                dioxus::logger::tracing::error!("Timed out waiting for connection");
                 return;
             }
 
-            if let Err(e) = delegate::register_delegate().await {
-                dioxus::logger::tracing::error!("Delegate registration failed: {e}");
-                return;
-            }
-
-            // Migrate ghostkeys from any previous delegate versions
-            migration::try_migrate().await;
-
-            // Load existing ghostkeys and default key from delegate storage
-            load_ghostkeys().await;
+            // Load what the current delegate already holds, so the vault
+            // renders immediately and the sweep below knows what it can skip.
+            let held = load_ghostkeys().await;
             components::ghostkey_list::load_default_key();
 
-            // Check for auto-import via URL fragment
-            auto_import::check_and_import().await;
+            // Import a just-purchased key BEFORE sweeping legacy delegates.
+            // It exists nowhere else, and the sweep can take seconds per
+            // legacy entry on a slow node -- there is no reason to make the
+            // one irreplaceable key wait behind it.
+            if let Some(pending) = pending_import {
+                auto_import::import(pending).await;
+            }
+
+            // Recover ghostkeys stranded under previous delegate versions.
+            migration::try_migrate(held).await;
         });
     });
 
@@ -133,24 +139,58 @@ fn format_build_time_local() -> String {
     }
 }
 
-async fn load_ghostkeys() {
+/// Connect to the node and register the current delegate.
+///
+/// Split out so every failure funnels through one place. As three scattered
+/// `return`s it was impossible for the caller to react to a failed startup --
+/// which matters because a pending URL import must be reported rather than
+/// silently abandoned.
+async fn connect_and_register() -> Result<(), String> {
+    connection::connect().await?;
+
+    // Wait for the WebSocket handshake to complete.
+    for _ in 0..50 {
+        if *api::state::CONNECTION_STATUS.read() == ConnectionStatus::Connected {
+            break;
+        }
+        gloo_timers::future::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    if *api::state::CONNECTION_STATUS.read() != ConnectionStatus::Connected {
+        return Err("timed out waiting for the node connection".into());
+    }
+
+    delegate::register_delegate().await
+}
+
+/// Load the identities the current delegate holds, returning their
+/// fingerprints so the legacy sweep can skip what is already here.
+///
+/// An empty result on failure is the safe direction: the sweep then re-imports
+/// rather than wrongly skipping a key it should have recovered.
+async fn load_ghostkeys() -> Vec<String> {
     use ghostkey_common::{GhostkeyRequest, GhostkeyResponse};
 
     match delegate::send_request(GhostkeyRequest::ListGhostKeys).await {
         Ok(GhostkeyResponse::GhostKeyList { keys }) => {
-            if !keys.is_empty() {
-                dioxus::logger::tracing::info!("Loaded {} ghostkeys from delegate", keys.len());
-                for key in keys {
-                    components::ghostkey_list::add_ghostkey(key);
-                }
+            if keys.is_empty() {
+                return Vec::new();
             }
+            dioxus::logger::tracing::info!("Loaded {} ghostkeys from delegate", keys.len());
+            let fingerprints = keys.iter().map(|k| k.fingerprint.clone()).collect();
+            for key in keys {
+                components::ghostkey_list::add_ghostkey(key);
+            }
+            fingerprints
         }
         Ok(GhostkeyResponse::Error { message }) => {
             dioxus::logger::tracing::warn!("Failed to load ghostkeys: {message}");
+            Vec::new()
         }
-        Ok(_) => {}
+        Ok(_) => Vec::new(),
         Err(e) => {
             dioxus::logger::tracing::warn!("Failed to load ghostkeys: {e}");
+            Vec::new()
         }
     }
 }
