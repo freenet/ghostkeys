@@ -83,9 +83,15 @@ jobs:
       #
       # binstall rather than `cargo install`: it fetches a prebuilt binary
       # instead of compiling the CLI from source on every run.
+      #
+      # `--force` is load-bearing. `Swatinem/rust-cache` restores cargo's
+      # installed-crates registry (`~/.cargo/.crates.toml`) but not
+      # `~/.cargo/bin`, so on a cache hit binstall reports "already installed"
+      # and skips -- leaving no `dx` on PATH and a failure two steps later that
+      # points at the wrong thing entirely.
       - uses: cargo-bins/cargo-binstall@main
       - name: Install dioxus-cli
-        run: cargo binstall -y dioxus-cli@0.7.9
+        run: cargo binstall -y --force dioxus-cli@0.7.9
 
       - name: Install browser test deps
         working-directory: ui/tests/browser
