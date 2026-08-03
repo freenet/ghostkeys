@@ -1,22 +1,27 @@
 /* Ghostkey Identity Vault
    Aesthetic: spectral/ethereal -- identities floating in a deep void
-   Fonts: Newsreader (serif headings), Source Code Pro (crypto data), Outfit (body) */
+   Fonts: Georgia (serif headings), system-ui (body), Menlo (crypto data) --
+   see the note below before "fixing" this to name webfonts. */
 
-/* No webfont @import.
+/* No webfont @import, and this is the intended state -- not a gap to fill.
  *
- * The gateway serves every webapp under a same-origin CSP that blocks
- * fonts.googleapis.com, so this import never loaded in production -- verified
- * against the live vault on 2026-08-03, which reported
+ * The gateway serves every webapp under a same-origin CSP that permits no
+ * other host, so an @import of fonts.googleapis.com never loaded in
+ * production. Verified against the live vault on 2026-08-03, which reported
  * "Loading the stylesheet ... violates the following Content Security Policy
- * directive" on every page load. Production has always rendered in the
- * fallback stacks below.
+ * directive" on every page load. The custom faces this file used to name --
+ * Newsreader, Outfit, Source Code Pro -- have therefore never been seen by a
+ * user; they appeared only under `dx serve`, which has no CSP, so the design
+ * looked right to whoever was building it and to nobody else.
  *
- * Keeping the import only made `dx serve` show developers a design users
- * never saw, while adding a failed request and a console error to every real
- * load. Removing it changes nothing a user sees.
+ * Shipping them would mean vendoring the faces as data: URIs, which was
+ * costed and declined (ghostkeys#13): 100 KB+ on a ~500 KB bundle, on every
+ * vault load, for typography nobody has missed. The fallback stacks below are
+ * the real design.
  *
- * To actually ship these faces they must be vendored as data: URIs (see
- * ghostkeys#13) -- a CDN link cannot work here whatever its URL. */
+ * A CDN link cannot work here whatever its URL. If you add one, the browser
+ * test suite will fail -- it serves the bundle under the gateway's actual CSP
+ * precisely so this cannot regress silently. */
 
 :root {
     --void: #06080d;
