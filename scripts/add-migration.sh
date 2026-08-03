@@ -1,6 +1,17 @@
 #!/bin/bash
-# Record the current delegate WASM's key in legacy_delegates.toml.
-# Run this BEFORE making changes to delegates/ or common/ that alter the WASM.
+# Record the CURRENT (pre-change) delegate WASM's key in legacy_delegates.toml,
+# so that users running it can still be migrated once the WASM changes.
+#
+# Run this BEFORE making changes to delegates/ or common/. It hashes the WASM as
+# it is right now, so running it after a change records the successor instead of
+# the predecessor -- which is the entry that protects nobody.
+#
+# Normally a no-op: `record-migration` already appended this hash right after it
+# was published. Worth running if a publish bypassed the task graph.
+#
+# Note this is NOT what makes `check-migration` pass. That check verifies no
+# recorded entry was dropped; it does not ask for the new hash, which cannot be
+# known before publishing. See ghostkeys#10.
 set -euo pipefail
 
 WASM="target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm"
