@@ -658,7 +658,7 @@ mod tests {
         for a in alphabet {
             for b in alphabet {
                 for c in alphabet {
-                    for candidate in [format!("{a}"), format!("{a}{b}"), format!("{a}{b}{c}")] {
+                    for candidate in [a.to_string(), format!("{a}{b}"), format!("{a}{b}{c}")] {
                         let Some(route) = validated_return_path(&candidate) else {
                             continue;
                         };
