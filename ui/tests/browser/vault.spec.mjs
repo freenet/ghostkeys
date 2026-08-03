@@ -5,8 +5,10 @@ import { chromium } from 'playwright';
 
 // The bundle's asset paths are absolute under the gateway's contract path,
 // so the harness serves it there rather than at `/`.
-const URL = process.env.VAULT_URL;
-if (!URL) {
+// NOT named `URL`: that shadows the global URL constructor, and the deep-link
+// checks below need it to resolve hrefs the way a browser would.
+const VAULT_URL = process.env.VAULT_URL;
+if (!VAULT_URL) {
   console.error('VAULT_URL not set -- run via scripts/browser-test.sh');
   process.exit(2);
 }
@@ -27,7 +29,7 @@ page.on('console', (m) => {
 });
 page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 
-await page.goto(URL, { waitUntil: 'networkidle' });
+await page.goto(VAULT_URL, { waitUntil: 'networkidle' });
 await page.waitForSelector('.identity-card', { timeout: 20000 });
 
 // --- The three example identities render ---------------------------------
@@ -40,7 +42,18 @@ check('return-to-app banner renders', (await returnBanner.count()) === 1);
 const returnLink = returnBanner.locator('a.return-link');
 const href = await returnLink.getAttribute('href');
 check('return link is a relative, same-origin contract path',
-  href === '/v1/contract/web/DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N/', href);
+  href === '/v1/contract/web/DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N/rooms/abc#/thread/12', href);
+// The deep link must resolve back inside the contract it names, not out of it.
+// This is the property the validator exists to protect, checked against the
+// browser's own URL resolution rather than by reading the string.
+const resolved = await returnLink.evaluate((a) => a.href);
+check('deep link resolves inside the contract prefix',
+  new URL(resolved).pathname.startsWith('/v1/contract/web/DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N/'),
+  new URL(resolved).pathname);
+check('deep link stays same-origin',
+  new URL(resolved).origin === new URL(page.url()).origin, new URL(resolved).origin);
+check('the route survives into the fragment',
+  new URL(resolved).hash === '#/thread/12', new URL(resolved).hash);
 const returnLabel = await returnLink.innerText();
 check('link is labelled by contract id only, never app-supplied text',
   /^Return to DLog47hEsr/.test(returnLabel), returnLabel);

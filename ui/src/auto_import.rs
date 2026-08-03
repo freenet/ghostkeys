@@ -22,6 +22,11 @@ pub struct PendingImport {
     /// contract instance id. Offering the trip back is the whole point of the
     /// round trip being tolerable.
     return_to: Option<String>,
+    /// Where *inside* that app, as a validated relative suffix (path and/or
+    /// `#route`). `None` means the app's root. Only meaningful alongside
+    /// `return_to`; the contract prefix is always synthesised from that id and
+    /// never taken from the link.
+    return_path: Option<String>,
 }
 
 /// Parse an import payload out of the URL hash, if there is one.
@@ -29,6 +34,7 @@ pub struct PendingImport {
 /// Fragment format: `#import=<base64_cert>.<base64_sk>`
 /// Optional master key: `#import=<base64_cert>.<base64_sk>.<base64_master_vk>`
 /// Optional return target: `...&return_to=<base58_contract_key>`
+/// Optional return route:  `...&return_path=<percent-encoded relative suffix>`
 ///
 /// The hash is left in place on purpose: it is cleared only once the key is
 /// safely in the delegate, so a reload can retry an import that did not land.
@@ -45,16 +51,25 @@ fn parse_fragment(hash: &str) -> Option<PendingImport> {
     // dot-separated positional shape of `import`'s own value.
     let mut import_value = None;
     let mut return_to_value = None;
+    let mut return_path_value = None;
     for param in hash.split('&') {
         if let Some(v) = param.strip_prefix("import=") {
             import_value = Some(v);
         } else if let Some(v) = param.strip_prefix("return_to=") {
             return_to_value = Some(v);
+        } else if let Some(v) = param.strip_prefix("return_path=") {
+            return_path_value = Some(v);
         }
     }
 
     let payload = import_value?;
     let return_to = return_to_value.and_then(validated_return_to);
+    // A path without a contract to hang it on is meaningless, and keeping one
+    // would risk it being appended to some other app's id later.
+    let return_path = return_to
+        .as_ref()
+        .and(return_path_value)
+        .and_then(validated_return_path);
 
     info!("Auto-import detected in URL fragment");
 
@@ -90,6 +105,7 @@ fn parse_fragment(hash: &str) -> Option<PendingImport> {
         signing_key_pem,
         master_verifying_key_pem,
         return_to,
+        return_path,
     })
 }
 
@@ -121,6 +137,122 @@ fn validated_return_to(raw: &str) -> Option<String> {
         return None;
     }
     Some(canonical)
+}
+
+/// Accept a relative suffix saying *where inside* the returning app to land.
+///
+/// The contract prefix is always synthesised from the validated id, so this
+/// only ever decides what follows `/v1/contract/web/<id>/`. That still needs
+/// guarding, because a relative href is resolved by the browser and a
+/// `..` segment climbs out of the contract entirely.
+///
+/// The rules, in the order they have to happen:
+///
+/// 1. **Decode percent-encoding first.** It arrives encoded (it may contain
+///    `#`, and it is already inside a fragment). Checking before decoding
+///    would wave through `%2e%2e%2f`.
+/// 2. **Then reject any remaining `%`.** The URL spec normalises `%2e` to `.`
+///    when resolving dot segments, so a double-encoded `%252e%252e` decodes
+///    once to `%2e%2e` and the *browser* would finish the job. Refusing a
+///    surviving `%` closes that off without needing a decode-until-stable
+///    loop. Real routes almost never need a literal percent.
+/// 3. **Reject a leading `/`.** It would replace the whole path rather than
+///    extend it, and `//host` would leave the origin.
+/// 4. **Reject any `..` segment**, which is the only thing that can climb out.
+/// 5. **Allowlist the characters**, so nothing can break out of the rendered
+///    attribute or smuggle whitespace and control codes.
+///
+/// The gateway shell re-checks the `/v[12]/contract/web/{key}/` shape when it
+/// handles the navigation, so a traversal has to get past both.
+fn validated_return_path(raw: &str) -> Option<String> {
+    const MAX_LEN: usize = 512;
+
+    let decoded = percent_decode(raw)?;
+
+    let reject = |why: &str| -> Option<String> {
+        warn!("Ignoring return_path in import link: {why}");
+        None
+    };
+
+    if decoded.is_empty() {
+        return None; // Not an error; just means "the app's root".
+    }
+    if decoded.len() > MAX_LEN {
+        return reject("too long");
+    }
+    if decoded.contains('%') {
+        return reject("percent-encoding survived decoding (possible double-encoding)");
+    }
+    if decoded.starts_with('/') {
+        return reject("absolute paths would replace the contract prefix");
+    }
+    // Check the path portion only: after `#` it is a client-side route and
+    // cannot affect which resource is fetched.
+    let path_part = decoded.split('#').next().unwrap_or("");
+    if path_part.split('/').any(|seg| seg == "..") {
+        return reject("`..` would climb out of the contract");
+    }
+    if !decoded.chars().all(is_allowed_return_path_char) {
+        return reject("contains characters not allowed in a route");
+    }
+
+    Some(decoded)
+}
+
+/// Conservative allowlist for a return route: unreserved URL characters plus
+/// the separators a real route needs, and nothing else.
+///
+/// Notably excludes `:`. A value like `https://evil.example` is not actually
+/// dangerous here -- the rendered href starts with the synthesised
+/// `/v1/contract/web/<id>/` prefix, so the browser resolves it as a
+/// same-origin path rather than a redirect -- but it is meaningless, produces
+/// a 404, and letting it through means the allowlist is not doing its job.
+/// Real routes do not need a colon: `/user/:id` is a route *pattern*, and the
+/// concrete route a user is actually on has the id substituted in.
+///
+/// Also excludes quotes, angle brackets, backslashes, whitespace and control
+/// codes, so nothing can break out of the rendered attribute.
+fn is_allowed_return_path_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '-' | '.' | '_' | '~' | '/' | '#' | '?' | '&' | '=' | '+' | '@' | ','
+        )
+}
+
+/// Percent-decode a URL component. Returns `None` on a malformed escape, so a
+/// mangled link is refused rather than silently half-decoded.
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hi = *bytes.get(i + 1)?;
+                let lo = *bytes.get(i + 2)?;
+                let v = (hex_val(hi)? << 4) | hex_val(lo)?;
+                out.push(v);
+                i += 3;
+            }
+            // `+` is a form-encoding convention, not a URL-path one. Left as a
+            // literal so a route containing one survives the round trip.
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Report a malformed import link.
@@ -163,6 +295,7 @@ pub async fn import(pending: PendingImport) {
 
     // Taken before the request moves the rest of the struct.
     let return_to = pending.return_to;
+    let return_path = pending.return_path;
 
     let result = api::delegate::send_request(GhostkeyRequest::ImportGhostKey {
         certificate_pem: pending.certificate_pem,
@@ -196,7 +329,7 @@ pub async fn import(pending: PendingImport) {
             // back while the import is still in doubt would walk the user away
             // from the one tab holding their key.
             if let Some(id) = return_to {
-                ghostkey_list::offer_return_to(id);
+                ghostkey_list::offer_return_to(id, return_path);
             }
         }
         Ok(GhostkeyResponse::Error { message }) => {
@@ -440,6 +573,97 @@ mod tests {
                 .unwrap_or_else(|| panic!("import must survive return_to={hostile:?}"));
             assert_eq!(p.return_to, None, "accepted a bad return_to: {hostile:?}");
         }
+    }
+
+    fn parse_with(return_to: &str, return_path: &str) -> Option<PendingImport> {
+        parse_fragment(&a_fragment(&format!(
+            "&return_to={return_to}&return_path={return_path}"
+        )))
+    }
+
+    #[test]
+    fn a_plain_route_is_carried_through() {
+        let p = parse_with(A_CONTRACT_ID, "rooms%2Fabc%23%2Fthread%2F12").unwrap();
+        assert_eq!(p.return_path.as_deref(), Some("rooms/abc#/thread/12"));
+    }
+
+    #[test]
+    fn a_fragment_only_route_works() {
+        let p = parse_with(A_CONTRACT_ID, "%23%2Fsettings").unwrap();
+        assert_eq!(p.return_path.as_deref(), Some("#/settings"));
+    }
+
+    #[test]
+    fn no_return_path_means_the_apps_root() {
+        let p = parse_fragment(&a_fragment(&format!("&return_to={A_CONTRACT_ID}"))).unwrap();
+        assert_eq!(p.return_path, None);
+        assert_eq!(p.return_to.as_deref(), Some(A_CONTRACT_ID));
+    }
+
+    #[test]
+    fn a_route_without_a_contract_is_dropped() {
+        // A suffix with no id to hang it on is meaningless, and keeping one
+        // risks it being appended to some other app's id later.
+        let p = parse_fragment(&a_fragment("&return_path=rooms%2Fabc")).unwrap();
+        assert_eq!(p.return_path, None);
+        assert_eq!(p.return_to, None);
+    }
+
+    /// The only thing that can climb out of the contract is a `..` segment,
+    /// and it has several disguises. Each must be refused, and none may take
+    /// the import down with it.
+    #[test]
+    fn nothing_can_escape_the_contract_prefix() {
+        let hostile = [
+            ("..%2F..%2Fv1%2Fdelegate", "plain traversal"),
+            ("%2e%2e%2F%2e%2e%2Fv1", "percent-encoded dots"),
+            ("%252e%252e%252f", "double-encoded traversal"),
+            (
+                "rooms%2F..%2F..%2F..%2Fv1%2Fnode",
+                "traversal after a real segment",
+            ),
+            ("%2Fv1%2Fdelegate%2Fx", "absolute path"),
+            ("%2F%2Fevil.example", "protocol-relative"),
+            ("https%3A%2F%2Fevil.example", "absolute URL"),
+            ("javascript%3Aalert(1)", "javascript scheme"),
+            ("a%22%20onload%3Dalert(1)", "attribute break-out"),
+            ("a%3Cscript%3E", "angle brackets"),
+            ("a%0d%0aX", "CRLF"),
+            ("a%00b", "NUL"),
+            ("a b", "raw space"),
+            ("%GG", "malformed escape"),
+        ];
+        for (value, why) in hostile {
+            let p = parse_with(A_CONTRACT_ID, value)
+                .unwrap_or_else(|| panic!("import must survive return_path={why}"));
+            assert_eq!(p.return_path, None, "accepted a hostile return_path: {why}");
+            // The key is the irreplaceable part; a bad route must never cost it.
+            assert_eq!(p.certificate_pem, "-----BEGIN CERT-----");
+            assert_eq!(p.return_to.as_deref(), Some(A_CONTRACT_ID));
+        }
+    }
+
+    #[test]
+    fn an_over_long_route_is_refused() {
+        let long = "a".repeat(600);
+        let p = parse_with(A_CONTRACT_ID, &long).unwrap();
+        assert_eq!(p.return_path, None);
+    }
+
+    /// `%2e` normalises to `.` during URL resolution, so the check has to
+    /// happen after decoding, not before. This pins the ordering.
+    #[test]
+    fn decoding_happens_before_the_dot_check() {
+        assert_eq!(percent_decode("%2e%2e%2f").as_deref(), Some("../"));
+        assert_eq!(validated_return_path("%2e%2e%2f"), None);
+    }
+
+    #[test]
+    fn percent_decode_refuses_a_malformed_escape() {
+        assert_eq!(percent_decode("%"), None);
+        assert_eq!(percent_decode("%2"), None);
+        assert_eq!(percent_decode("%ZZ"), None);
+        assert_eq!(percent_decode("ok%2Fthen").as_deref(), Some("ok/then"));
     }
 
     #[test]

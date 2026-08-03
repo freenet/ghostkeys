@@ -275,13 +275,16 @@ static CONFIRM_EXPORT_ALL: GlobalSignal<Option<Vec<String>>> = GlobalSignal::new
 
 /// A validated contract instance id to offer the user a way back to, set once
 /// a key imported from a purchase link has actually landed in the delegate.
-static RETURN_TO: GlobalSignal<Option<String>> = GlobalSignal::new(|| {
+static RETURN_TO: GlobalSignal<Option<ReturnTarget>> = GlobalSignal::new(|| {
     // Shown under `example-data` so `cargo make dev` and the browser suite
     // exercise it. Reaching this state for real needs a completed Stripe
     // purchase, which is not something a test can drive.
     #[cfg(feature = "example-data")]
     {
-        Some("DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N".to_string())
+        Some(ReturnTarget {
+            contract_id: "DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N".to_string(),
+            path: Some("rooms/abc#/thread/12".to_string()),
+        })
     }
     #[cfg(not(feature = "example-data"))]
     {
@@ -289,10 +292,33 @@ static RETURN_TO: GlobalSignal<Option<String>> = GlobalSignal::new(|| {
     }
 });
 
+/// Where to send the user back to, once their key has landed.
+#[derive(Clone, PartialEq)]
+pub struct ReturnTarget {
+    /// Validated contract instance id. The only thing that decides *which*
+    /// app; the `/v1/contract/web/` prefix is synthesised, never supplied.
+    contract_id: String,
+    /// Validated relative suffix saying where inside that app. `None` is the
+    /// app's root.
+    path: Option<String>,
+}
+
+impl ReturnTarget {
+    /// The href to render. Always relative and always under this contract:
+    /// the prefix is built here, and `path` has already been refused if it
+    /// could climb out of it.
+    fn href(&self) -> String {
+        match &self.path {
+            Some(p) => format!("/v1/contract/web/{}/{p}", self.contract_id),
+            None => format!("/v1/contract/web/{}/", self.contract_id),
+        }
+    }
+}
+
 /// Offer the user the trip back to wherever they were before they left to buy
-/// a ghostkey. `id` must already be validated -- see `auto_import`.
-pub fn offer_return_to(id: String) {
-    *RETURN_TO.write() = Some(id);
+/// a ghostkey. Both arguments must already be validated -- see `auto_import`.
+pub fn offer_return_to(contract_id: String, path: Option<String>) {
+    *RETURN_TO.write() = Some(ReturnTarget { contract_id, path });
 }
 
 static SHOW_IMPORT: GlobalSignal<bool> = GlobalSignal::new(|| false);
@@ -383,7 +409,7 @@ pub fn GhostKeyList() -> Element {
                 }
             }
 
-            if let Some(id) = return_to.as_ref() {
+            if let Some(target) = return_to.as_ref() {
                 div { class: "return-banner",
                     span { class: "return-banner-text",
                         "Your ghostkey is in the vault. Back to where you came from:"
@@ -395,12 +421,12 @@ pub fn GhostKeyList() -> Element {
                         // /v1/contract/web/<key>/ shape, which is what the id
                         // was validated to produce.
                         class: "btn-glow return-link",
-                        href: "/v1/contract/web/{id}/",
+                        href: "{target.href()}",
                         // No app-supplied name is shown. The vault only knows
                         // the contract id, and rendering a name the link
                         // itself supplied would let any site label its button
                         // "Freenet Official".
-                        "Return to {short_id(id)}"
+                        "Return to {short_id(&target.contract_id)}"
                     }
                     button {
                         class: "action-btn",
