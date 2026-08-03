@@ -31,15 +31,33 @@ The certificate also records the donation amount and date, so applications can m
 
 If you're building a Freenet application and want to verify users or prevent spam, you interact with the ghostkeys delegate through Freenet's delegate messaging API. Your app sends a `GhostkeyRequest`, the user is prompted for permission, and you receive a `GhostkeyResponse`.
 
-### Requesting a signature
+### Does this user have a ghost key?
 
-Your application sends a `SignMessage` request specifying which ghost key to use (by fingerprint) and the message to sign:
+Ask with `HasIdentity`. It answers **without prompting**, and is deliberately
+not permission-filtered, so you can decide whether to offer a buy-a-key path
+before asking the user for anything:
 
 ```rust
-use ghostkey_common::{GhostkeyRequest, to_cbor};
+use ghostkey_common::{GhostkeyRequest, GhostkeyResponse, to_cbor};
 
-let request = GhostkeyRequest::SignMessage {
-    fingerprint: "abc123".into(),
+let payload = to_cbor(&GhostkeyRequest::HasIdentity).unwrap();
+// -> GhostkeyResponse::IdentityPresence { usable, unusable }
+```
+
+`unusable` counts identities whose certificate is present but whose signing key
+is gone. Those appear in `ListGhostKeys` looking healthy right up until they
+fail to sign, so a non-zero count deserves a different message: that user needs
+their backup, not another purchase.
+
+### Requesting a signature
+
+Prefer `SignWithDefault`. It needs no fingerprint, so your app never tracks
+one, and if you hold no grant yet the delegate shows the user a key picker and
+replays the request once they choose — there is no separate access-request step
+to make first:
+
+```rust
+let request = GhostkeyRequest::SignWithDefault {
     message: b"hello world".to_vec(),
 };
 
@@ -47,6 +65,9 @@ let request = GhostkeyRequest::SignMessage {
 let payload = to_cbor(&request).unwrap();
 // ... send as DelegateMessage or ApplicationMessage to the ghostkeys delegate
 ```
+
+`SignMessage { fingerprint, message }` remains available for when you already
+know which key to use — for example one you recorded in contract state earlier.
 
 The delegate checks whether your application has permission. If this is the first time your app has requested access to this key, the user sees a prompt in their browser:
 
@@ -66,6 +87,31 @@ GhostkeyResponse::SignResult {
     certificate_pem,  // Full certificate chain for verification
 }
 ```
+
+### Sending a user to buy one, and getting them back
+
+If `HasIdentity` reports nothing usable, the user has to leave your app to buy
+a key. Give them the way back:
+
+```
+https://freenet.org/ghostkey/create/?return_to=<your contract instance id>&return_path=<percent-encoded route>
+```
+
+Both ride through the payment flow into the vault's import link, and once the
+key has landed the vault offers a one-click return. Pass your **contract
+instance id**, not a URL: the vault synthesises the
+`/v1/contract/web/<id>/` prefix itself and refuses anything that could point
+elsewhere. `return_path` is optional and lands the user on a specific route
+rather than your app's root; encode it, since it may contain its own `#`.
+
+**Do not gate the action on a cached identity check.** There is no callback
+from the vault to your app, and the vault opens in a new tab — so the tab the
+user came from can sit there indefinitely believing they have no key. Use
+`HasIdentity` to decide what to *offer*, never whether the user may *attempt*.
+Let them try, call `SignWithDefault`, and branch on the result: it prompts if
+you hold no grant and returns `NoIdentityAvailable` only when there is
+genuinely nothing to sign with. An app written that way needs to detect
+nothing.
 
 ### Verifying a signature
 
@@ -149,7 +195,12 @@ Each ghost key is identified by a fingerprint (first 8 bytes of BLAKE3 hash of t
 | `ListGhostKeys` | List ghost keys the caller has access to |
 | `GetGhostKey` | Get full certificate details for a key |
 | `GetCertificate` | Get just the public certificate (for sharing) |
-| `SignMessage` | Sign a message with a ghost key (scoped to caller) |
+| `HasIdentity` | Does the user hold any key? Counts only, and never prompts |
+| `SignMessage` | Sign a message with a named ghost key (scoped to caller) |
+| `SignWithDefault` | Sign with the user's default key; prompts and replays if needed |
+| `GetDefaultKey` | Which key would `SignWithDefault` use? Never prompts |
+| `RequestAnyAccess` | Ask the user to pick a key and grant `{ReadPublic, Sign}` |
+| `MarkBackedUp` | Record that the user holds a copy outside the vault (vault-only) |
 | `VerifySignedMessage` | Verify a signed message and extract metadata |
 | `ExportGhostKey` | Export certificate + private signing key for backup |
 | `DeleteGhostKey` | Remove a stored ghost key |
