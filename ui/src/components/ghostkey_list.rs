@@ -131,7 +131,7 @@ async fn mark_backed_up(fingerprints: Vec<String>) {
 /// with no backup, which is the one failure that costs the key, so the marker
 /// is set only when the user says the copy exists. `on_downloaded` fires when
 /// the browser took the file, which is when it becomes reasonable to ask.
-fn export_one(fingerprint: String, mut on_downloaded: Signal<bool>) {
+fn export_one(fingerprint: String, mut on_downloaded: Signal<Option<String>>) {
     spawn(async move {
         use super::toast::{self, ToastKind};
 
@@ -167,7 +167,7 @@ fn export_one(fingerprint: String, mut on_downloaded: Signal<bool>) {
                 };
                 let json = serde_json::to_string_pretty(&exported).unwrap_or_default();
                 if trigger_download(&json, &format!("ghostkey-{fingerprint}.json")) {
-                    on_downloaded.set(true);
+                    on_downloaded.set(Some(fingerprint));
                 } else {
                     toast::show("Could not save the backup file", ToastKind::Error);
                 }
@@ -421,7 +421,7 @@ pub fn GhostKeyList() -> Element {
             } else {
                 div { class: "identity-stack",
                     for (i, gk) in keys.iter().enumerate() {
-                        GhostKeyCard { info: gk.clone(), index: i }
+                        GhostKeyCard { key: "{gk.fingerprint}", info: gk.clone(), index: i }
                     }
                 }
             }
@@ -533,10 +533,18 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
     let delay = format!("{}ms", index * 80);
     let mut label_input = use_signal(|| info.label.clone().unwrap_or_default());
     let mut confirming_delete = use_signal(|| false);
-    // Whether the browser has taken the backup file for this card. Local to
-    // the card, and reset by a reload -- a stale "confirm?" state that
-    // outlived the download would invite confirming a file nobody has.
-    let downloaded = use_signal(|| false);
+    // Which fingerprint the browser has taken a backup file for.
+    //
+    // Holds the fingerprint rather than a bool because Dioxus reuses component
+    // state across a re-render: deleting a card shifts the rest up, so a plain
+    // flag could land on a card that was never downloaded and offer to mark it
+    // backed up. Comparing against the card's own fingerprint makes that
+    // impossible regardless of how the list moves.
+    let downloaded = use_signal(|| None::<String>);
+    let is_downloaded = downloaded
+        .read()
+        .as_deref()
+        .is_some_and(|fp| fp == info.fingerprint);
 
     rsx! {
         div {
@@ -624,7 +632,7 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
 
                 if !info.backed_up {
                     div { class: "backup-nag",
-                        if *downloaded.read() {
+                        if is_downloaded {
                             span { class: "backup-nag-text",
                                 "Downloaded. Confirm you still have the file — this reminder is the only thing standing between a lost node and a lost identity."
                             }

@@ -306,11 +306,17 @@ pub enum GhostkeyResponse {
     /// The user has no ghostkeys. Apps should direct the user to
     /// freenet.org/ghostkey to purchase one.
     ///
-    /// Note this means what it says: the vault is empty. It is NOT returned
-    /// merely because the caller lacks permission — `SignWithDefault` prompts
-    /// the user instead when the vault holds keys the caller has no grant on.
-    /// An app can treat this as "offer to buy one" without first checking
-    /// whether it was really a permissions problem.
+    /// It is NOT returned merely because the caller lacks permission —
+    /// `SignWithDefault` prompts the user instead when the vault holds keys
+    /// the caller has no grant on. So an app can treat this as "offer to buy
+    /// one" without first checking whether it was really a permissions
+    /// problem.
+    ///
+    /// Precisely, it means no identity is *available to sign with*: either the
+    /// vault is empty, or every identity in it has lost its signing key. Use
+    /// `HasIdentity` to tell those apart — its `unusable` count is non-zero in
+    /// the second case, which is worth a different message, since buying
+    /// another key is not what that user needs.
     NoIdentityAvailable,
     /// Reply to `HasIdentity`. Counts only — no fingerprints, labels or tiers.
     IdentityPresence {

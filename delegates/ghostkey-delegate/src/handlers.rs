@@ -554,21 +554,27 @@ pub(crate) fn resolve_default(ctx: &DelegateCtx, requestor: &SignatureRequestor)
     best.map(|(fp, _)| fp)
 }
 
-/// Every stored fingerprint, ordered the way `resolve_default` ranks them:
-/// highest donation tier first, ties broken by index (import) order.
+/// Fingerprints that can actually sign, ordered the way `resolve_default`
+/// ranks them: highest donation tier first, ties broken by index order.
 ///
-/// The key picker can only show a handful of buttons. Offering `load_index`
-/// order would truncate by import time, so a user who bought a $5 key first
-/// and a $500 key tenth would be offered the $5 one and never the $500 one.
-/// Ranking first means truncation drops the least valuable keys instead.
+/// Both filters matter for the signing picker this feeds:
+///
+/// - **Ranked, not index order.** The picker shows at most a handful of
+///   buttons, so truncating import order would offer someone who bought a $5
+///   key first and a $500 key tenth only the $5 one.
+/// - **Signing key required, not just a certificate.** A half-lost identity
+///   still has a certificate and would otherwise appear in the picker; the
+///   user would approve it and get "signing key not found" back. Consent
+///   should not be collected for something that cannot work.
 ///
 /// Not permission-filtered: this exists for the prompt shown when the caller
 /// has no grant on anything, so filtering by grant would return nothing.
-pub(crate) fn fingerprints_by_tier_desc(ctx: &DelegateCtx) -> Vec<String> {
+pub(crate) fn signable_fingerprints_by_tier_desc(ctx: &DelegateCtx) -> Vec<String> {
     let with_tiers: Vec<(String, u32)> = load_index(ctx)
         .into_iter()
         .filter_map(|fp| {
             let cert = load_cert(ctx, &fp)?;
+            ctx.get_secret(&sk_key(&fp))?;
             let amount = extract_amount(&notary_info(&cert)).unwrap_or(0);
             Some((fp, amount))
         })

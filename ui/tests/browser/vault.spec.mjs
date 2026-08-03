@@ -76,6 +76,13 @@ const confirmText = await unbackedCard.locator('.backup-nag-text').innerText();
 check('confirmation asks about the file, not the click',
   /have the file|still have/i.test(confirmText), confirmText.slice(0, 60));
 
+// The confirm prompt must belong to the key that was downloaded, and to no
+// other. Dioxus reuses component state across re-renders, so a flag that was
+// not bound to a fingerprint could offer to mark a different key backed up.
+const otherCard = page.locator('.identity-card', { has: page.locator('code', { hasText: 'Hv5sRe8x' }) });
+check('the other card is not offering to confirm a file it never downloaded',
+  (await otherCard.locator('button', { hasText: 'I have the file' }).count()) === 0);
+
 // Confirming is what clears it -- and only for the key confirmed.
 await confirmBtn.click();
 await page.waitForTimeout(600);

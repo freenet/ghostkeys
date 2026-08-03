@@ -158,11 +158,11 @@ fn handle_request(
     // is correct and the handler below returns it. If it holds keys, ask the
     // user and replay.
     if acts_on_a_key_it_does_not_name(&request) {
-        // Ranked, not index order: the picker shows at most
-        // MAX_BUTTON_FINGERPRINTS buttons, and index order is import order, so
-        // truncating it would hide the user's most valuable key behind
-        // whichever ones they happened to import first.
-        let fingerprints = handlers::fingerprints_by_tier_desc(ctx);
+        // Ranked and signable-only: the picker shows at most
+        // MAX_BUTTON_FINGERPRINTS buttons, index order is import order, and a
+        // certificate whose signing key is gone would be offered, approved,
+        // and then fail to sign.
+        let fingerprints = handlers::signable_fingerprints_by_tier_desc(ctx);
         match default_key_route(
             handlers::resolve_default(ctx, requestor).is_some(),
             fingerprints.is_empty(),
