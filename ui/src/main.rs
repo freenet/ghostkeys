@@ -1,5 +1,6 @@
 mod api;
 mod auto_import;
+mod backup;
 mod components;
 mod migration;
 
@@ -37,38 +38,30 @@ fn App() -> Element {
         }
 
         spawn(async {
-            if let Err(e) = connection::connect().await {
-                dioxus::logger::tracing::error!("Connection failed: {e}");
-                return;
-            }
+            // Take any import payload off the URL BEFORE anything that can
+            // fail. It carries a just-purchased ghostkey that exists nowhere
+            // else yet, and each bail-out below used to drop it with nothing
+            // but a console line to say so.
+            let pending_import = auto_import::pending_import_from_url();
 
-            // Wait for WebSocket handshake to complete
-            for _ in 0..50 {
-                if *api::state::CONNECTION_STATUS.read() == ConnectionStatus::Connected {
-                    break;
+            if let Err(e) = connect_and_register().await {
+                dioxus::logger::tracing::error!("Vault startup failed: {e}");
+                if pending_import.is_some() {
+                    auto_import::warn_not_imported();
                 }
-                gloo_timers::future::sleep(std::time::Duration::from_millis(100)).await;
-            }
-
-            if *api::state::CONNECTION_STATUS.read() != ConnectionStatus::Connected {
-                dioxus::logger::tracing::error!("Timed out waiting for connection");
                 return;
             }
 
-            if let Err(e) = delegate::register_delegate().await {
-                dioxus::logger::tracing::error!("Delegate registration failed: {e}");
-                return;
-            }
-
-            // Migrate ghostkeys from any previous delegate versions
+            // Recover ghostkeys stored under previous delegate versions.
             migration::try_migrate().await;
 
             // Load existing ghostkeys and default key from delegate storage
             load_ghostkeys().await;
             components::ghostkey_list::load_default_key();
 
-            // Check for auto-import via URL fragment
-            auto_import::check_and_import().await;
+            if let Some(pending) = pending_import {
+                auto_import::import(pending).await;
+            }
         });
     });
 
@@ -131,6 +124,30 @@ fn format_build_time_local() -> String {
     {
         BUILD_TIMESTAMP_ISO.to_string()
     }
+}
+
+/// Connect to the node and register the current delegate.
+///
+/// Split out so every failure funnels through one place. As three scattered
+/// `return`s it was impossible for the caller to react to a failed startup --
+/// which matters because a pending URL import must be reported rather than
+/// silently abandoned.
+async fn connect_and_register() -> Result<(), String> {
+    connection::connect().await?;
+
+    // Wait for the WebSocket handshake to complete.
+    for _ in 0..50 {
+        if *api::state::CONNECTION_STATUS.read() == ConnectionStatus::Connected {
+            break;
+        }
+        gloo_timers::future::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    if *api::state::CONNECTION_STATUS.read() != ConnectionStatus::Connected {
+        return Err("timed out waiting for the node connection".into());
+    }
+
+    delegate::register_delegate().await
 }
 
 async fn load_ghostkeys() {

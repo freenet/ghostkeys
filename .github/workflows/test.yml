@@ -1,0 +1,49 @@
+name: Test
+
+# Until this existed, `check-migration.yml` was the repo's only workflow: the
+# delegate that holds users' signing keys, and the vault that recovers them
+# across a re-key, both merged with no automated test, lint, or format gate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to match rust-toolchain.toml. That pin is load-bearing: the
+      # delegate key is BLAKE3(BLAKE3(wasm) || params), so a different rustc
+      # produces a different key and orphans every user's stored ghostkeys.
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # The UI embeds the delegate WASM via include_bytes!, so the artifact has
+      # to exist before the UI crate can be built or linted at all.
+      - name: Build delegate WASM
+        run: cargo build --target wasm32-unknown-unknown --release -p ghostkey-delegate
+
+      # Lint against wasm32 rather than the host. The UI's real code paths are
+      # behind `#[cfg(target_arch = "wasm32")]`, so a native lint sees stubs
+      # and reports the whole delegate API as dead code while missing anything
+      # actually wrong in the shipped code.
+      - name: Clippy
+        run: cargo clippy --target wasm32-unknown-unknown --workspace -- -D warnings
+
+      # Run natively: this is what exercises the pure decision logic (migration
+      # outcomes, backup records, PEM parsing) plus the delegate's own tests.
+      - name: Test
+        run: cargo test --workspace

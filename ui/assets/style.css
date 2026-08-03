@@ -290,6 +290,29 @@ body {
     border-radius: 999px;
 }
 
+/* Shown until the identity has been exported at least once. The vault is the
+   only copy of a ghostkey on most nodes, so this stays visible rather than
+   being a one-off dismissible prompt. */
+.backup-warning {
+    font-size: 0.5625rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent-warm);
+    background: rgba(232, 160, 96, 0.12);
+    border: 1px solid rgba(232, 160, 96, 0.25);
+    padding: 0.0625rem 0.375rem;
+    border-radius: 999px;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.backup-warning:hover,
+.backup-warning:focus-visible {
+    background: rgba(232, 160, 96, 0.2);
+    color: var(--text-bright);
+}
+
 .tier-pill {
     font-family: var(--mono);
     font-size: 0.6875rem;
@@ -479,7 +502,15 @@ body {
 
 .link-text {
     color: var(--glow);
-    opacity: 0.7;
+    opacity: 0.85;
+    text-decoration: underline;
+    text-underline-offset: 0.15em;
+    cursor: pointer;
+}
+
+.link-text:hover,
+.link-text:focus-visible {
+    opacity: 1;
 }
 
 /* Build footer */

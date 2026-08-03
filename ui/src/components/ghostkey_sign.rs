@@ -1,6 +1,5 @@
 use dioxus::prelude::*;
 use ghostkey_common::{GhostkeyRequest, GhostkeyResponse};
-use wasm_bindgen::JsCast;
 
 use crate::api;
 use crate::components::toast::{self, ToastKind};
@@ -144,7 +143,7 @@ pub fn SignDialog(fingerprint: String, on_close: EventHandler<()>) -> Element {
                                                     error_msg.set(Some(format!("Unexpected: {other:?}")));
                                                 }
                                                 Err(e) => {
-                                                    error_msg.set(Some(e));
+                                                    error_msg.set(Some(e.to_string()));
                                                 }
                                             }
                                         });
@@ -160,6 +159,7 @@ pub fn SignDialog(fingerprint: String, on_close: EventHandler<()>) -> Element {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
 fn copy_to_clipboard(text: &str) {
     #[cfg(target_arch = "wasm32")]
     {

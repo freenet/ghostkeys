@@ -368,7 +368,7 @@ pub fn ImportDialog(on_close: EventHandler<()>, on_import: EventHandler<GhostKey
                                         error_msg.set(Some(format!("Unexpected response: {other:?}")));
                                     }
                                     Err(e) => {
-                                        error_msg.set(Some(e));
+                                        error_msg.set(Some(e.to_string()));
                                     }
                                 }
                             });

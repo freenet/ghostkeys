@@ -1,9 +1,18 @@
 use dioxus::prelude::*;
 use ghostkey_common::{GhostKeyInfo, GhostkeyRequest, GhostkeyResponse};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
 use super::ghostkey_import::ImportDialog;
 use super::ghostkey_sign::SignDialog;
+
+/// Where a user with no identities goes to get one.
+///
+/// The empty state used to render "freenet.org" as a `<span>` styled to look
+/// like a link, so the one exit from an empty vault was not clickable. Links
+/// straight to the donation form rather than the explainer: someone reading
+/// this has already decided they want a ghostkey.
+const PURCHASE_URL: &str = "https://freenet.org/ghostkey/create/";
 
 pub static GHOSTKEYS: GlobalSignal<Vec<GhostKeyInfo>> = GlobalSignal::new(|| {
     #[cfg(feature = "example-data")]
@@ -56,12 +65,14 @@ fn export_all() {
                     return;
                 }
                 // Serialize to JSON and trigger download
-                let json = serde_json::to_string_pretty(&keys).unwrap_or_default();
                 #[cfg(target_arch = "wasm32")]
                 {
+                    let json = serde_json::to_string_pretty(&keys).unwrap_or_default();
+                    let bag = web_sys::BlobPropertyBag::new();
+                    bag.set_type("application/json");
                     let blob = web_sys::Blob::new_with_str_sequence_and_options(
                         &js_sys::Array::of1(&wasm_bindgen::JsValue::from_str(&json)),
-                        web_sys::BlobPropertyBag::new().type_("application/json"),
+                        &bag,
                     );
                     if let Ok(blob) = blob {
                         if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
@@ -77,6 +88,9 @@ fn export_all() {
                         }
                     }
                 }
+                // The user now holds a copy of these outside the vault, so
+                // stop warning about them.
+                crate::backup::mark_backed_up(keys.iter().map(|k| k.fingerprint.clone()));
                 toast::show(
                     format!("Exported {} ghostkey(s)", keys.len()),
                     ToastKind::Success,
@@ -206,8 +220,14 @@ pub fn GhostKeyList() -> Element {
                     div { class: "empty-icon" }
                     p { class: "empty-title", "No identities yet" }
                     p { class: "empty-hint",
-                        "Purchase a ghostkey at "
-                        span { class: "link-text", "freenet.org" }
+                        "Ghostkeys are issued when you donate to Freenet. "
+                        a {
+                            class: "link-text",
+                            href: PURCHASE_URL,
+                            target: "_blank",
+                            rel: "noopener",
+                            "Get one at freenet.org"
+                        }
                         ", then import it here."
                     }
                 }
@@ -227,9 +247,8 @@ fn extract_json_field<'a>(info: &'a str, field: &str) -> Option<&'a str> {
     let pos = info.find(&key)?;
     let after = &info[pos + key.len()..];
     let after = after.trim_start();
-    if after.starts_with('"') {
+    if let Some(content) = after.strip_prefix('"') {
         // String value
-        let content = &after[1..];
         let end = content.find('"')?;
         Some(&content[..end])
     } else {
@@ -322,7 +341,7 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
     let is_default = DEFAULT_KEY
         .read()
         .as_ref()
-        .map_or(false, |dk| dk == &info.fingerprint);
+        .is_some_and(|dk| dk == &info.fingerprint);
     let delay = format!("{}ms", index * 80);
     let mut label_input = use_signal(|| info.label.clone().unwrap_or_default());
     let mut confirming_delete = use_signal(|| false);
@@ -344,6 +363,14 @@ fn GhostKeyCard(info: GhostKeyInfo, index: usize) -> Element {
                         }
                     }
                     div { class: "card-meta",
+                        if !crate::backup::is_backed_up(&info.fingerprint) {
+                            button {
+                                class: "backup-warning",
+                                title: "This identity exists only inside this vault. Download a backup so you can restore it.",
+                                onclick: move |_| export_all(),
+                                "not backed up"
+                            }
+                        }
                         if let Some(date) = extract_date(&info.notary_info) {
                             span { class: "meta-date", "tier est. {date}" }
                         }
