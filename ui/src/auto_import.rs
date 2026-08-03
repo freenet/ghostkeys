@@ -643,6 +643,53 @@ mod tests {
         }
     }
 
+    /// Machine-generated sweep, wider than the hand-written cases. Anything
+    /// that survives validation must resolve to a path still under the
+    /// contract prefix once dot segments are normalised the way a browser
+    /// normalises them.
+    #[test]
+    fn no_accepted_route_can_leave_the_contract_prefix() {
+        let alphabet = [
+            "a", "..", ".", "/", "%2e", "%2f", "%252e", "#", "?", "%00", "\\",
+        ];
+        let id = "DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N";
+        let mut accepted = 0usize;
+        // All 1-, 2- and 3-token combinations.
+        for a in alphabet {
+            for b in alphabet {
+                for c in alphabet {
+                    for candidate in [format!("{a}"), format!("{a}{b}"), format!("{a}{b}{c}")] {
+                        let Some(route) = validated_return_path(&candidate) else {
+                            continue;
+                        };
+                        accepted += 1;
+                        // Simulate the browser: resolve the href's path and
+                        // normalise dot segments.
+                        let href = format!("/v1/contract/web/{id}/{route}");
+                        let path = href.split('#').next().unwrap_or("").to_string();
+                        let mut stack: Vec<&str> = Vec::new();
+                        for seg in path.split('/') {
+                            match seg {
+                                "" | "." => {}
+                                ".." => {
+                                    stack.pop();
+                                }
+                                other => stack.push(other),
+                            }
+                        }
+                        let normalised = format!("/{}", stack.join("/"));
+                        assert!(
+                            normalised.starts_with(&format!("/v1/contract/web/{id}")),
+                            "route {candidate:?} -> {route:?} escaped to {normalised}"
+                        );
+                    }
+                }
+            }
+        }
+        // A sweep that accepted nothing would pass vacuously.
+        assert!(accepted > 0, "sweep accepted no routes at all -- vacuous");
+    }
+
     #[test]
     fn an_over_long_route_is_refused() {
         let long = "a".repeat(600);
