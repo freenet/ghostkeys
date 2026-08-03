@@ -18,9 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Pinned to match rust-toolchain.toml. That pin is load-bearing: the
-      # delegate key is BLAKE3(BLAKE3(wasm) || params), so a different rustc
-      # produces a different key and orphans every user's stored ghostkeys.
+      # Named to match rust-toolchain.toml, which is what actually governs the
+      # build: it outranks the rustup default this action sets. Stated
+      # explicitly here because the version matters — the delegate key is
+      # BLAKE3(BLAKE3(wasm) || params), so a different rustc yields a different
+      # key — but the toml is what enforces it, not this line.
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy

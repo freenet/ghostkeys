@@ -37,6 +37,13 @@ pub fn pending_import_from_url() -> Option<PendingImport> {
     if parts.len() < 2 || parts.len() > 3 {
         return reject("the link is malformed (expected 2 or 3 parts)");
     }
+    // An empty part decodes successfully to an empty string, so without this
+    // a degenerate link like `#import=.` would build a PendingImport carrying
+    // no certificate and no key, and the user would get an obscure error from
+    // the delegate instead of being told their link is malformed.
+    if parts[..2].iter().any(|p| p.is_empty()) {
+        return reject("the link is incomplete");
+    }
 
     let Some(certificate_pem) = decode_base64(parts[0]) else {
         return reject("the certificate could not be decoded");
@@ -328,6 +335,14 @@ mod tests {
         let truncated: String = full.chars().take(clipped_len).collect();
         assert_eq!(truncated.len() % 4, 1, "test needs a 4n+1 length");
         assert_eq!(decode_base64(&truncated), None);
+    }
+
+    /// An empty part decodes fine to an empty string, so a degenerate link
+    /// has to be caught before decoding or it produces a PendingImport with
+    /// no key in it and an obscure delegate error downstream.
+    #[test]
+    fn an_empty_part_decodes_and_so_must_be_rejected_earlier() {
+        assert_eq!(decode_base64("").as_deref(), Some(""));
     }
 
     #[test]
