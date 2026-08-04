@@ -67,6 +67,20 @@ the gateway origin. Verified from an opaque-origin frame.
 Cache it for the session, but re-fetch on a fresh load rather than persisting it
 — that is what makes a re-key invisible to your users.
 
+**If the fetch fails**, treat it as "ghost keys are not available on this node"
+rather than falling back to a stored key. The vault webapp and the delegate are
+published together, so a node without the former almost certainly lacks the
+latter, and a stale fallback would reproduce exactly the failure this replaces.
+
+**The one constant you still hardcode** is the vault's contract id. It is
+derived from the web container contract's WASM and parameters, both fixed, so
+it has not changed since the vault was first published and does not change when
+the vault is updated — publishing a new version updates the contract's *state*.
+It would change if the web container contract itself were ever upgraded, which
+would be a far larger and more visible event than a delegate re-key, and would
+be announced. That is a smaller exposure than hardcoding a delegate key, not
+zero.
+
 ### Does this user have a ghost key?
 
 Ask with `HasIdentity`. It answers **without prompting**, and is deliberately
