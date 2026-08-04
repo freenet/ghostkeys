@@ -31,6 +31,56 @@ The certificate also records the donation amount and date, so applications can m
 
 If you're building a Freenet application and want to verify users or prevent spam, you interact with the ghostkeys delegate through Freenet's delegate messaging API. Your app sends a `GhostkeyRequest`, the user is prompted for permission, and you receive a `GhostkeyResponse`.
 
+### First: find the delegate, don't hardcode it
+
+**Do not bake the delegate key into your build.** It is derived from the
+delegate's WASM (`BLAKE3(BLAKE3(wasm) || params)`), so it changes whenever the
+delegate does — including for a bare version bump. Users' stored keys migrate
+forward automatically, but your app's *reference* does not: after a re-key it
+addresses a namespace that is now empty, and every request comes back as though
+the user has no ghost key.
+
+That is not a hypothetical. It happened on 2026-08-03, silently, to every
+integration, and the first anyone knew was a user being told to buy a ghost key
+they already owned ([#21](https://github.com/freenet/ghostkeys/issues/21)).
+
+Fetch it instead. The vault publishes the current delegate inside its own
+webapp bundle, at a contract id that does not change:
+
+```js
+const VAULT = 'DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N';
+
+const res = await fetch(`/v1/contract/web/${VAULT}/delegate-key.json`);
+const { delegate_key_bytes, code_hash_bytes } = await res.json();
+// -> use these to address the ghostkeys delegate
+```
+
+Both hex strings and `number[]` byte arrays are provided, so you can use
+whichever your delegate-messaging layer wants. The file is signed as part of
+the vault webapp and is written from the delegate being published, so it cannot
+name a delegate that does not exist.
+
+This works from inside a sandboxed webapp: the gateway serves bundle files with
+`Access-Control-Allow-Origin: *`, and the sandbox CSP permits `connect-src` to
+the gateway origin. Verified from an opaque-origin frame.
+
+Cache it for the session, but re-fetch on a fresh load rather than persisting it
+— that is what makes a re-key invisible to your users.
+
+**If the fetch fails**, treat it as "ghost keys are not available on this node"
+rather than falling back to a stored key. The vault webapp and the delegate are
+published together, so a node without the former almost certainly lacks the
+latter, and a stale fallback would reproduce exactly the failure this replaces.
+
+**The one constant you still hardcode** is the vault's contract id. It is
+derived from the web container contract's WASM and parameters, both fixed, so
+it has not changed since the vault was first published and does not change when
+the vault is updated — publishing a new version updates the contract's *state*.
+It would change if the web container contract itself were ever upgraded, which
+would be a far larger and more visible event than a delegate re-key, and would
+be announced. That is a smaller exposure than hardcoding a delegate key, not
+zero.
+
 ### Does this user have a ghost key?
 
 Ask with `HasIdentity`. It answers **without prompting**, and is deliberately

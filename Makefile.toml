@@ -46,18 +46,33 @@ command = "dx"
 args = ["build", "--${BUILD_PROFILE}"]
 cwd = "./ui"
 
+[tasks.write-delegate-pointer]
+description = "Publish the current delegate key inside the webapp bundle"
+# Between build-ui and compress-webapp on purpose: the pointer has to be
+# written after the bundle exists and before it is sealed, so it ships in the
+# same archive as the delegate it names and cannot drift from it.
+dependencies = ["build-ui"]
+command = "bash"
+args = ["scripts/write-delegate-pointer.sh"]
+
 [tasks.compress-webapp]
 description = "Compress the UI into a tar.xz archive"
-dependencies = ["build-ui"]
+dependencies = ["build-ui", "write-delegate-pointer"]
 script = '''
 mkdir -p target/webapp
 cd target/dx/ghostkey-ui/${BUILD_PROFILE}/web/public && tar -cJf ../../../../../webapp/webapp.tar.xz *
 echo "Compressed webapp to target/webapp/webapp.tar.xz"
 '''
 
+[tasks.check-delegate-pointer]
+description = "Verify the published pointer names the delegate actually shipping"
+dependencies = ["compress-webapp"]
+command = "bash"
+args = ["scripts/check-delegate-pointer.sh"]
+
 [tasks.sign-webapp]
 description = "Sign the webapp archive with the web-container-tool"
-dependencies = ["compress-webapp", "check-migration"]
+dependencies = ["compress-webapp", "check-migration", "check-delegate-pointer"]
 script = '''
 VERSION=$(( $(date +%s) / 60 ))
 echo "Signing with version: $VERSION"
