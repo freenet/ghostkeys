@@ -28,12 +28,21 @@ pub enum DelegateCallError {
     /// The node reported no such delegate.
     ///
     /// Useful as a fast skip, but NOT proof that nothing is stored under that
-    /// delegate, and it must never be treated as such. Two reasons, both
-    /// verified in freenet-core: the websocket layer synthesizes this error
-    /// from a per-key backoff throttle without ever consulting the delegate
-    /// store (`client_events/websocket.rs`), and `UnregisterDelegate` removes
-    /// a delegate's code while leaving its secrets in place -- the delegate
-    /// store and the secrets store are separate.
+    /// delegate, and it must never be treated as such. `UnregisterDelegate`
+    /// removes a delegate's code while leaving its secrets in place -- the
+    /// delegate store and the secrets store are separate -- so a node can
+    /// report "no such delegate" while still holding keys under it.
+    ///
+    /// There used to be a second reason: the websocket layer synthesised this
+    /// same error from a per-key backoff throttle, without consulting the
+    /// delegate store at all. That was worse than it sounds here. A throttled
+    /// probe during a migration sweep classified as `Skipped`, which is
+    /// counted as neither an error nor undetermined, so a legacy delegate
+    /// could be passed over in silence and its keys never recovered. Fixed
+    /// upstream in freenet-core#5146: throttling now reports `ExecutionError`,
+    /// so a throttled probe lands in `AnsweredWithError` and is surfaced.
+    ///
+    /// The remaining reason is enough to keep this from being proof.
     NotRegistered,
     /// The node reported a delegate-level failure (execution error, missing
     /// secret, registration failure). We reached the delegate but the call
