@@ -299,6 +299,79 @@ fn next_prompt_request_id() -> u32 {
     REQUEST_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// One offerable key in a picker prompt: which fingerprint it is, what to
+/// show for it (the user's label if set, else the fingerprint), and the
+/// exact button-response bytes that select it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeyChoice {
+    fingerprint: String,
+    display: String,
+    response: Vec<u8>,
+}
+
+/// Build `KeyChoice`s from fingerprints paired with their already-resolved
+/// display names (the user's label if set, else the fingerprint itself).
+/// Pure and `DelegateCtx`-free so the disambiguation logic is unit-testable
+/// without a live delegate context; `key_choices` below is the thin
+/// ctx-aware wrapper every real caller uses.
+///
+/// A single offered key collapses to a plain "Allow" button: there is
+/// nothing to disambiguate, so naming the key would just be noise. Two or
+/// more keys get a named button each, with the fingerprint appended
+/// whenever two keys would otherwise show the same name -- e.g. two keys
+/// both labelled "Work" -- so a response can never match more than one
+/// candidate.
+fn key_choices_from_names(fingerprints: &[String], names: Vec<String>) -> Vec<KeyChoice> {
+    debug_assert_eq!(fingerprints.len(), names.len());
+
+    if let ([fp], [name]) = (fingerprints, names.as_slice()) {
+        return vec![KeyChoice {
+            fingerprint: fp.clone(),
+            display: name.clone(),
+            response: b"Allow".to_vec(),
+        }];
+    }
+
+    // Owned keys, not `&str` borrowed from `names`: the map must outlive
+    // the `names` Vec being consumed by the `.zip` below.
+    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for name in &names {
+        *counts.entry(name.clone()).or_insert(0) += 1;
+    }
+
+    fingerprints
+        .iter()
+        .cloned()
+        .zip(names)
+        .map(|(fingerprint, name)| {
+            let display = if counts[&name] > 1 {
+                format!("{name} ({fingerprint})")
+            } else {
+                name
+            };
+            let response = format!("Allow \"{display}\"").into_bytes();
+            KeyChoice {
+                fingerprint,
+                display,
+                response,
+            }
+        })
+        .collect()
+}
+
+/// Build the offerable choices for a key-picker prompt, resolving each
+/// fingerprint's display name from the user's saved label. Used both to
+/// render the prompt (body list + buttons) and, later, to match the user's
+/// response back to a fingerprint -- the two must derive from the same
+/// function so they can never drift apart.
+fn key_choices(ctx: &DelegateCtx, fingerprints: &[String]) -> Vec<KeyChoice> {
+    let names = fingerprints
+        .iter()
+        .map(|fp| handlers::get_label(ctx, fp).unwrap_or_else(|| fp.clone()))
+        .collect();
+    key_choices_from_names(fingerprints, names)
+}
+
 /// Request permission from the user for a specific-fingerprint operation.
 fn request_user_permission(
     ctx: &mut DelegateCtx,
@@ -311,10 +384,12 @@ fn request_user_permission(
     let request_id = next_prompt_request_id();
     let requestor_desc = requestor_short_label(requestor);
 
+    let key_name = handlers::get_label(ctx, fingerprint).unwrap_or_else(|| fingerprint.to_string());
     let prompt = format!(
-        "{requestor_desc} is requesting access to your ghostkey identity ({fingerprint}).\n\n\
-         Choose 'Allow' to grant access (you can revoke later from the vault), \
-         or 'Deny' to block the request."
+        "{requestor_desc} wants to use your ghostkey \"{key_name}\" as proof you're a real \
+         person, not a bot, while staying anonymous. It can only ask for a signature — never \
+         your private key. You can revoke this anytime from your vault.\n\n\
+         Allow, or deny?"
     );
 
     logging::info(&format!("Requesting user permission: {prompt}"));
@@ -395,16 +470,25 @@ fn request_any_access(
 
     let request_id = next_prompt_request_id();
     let requestor_desc = requestor_short_label(requestor);
+    let choices = key_choices(ctx, &fingerprints);
 
-    // Build prompt text. The fingerprint list goes into the message body
-    // so the user can see which key each button picks; the buttons
-    // themselves carry the fingerprint as part of the label.
+    // Build prompt text. A single offered key needs no picker -- just
+    // Allow/Deny, matching the specific-fingerprint prompt above. Two or
+    // more keys get a numbered list (using each key's label, so the user
+    // sees a name they picked rather than an opaque fingerprint) plus a
+    // named button per key.
     let mut body = format!(
-        "{requestor_desc} wants to use one of your ghostkey identities to read your public certificate and sign messages on your behalf.\n\n\
-         Pick a key to share, or deny."
+        "{requestor_desc} wants to use one of your ghostkeys as proof you're a real person, \
+         not a bot, while staying anonymous. It can only ask for a signature — never your \
+         private key.\n\n"
     );
-    for (i, fp) in fingerprints.iter().enumerate() {
-        body.push_str(&format!("\n  {}. {fp}", i + 1));
+    if choices.len() == 1 {
+        body.push_str("Allow, or deny?");
+    } else {
+        body.push_str("Pick which key to allow, or deny.");
+        for (i, choice) in choices.iter().enumerate() {
+            body.push_str(&format!("\n  {}. {}", i + 1, choice.display));
+        }
     }
 
     logging::info(&format!("Requesting any-access prompt: {body}"));
@@ -418,10 +502,9 @@ fn request_any_access(
         to_cbor(&pending).map_err(|e| DelegateError::Other(format!("serialize pending: {e}")))?;
     ctx.write(&pending_bytes);
 
-    // Buttons: one per fingerprint (label is the fingerprint itself), then Deny.
-    let mut responses: Vec<ClientResponse<'static>> = fingerprints
-        .iter()
-        .map(|fp| ClientResponse::new(format!("Share {fp}").into_bytes()))
+    let mut responses: Vec<ClientResponse<'static>> = choices
+        .into_iter()
+        .map(|c| ClientResponse::new(c.response))
         .collect();
     responses.push(ClientResponse::new(b"Deny".to_vec()));
 
@@ -456,13 +539,20 @@ fn request_any_access_then_replay(
 
     let request_id = next_prompt_request_id();
     let requestor_desc = requestor_short_label(requestor);
+    let choices = key_choices(ctx, &fingerprints);
 
     let mut body = format!(
-        "{requestor_desc} wants to sign with one of your ghostkey identities.\n\n\
-         Pick a key to use, or deny."
+        "{requestor_desc} wants to sign something here using one of your ghostkeys — as \
+         proof you're a real person, not a bot, while staying anonymous. It can only ask \
+         for a signature — never your private key.\n\n"
     );
-    for (i, fp) in fingerprints.iter().enumerate() {
-        body.push_str(&format!("\n  {}. {fp}", i + 1));
+    if choices.len() == 1 {
+        body.push_str("Allow, or deny?");
+    } else {
+        body.push_str("Pick which key to allow, or deny.");
+        for (i, choice) in choices.iter().enumerate() {
+            body.push_str(&format!("\n  {}. {}", i + 1, choice.display));
+        }
     }
 
     logging::info(&format!("Requesting sign-with-default prompt: {body}"));
@@ -477,9 +567,9 @@ fn request_any_access_then_replay(
         to_cbor(&pending).map_err(|e| DelegateError::Other(format!("serialize pending: {e}")))?;
     ctx.write(&pending_bytes);
 
-    let mut responses: Vec<ClientResponse<'static>> = fingerprints
-        .iter()
-        .map(|fp| ClientResponse::new(format!("Share {fp}").into_bytes()))
+    let mut responses: Vec<ClientResponse<'static>> = choices
+        .into_iter()
+        .map(|c| ClientResponse::new(c.response))
         .collect();
     responses.push(ClientResponse::new(b"Deny".to_vec()));
 
@@ -618,14 +708,17 @@ fn handle_any_access_response(
         )]);
     }
 
-    // Otherwise the response is "Share <fingerprint>". Map it back to one
-    // of the fingerprints we offered. We don't trust the suffix from the
-    // user response alone -- the prompt UI is server-rendered and the
-    // browser shouldn't be able to inject arbitrary text, but checking
-    // membership in our pinned fingerprint list is cheap defense in depth.
-    let chosen: Option<String> = fingerprints
-        .into_iter()
-        .find(|fp| response_bytes == format!("Share {fp}").as_bytes());
+    // Otherwise the response is one of the "Allow ..." choices we built the
+    // prompt with. Recompute the same choices (rather than trusting a
+    // suffix parsed from the response) and match by exact bytes -- the
+    // prompt UI is server-rendered and the browser shouldn't be able to
+    // inject arbitrary text, but checking membership in our pinned
+    // fingerprint list is cheap defense in depth.
+    let choices = key_choices(ctx, &fingerprints);
+    let chosen: Option<String> = match match_offered_fingerprint(response_bytes, &choices) {
+        AnyAccessChoice::Chose(fp) => Some(fp),
+        _ => None,
+    };
 
     let Some(fp) = chosen else {
         logging::info("Any-access response did not match any known fingerprint button");
@@ -706,18 +799,16 @@ enum AnyAccessChoice {
 }
 
 /// Match a prompt response back to a fingerprint the delegate actually
-/// offered, rather than parsing the label's suffix. The offered list is the
-/// truncated one stored with the pending prompt, so a fingerprint that never
-/// made it onto a button can never be selected.
-fn match_offered_fingerprint(response: &[u8], offered: &[String]) -> AnyAccessChoice {
+/// offered, rather than parsing the response's suffix. `offered` is the same
+/// `key_choices` output the prompt was built from (recomputed from the
+/// fingerprint list stored with the pending prompt), so a fingerprint that
+/// never made it onto a button can never be selected.
+fn match_offered_fingerprint(response: &[u8], offered: &[KeyChoice]) -> AnyAccessChoice {
     if response == b"Deny" {
         return AnyAccessChoice::Denied;
     }
-    match offered
-        .iter()
-        .find(|fp| response == format!("Share {fp}").as_bytes())
-    {
-        Some(fp) => AnyAccessChoice::Chose(fp.clone()),
+    match offered.iter().find(|c| response == c.response.as_slice()) {
+        Some(c) => AnyAccessChoice::Chose(c.fingerprint.clone()),
         None => AnyAccessChoice::Unrecognized,
     }
 }
@@ -732,7 +823,8 @@ fn handle_any_access_then_replay_response(
     fingerprints: Vec<String>,
     original_payload: Vec<u8>,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
-    let fp = match match_offered_fingerprint(user_resp.response.bytes(), &fingerprints) {
+    let choices = key_choices(ctx, &fingerprints);
+    let fp = match match_offered_fingerprint(user_resp.response.bytes(), &choices) {
         AnyAccessChoice::Chose(fp) => fp,
         other => {
             match other {
@@ -973,9 +1065,18 @@ mod tests {
         assert_eq!(default_key_route(true, true), DefaultKeyRoute::Proceed);
     }
 
+    /// Build the `KeyChoice`s a real prompt for these fingerprints and
+    /// (already-resolved) display names would have, for tests that only
+    /// need to exercise matching, not label resolution.
+    fn choices(pairs: &[(&str, &str)]) -> Vec<KeyChoice> {
+        let fingerprints: Vec<String> = pairs.iter().map(|(fp, _)| fp.to_string()).collect();
+        let names: Vec<String> = pairs.iter().map(|(_, name)| name.to_string()).collect();
+        key_choices_from_names(&fingerprints, names)
+    }
+
     #[test]
     fn deny_button_is_a_denial() {
-        let offered = vec!["fpA".to_string(), "fpB".to_string()];
+        let offered = choices(&[("fpA", "A"), ("fpB", "B")]);
         assert_eq!(
             match_offered_fingerprint(b"Deny", &offered),
             AnyAccessChoice::Denied
@@ -983,39 +1084,78 @@ mod tests {
     }
 
     #[test]
-    fn share_button_selects_the_matching_offered_key() {
-        let offered = vec!["fpA".to_string(), "fpB".to_string()];
+    fn allow_button_selects_the_matching_offered_key() {
+        let offered = choices(&[("fpA", "A"), ("fpB", "B")]);
         assert_eq!(
-            match_offered_fingerprint(b"Share fpB", &offered),
+            match_offered_fingerprint(br#"Allow "B""#, &offered),
             AnyAccessChoice::Chose("fpB".to_string())
         );
     }
 
     #[test]
-    fn a_fingerprint_never_offered_cannot_be_selected() {
-        // The response arrives from outside the delegate. Parsing the suffix
-        // instead of matching the offered list would let a crafted response
-        // grant access to a key the user was never shown.
-        let offered = vec!["fpA".to_string()];
+    fn a_single_offered_key_uses_a_plain_allow_button() {
+        // Nothing to disambiguate with only one candidate, so the button
+        // (and the match) is just "Allow" -- no name, no fingerprint.
+        let offered = choices(&[("fpA", "A")]);
         assert_eq!(
-            match_offered_fingerprint(b"Share fpZ", &offered),
+            offered,
+            vec![KeyChoice {
+                fingerprint: "fpA".to_string(),
+                display: "A".to_string(),
+                response: b"Allow".to_vec(),
+            }]
+        );
+        assert_eq!(
+            match_offered_fingerprint(b"Allow", &offered),
+            AnyAccessChoice::Chose("fpA".to_string())
+        );
+    }
+
+    #[test]
+    fn duplicate_display_names_are_disambiguated_by_fingerprint() {
+        // Two keys sharing a user-set label (e.g. both named "Work") must
+        // not collapse to the same button text -- that would make the
+        // second button's click silently grant the first key instead.
+        let offered = choices(&[("fpA", "Work"), ("fpB", "Work")]);
+        assert_eq!(offered[0].response, br#"Allow "Work (fpA)""#);
+        assert_eq!(offered[1].response, br#"Allow "Work (fpB)""#);
+        assert_eq!(
+            match_offered_fingerprint(&offered[1].response.clone(), &offered),
+            AnyAccessChoice::Chose("fpB".to_string())
+        );
+    }
+
+    #[test]
+    fn a_choice_never_offered_cannot_be_selected() {
+        // The response arrives from outside the delegate. Parsing the
+        // suffix instead of matching the offered list would let a crafted
+        // response grant access to a key the user was never shown.
+        let offered = choices(&[("fpA", "A"), ("fpB", "B")]);
+        assert_eq!(
+            match_offered_fingerprint(br#"Allow "Z""#, &offered),
             AnyAccessChoice::Unrecognized
         );
         assert_eq!(
-            match_offered_fingerprint(b"Share ", &offered),
+            match_offered_fingerprint(b"Allow \"\"", &offered),
             AnyAccessChoice::Unrecognized
         );
         assert_eq!(
             match_offered_fingerprint(b"", &offered),
             AnyAccessChoice::Unrecognized
         );
+        // A single-key-style "Allow" must not match a multi-key offer --
+        // there's no key it could unambiguously refer to.
+        assert_eq!(
+            match_offered_fingerprint(b"Allow", &offered),
+            AnyAccessChoice::Unrecognized
+        );
         // Prefix of a real button, and the real button plus a suffix.
         assert_eq!(
-            match_offered_fingerprint(b"Share fp", &offered),
+            match_offered_fingerprint(br#"Allow "A"#, &offered),
             AnyAccessChoice::Unrecognized
         );
         assert_eq!(
-            match_offered_fingerprint(b"Share fpAA", &offered),
+            match_offered_fingerprint(br#"Allow "A"" extra"#, &offered),
             AnyAccessChoice::Unrecognized
         );
     }
@@ -1023,7 +1163,7 @@ mod tests {
     #[test]
     fn nothing_can_be_selected_when_nothing_was_offered() {
         assert_eq!(
-            match_offered_fingerprint(b"Share fpA", &[]),
+            match_offered_fingerprint(br#"Allow "A""#, &[]),
             AnyAccessChoice::Unrecognized
         );
         // Deny still works with an empty offer list.
