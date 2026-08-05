@@ -28,6 +28,14 @@ fn is_backed_up(ctx: &DelegateCtx, fp: &str) -> bool {
     ctx.get_secret(&backed_up_key(fp)).is_some()
 }
 
+/// The user-set label for a ghostkey, if any. Used by `lib.rs` to show a
+/// name the user picked instead of a raw fingerprint in permission prompts.
+pub(crate) fn get_label(ctx: &DelegateCtx, fp: &str) -> Option<String> {
+    ctx.get_secret(&label_key(fp))
+        .and_then(|b| String::from_utf8(b).ok())
+        .filter(|s| !s.trim().is_empty())
+}
+
 /// Load the fingerprint index from secrets. Exposed at crate visibility
 /// so the `RequestAnyAccess` prompt path in `lib.rs` can list keys for
 /// the user without recreating the storage layout knowledge.
