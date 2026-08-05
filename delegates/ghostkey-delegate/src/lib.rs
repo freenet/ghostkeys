@@ -317,10 +317,14 @@ struct KeyChoice {
 ///
 /// A single offered key collapses to a plain "Allow" button: there is
 /// nothing to disambiguate, so naming the key would just be noise. Two or
-/// more keys get a named button each, with the fingerprint appended
-/// whenever two keys would otherwise show the same name -- e.g. two keys
-/// both labelled "Work" -- so a response can never match more than one
-/// candidate.
+/// more keys get a named button each, disambiguated in stages so a
+/// response can never match more than one candidate -- see
+/// `duplicate_display_names_are_disambiguated_by_fingerprint` and
+/// `three_way_label_collision_is_still_disambiguated` for the cases this
+/// guards, including one a single "append fingerprint to the duplicates
+/// only" pass gets wrong: a key labelled literally `"Work (fpA)"` colliding
+/// with another key named "Work" whose disambiguated form is `"Work
+/// (fpA)"`.
 fn key_choices_from_names(fingerprints: &[String], names: Vec<String>) -> Vec<KeyChoice> {
     debug_assert_eq!(fingerprints.len(), names.len());
 
@@ -332,23 +336,36 @@ fn key_choices_from_names(fingerprints: &[String], names: Vec<String>) -> Vec<Ke
         }];
     }
 
-    // Owned keys, not `&str` borrowed from `names`: the map must outlive
-    // the `names` Vec being consumed by the `.zip` below.
-    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for name in &names {
-        *counts.entry(name.clone()).or_insert(0) += 1;
+    let mut displays = names;
+
+    // Stage 1: if ANY name collides with another, append every key's own
+    // fingerprint to its name -- not just the colliding ones. Appending
+    // only to the duplicates would leave an untouched key's plain label
+    // free to coincidentally match a just-disambiguated neighbour's new
+    // name; applying it to the whole group avoids that by construction.
+    if has_duplicates(&displays) {
+        for (display, fp) in displays.iter_mut().zip(fingerprints) {
+            *display = format!("{display} ({fp})");
+        }
+    }
+
+    // Stage 2 (defense in depth, expected to be unreachable in practice):
+    // a hand-set label that happens to reproduce another key's stage-1
+    // output verbatim. Break any surviving tie with each entry's position,
+    // which is unique by construction, guaranteeing every display -- and
+    // therefore every button's response bytes -- is unique regardless of
+    // label content.
+    if has_duplicates(&displays) {
+        for (i, display) in displays.iter_mut().enumerate() {
+            *display = format!("{display} #{}", i + 1);
+        }
     }
 
     fingerprints
         .iter()
         .cloned()
-        .zip(names)
-        .map(|(fingerprint, name)| {
-            let display = if counts[&name] > 1 {
-                format!("{name} ({fingerprint})")
-            } else {
-                name
-            };
+        .zip(displays)
+        .map(|(fingerprint, display)| {
             let response = format!("Allow \"{display}\"").into_bytes();
             KeyChoice {
                 fingerprint,
@@ -357,6 +374,11 @@ fn key_choices_from_names(fingerprints: &[String], names: Vec<String>) -> Vec<Ke
             }
         })
         .collect()
+}
+
+fn has_duplicates(items: &[String]) -> bool {
+    let unique: std::collections::HashSet<&String> = items.iter().collect();
+    unique.len() != items.len()
 }
 
 /// Build the offerable choices for a key-picker prompt, resolving each
@@ -388,7 +410,7 @@ fn request_user_permission(
     let prompt = format!(
         "{requestor_desc} wants to use your ghostkey \"{key_name}\" as proof you're a real \
          person, not a bot, while staying anonymous. It can only ask for a signature — never \
-         your private key. You can revoke this anytime from your vault.\n\n\
+         your private key.\n\n\
          Allow, or deny?"
     );
 
@@ -1123,6 +1145,32 @@ mod tests {
             match_offered_fingerprint(&offered[1].response.clone(), &offered),
             AnyAccessChoice::Chose("fpB".to_string())
         );
+    }
+
+    #[test]
+    fn three_way_label_collision_is_still_disambiguated() {
+        // A pathological but reachable case: two keys share a label
+        // ("Work"), and a third key's OWN label happens to spell out
+        // exactly what the first key's disambiguated name becomes ("Work
+        // (fpA)"). A naive "only touch the keys that were originally
+        // duplicated" pass leaves fpA and fpC both displaying "Work
+        // (fpA)" -- a click meant for fpC would silently grant fpA
+        // instead. Every response must come out distinct regardless.
+        let offered = choices(&[("fpA", "Work"), ("fpB", "Work"), ("fpC", "Work (fpA)")]);
+        let responses: std::collections::HashSet<&Vec<u8>> =
+            offered.iter().map(|c| &c.response).collect();
+        assert_eq!(
+            responses.len(),
+            3,
+            "all three buttons must have distinct response bytes: {offered:?}"
+        );
+        for choice in &offered {
+            assert_eq!(
+                match_offered_fingerprint(&choice.response, &offered),
+                AnyAccessChoice::Chose(choice.fingerprint.clone()),
+                "each button must round-trip to its own fingerprint, not a collided one"
+            );
+        }
     }
 
     #[test]
