@@ -132,11 +132,13 @@ pub(crate) fn attribute_error(err: &ClientError) -> Option<(DelegateKey, Delegat
 ///
 /// Mirrors `USER_INPUT_TIMEOUT` in freenet-core
 /// (`crates/core/src/contract/user_input.rs`), which is `pub(crate)` there and
-/// so cannot be imported. Pinned by `a_confirmation_outlives_the_node_dialog`
-/// so the relationship below is asserted rather than assumed.
+/// so cannot be imported.
 ///
-/// At module level, not inside the wasm-only `mod real`, so the test that
-/// asserts the relationship actually compiles.
+/// Because it is a copy, the `const` assertion below compares two LOCAL
+/// constants: it catches someone shortening the vault's own deadline, and does
+/// NOT catch freenet-core LENGTHENING its dialog timeout past 90s. That drift
+/// would be silent here, and the symptom would be recovered keys arriving with
+/// nobody waiting for them. Re-check this value when bumping freenet-stdlib.
 pub(crate) const NODE_USER_INPUT_TIMEOUT_SECS: u64 = 60;
 
 /// Must exceed [`NODE_USER_INPUT_TIMEOUT_SECS`], so the vault is still
@@ -182,6 +184,10 @@ mod real {
     struct Waiter {
         token: u64,
         sender: oneshot::Sender<PendingReply>,
+        /// Whether this call asked for something that comes back carrying a
+        /// raw private signing key. Used to refuse delivering one to a caller
+        /// that never asked -- see `claim_waiter_for`.
+        asked_for_private_key: bool,
     }
 
     /// In-flight calls to one delegate, oldest first. See `claim_waiter` for
@@ -237,6 +243,59 @@ mod real {
         let mut pending = PENDING.lock().ok()?;
         let calls = pending.get_mut(key_bytes)?;
         calls.waiters.pop_front().map(|w| w.sender)
+    }
+
+    /// Claim the waiting call for a reply, refusing to hand a private key to a
+    /// caller that did not ask for one.
+    ///
+    /// The residual documented on `claim_waiter` is bounded, not gone: the
+    /// per-key lock keeps at most one call alive at a time, but a reply that
+    /// arrives AFTER its call has timed out still meets whoever is next. What
+    /// makes that dangerous rather than merely wrong is the payload -- an
+    /// `ExportResult` carries `signing_key_pem`, and the sites that issue
+    /// ordinary calls discard their value, so a private key would land in a
+    /// call site written to ignore it.
+    ///
+    /// This filters on the reply's own shape instead of trying to count
+    /// abandoned calls. `claim_waiter`'s comment records two attempts at
+    /// counting and why both made things worse; the difference here is that
+    /// nothing is remembered between replies, so there is no state to get
+    /// stuck raised and eat later traffic. A refused reply is dropped and the
+    /// waiting call goes on to time out normally, which is the honest outcome:
+    /// it did not get its answer.
+    fn deliver(key_bytes: &[u8], response: GhostkeyResponse) {
+        let carries_private_key = matches!(
+            response,
+            GhostkeyResponse::ExportResult { .. } | GhostkeyResponse::ExportAllResult { .. }
+        );
+
+        let claimed = {
+            let Ok(mut pending) = PENDING.lock() else {
+                return;
+            };
+            let Some(calls) = pending.get_mut(key_bytes) else {
+                warn!("Discarding delegate response with no waiting caller");
+                return;
+            };
+            match calls.waiters.front() {
+                Some(w) if carries_private_key && !w.asked_for_private_key => {
+                    warn!(
+                        "Refusing to hand a private-key reply to a call that did not ask for one; \
+                         it is almost certainly a late answer to a call that already timed out"
+                    );
+                    None
+                }
+                Some(_) => calls.waiters.pop_front().map(|w| w.sender),
+                None => None,
+            }
+        };
+
+        match claimed {
+            Some(sender) => {
+                let _ = sender.send(Ok(response));
+            }
+            None => warn!("Discarding delegate response with no waiting caller"),
+        }
     }
 
     fn current_delegate_key() -> DelegateKey {
@@ -323,13 +382,21 @@ mod real {
     /// `ExportResult`, which carries `signing_key_pem`, handed to a call site
     /// that never expected a private key.
     ///
-    /// Holding this across the whole exchange makes the queue depth one, so
-    /// FIFO cannot mismatch. The cost is that other delegate calls wait behind
-    /// an open dialog, which is the honest behaviour: the vault genuinely is
-    /// waiting for the user.
+    /// Holding this across the whole exchange keeps the queue depth at one for
+    /// as long as the call is alive, so two live calls can no longer be
+    /// confused for one another. The cost is that other delegate calls wait
+    /// behind an open dialog, which is the honest behaviour: the vault
+    /// genuinely is waiting for the user.
     ///
-    /// A real fix for the underlying ambiguity needs request ids on the wire
-    /// (freenet-stdlib carries a standing TODO).
+    /// What it does NOT fix, and must not be read as fixing: expiry. At the
+    /// deadline the waiter is dropped and the lock released, so a reply that
+    /// arrives afterwards is still handed to whoever is next in line. The
+    /// window for that shrinks from "any concurrent call" to "a call that
+    /// started after this one timed out", which is a narrowing, not an
+    /// elimination. Only request ids on the wire close it (freenet-stdlib
+    /// carries a standing TODO); `claim_waiter` documents why nothing here
+    /// tries to compensate in-band.
+    ///
     /// One in-flight-call lock per delegate key.
     type CallLock = Arc<futures::lock::Mutex<()>>;
 
@@ -383,7 +450,11 @@ mod real {
                 .entry(key_bytes.clone())
                 .or_default()
                 .waiters
-                .push_back(Waiter { token, sender });
+                .push_back(Waiter {
+                    token,
+                    sender,
+                    asked_for_private_key: waits_for_the_user(&request),
+                });
         }
 
         let app_msg = freenet_stdlib::prelude::ApplicationMessage::new(payload);
@@ -458,14 +529,7 @@ mod real {
                         }
                     };
 
-                    match claim_waiter(&key_bytes) {
-                        Some(sender) => {
-                            let _ = sender.send(Ok(gk_response));
-                        }
-                        None => {
-                            warn!("Discarding delegate response with no waiting caller");
-                        }
-                    }
+                    deliver(&key_bytes, gk_response);
                 }
             }
         }

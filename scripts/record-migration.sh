@@ -1,11 +1,19 @@
 #!/bin/bash
-# Append the just-published delegate WASM's hash to legacy_delegates.toml if
-# not already present.
+# Append the just-published delegate WASM's hash to legacy_delegates.toml, and
+# COMMIT it.
 #
-# It does NOT commit: it prints a reminder. The header used to claim otherwise,
-# which is how an append sat uncommitted on 2026-08-03 while the delegate it
-# named was live. `check-migration.sh` now refuses to pass while the file is
-# dirty, in CI as well as locally, so the reminder has a guard behind it.
+# The commit is the point. This script used to append and print "remember to
+# commit", and on 2026-08-03 exactly that append sat uncommitted while the
+# delegate it named was live -- one lost checkout away from a migration table
+# with no entry for the delegate every user was running, i.e. silently
+# unreachable ghostkeys.
+#
+# A reminder is not a mechanism, and the obvious backstop does not work either:
+# a guard that looks for a dirty working tree can only fire on the publisher's
+# machine, because a CI checkout is pristine by construction and cannot
+# reproduce the state. So the fix is to remove the window rather than to watch
+# it. Committing here means there is no interval in which the record exists
+# only in someone's working tree.
 #
 # Called automatically by `cargo make publish-ghostkeys` after a successful
 # publish, so every deployed hash is recorded as the new baseline and the
@@ -37,6 +45,25 @@ echo "delegate_key = \"$DELEGATE_KEY\"" >> legacy_delegates.toml
 echo "Recorded published delegate hash in legacy_delegates.toml:"
 echo "  code_hash    = $CODE_HASH"
 echo "  delegate_key = $DELEGATE_KEY"
-echo ""
-echo "Remember to commit and push legacy_delegates.toml so the next"
-echo "delegate change can migrate from this deployed state."
+
+# Commit only this file. The publish may have left other things dirty, and
+# sweeping them into a commit labelled as a migration record is how a commit
+# message ends up describing work it does not contain.
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "" >&2
+    echo "WARNING: not a git repository, so the record could NOT be committed." >&2
+    echo "Commit legacy_delegates.toml by hand before the next delegate change," >&2
+    echo "or users of the delegate just published will have no migration path." >&2
+    exit 0
+fi
+
+git add legacy_delegates.toml
+if git diff --cached --quiet -- legacy_delegates.toml; then
+    echo "Nothing to commit; the record was already in the tree."
+    exit 0
+fi
+
+git commit -q -m "chore: record the published delegate hash ${CODE_HASH:0:12}" \
+    -- legacy_delegates.toml
+echo "Committed the record. Push it so the next delegate change can migrate"
+echo "from this deployed state."

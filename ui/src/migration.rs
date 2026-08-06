@@ -74,6 +74,17 @@ pub(crate) struct MigrationOutcome {
     /// expected, but nothing ever re-registers legacy code, so if one of these
     /// does hold keys they are unreachable permanently.
     pub not_registered: usize,
+    /// Delegates too old to answer `HasIdentity` that then exported nothing.
+    ///
+    /// Genuinely ambiguous: it means either "holds nothing" or "holds keys
+    /// this vault cannot export", and the delegate is too old to tell us
+    /// which. It is the OLDER half of the table, so the entries most likely to
+    /// hold long-forgotten keys, which is why it is counted rather than
+    /// dropped on the floor. It deliberately does NOT reach
+    /// `needs_user_attention`: it would fire on essentially every node for
+    /// every ancient entry, which is the crying-wolf failure this module's own
+    /// comments warn about.
+    pub unsettled_and_empty: usize,
 }
 
 impl MigrationOutcome {
@@ -87,6 +98,7 @@ impl MigrationOutcome {
             && self.present_but_unexportable == 0
             && self.present_but_silent == 0
             && self.not_registered == 0
+            && self.unsettled_and_empty == 0
     }
 
     /// Whether the user needs telling.
@@ -125,8 +137,12 @@ impl MigrationOutcome {
             ProbeVerdict::Undetermined(_) if had_presence => self.present_but_silent += 1,
             ProbeVerdict::Undetermined(_) => self.undetermined += 1,
             ProbeVerdict::AnsweredWithError(_) => self.answered_with_error += 1,
-            ProbeVerdict::Exported(keys) if had_presence && keys.is_empty() => {
-                self.present_but_unexportable += 1
+            ProbeVerdict::Exported(keys) if keys.is_empty() => {
+                if had_presence {
+                    self.present_but_unexportable += 1
+                } else {
+                    self.unsettled_and_empty += 1
+                }
             }
             ProbeVerdict::Exported(_) => {}
             ProbeVerdict::Skipped => self.not_registered += 1,
@@ -303,6 +319,62 @@ pub(crate) fn classify_presence(
     }
 }
 
+/// What the sweep should do with one legacy entry, given its presence reply.
+///
+/// Hoisted out of `run_pass` for the same reason `classify` and
+/// `classify_presence` are: `run_pass` is wasm-only, so the DECISION -- as
+/// opposed to the classification feeding it -- was reachable by no test at
+/// all. Swapping two arms inside `run_pass` passed the whole suite.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SweepStep {
+    /// Answered, holds nothing. Move on WITHOUT asking for keys, so no
+    /// private-key dialog is raised for an empty predecessor.
+    Skip,
+    /// Did not answer. Record the verdict and move on.
+    Record,
+    /// Ask for the keys. `had_presence` is whether the delegate actually
+    /// asserted it holds identities, which is what later separates "said it
+    /// had keys and handed over none" from an ordinary empty predecessor.
+    Export { had_presence: bool },
+}
+
+/// The decision itself. Pure, so the arms can be pinned.
+pub(crate) fn sweep_step(verdict: &PresenceVerdict) -> SweepStep {
+    match verdict {
+        PresenceVerdict::Empty => SweepStep::Skip,
+        PresenceVerdict::HoldsKeys => SweepStep::Export { had_presence: true },
+        // Not "empty": a delegate too old to know the question has told us
+        // nothing. Skipping it here would strand every key held by the oldest
+        // entries in the table.
+        PresenceVerdict::Unsettled => SweepStep::Export {
+            had_presence: false,
+        },
+        PresenceVerdict::NoAnswer(_) => SweepStep::Record,
+    }
+}
+
+use std::collections::BTreeSet;
+
+/// Which default identity to adopt after a recovery pass.
+///
+/// `answers` is, per predecessor that supplied keys, the identity it treated
+/// as its default and the set of fingerprints it actually handed over. The
+/// first answer naming a key we now hold wins.
+///
+/// The containment check is the point: adopting a default that names a key
+/// this vault does not hold would leave `SignWithDefault` resolving to nothing
+/// or, worse, silently falling back to a different identity -- which is the
+/// failure the carry-across exists to prevent, reintroduced from the other
+/// side.
+pub(crate) fn default_to_adopt(answers: &[(Option<String>, BTreeSet<String>)]) -> Option<String> {
+    answers.iter().find_map(|(default, recovered)| {
+        default
+            .as_ref()
+            .filter(|fp| recovered.contains(*fp))
+            .cloned()
+    })
+}
+
 /// Recover ghostkeys stored under earlier delegate versions.
 ///
 /// `already_held` is the set of fingerprints the current delegate already has,
@@ -397,6 +469,10 @@ mod real {
     async fn run_pass(mut held: BTreeSet<String>, known_held: bool) -> MigrationOutcome {
         let current_key = api::delegate::get_current_delegate_key();
         let mut outcome = MigrationOutcome::default();
+        // Which predecessor handed over which keys, so the default-identity
+        // carry-over below only trusts a source that actually supplied the key
+        // it names.
+        let mut recovered_from: Vec<(DelegateKey, BTreeSet<String>)> = Vec::new();
 
         for (delegate_key_bytes, code_hash_bytes) in LEGACY_DELEGATES {
             let legacy_key = DelegateKey::new(*delegate_key_bytes, CodeHash::new(*code_hash_bytes));
@@ -419,9 +495,13 @@ mod real {
             // to know the request answers with an error rather than silence,
             // which is not "nothing to recover" -- so anything other than a
             // definite empty answer falls through to the export.
-            let had_presence = match presence_probe(&legacy_key).await {
-                super::PresenceVerdict::Empty => continue,
-                super::PresenceVerdict::NoAnswer(verdict) => {
+            let presence = presence_probe(&legacy_key).await;
+            let had_presence = match super::sweep_step(&presence) {
+                super::SweepStep::Skip => continue,
+                super::SweepStep::Record => {
+                    let super::PresenceVerdict::NoAnswer(verdict) = presence else {
+                        unreachable!("only NoAnswer maps to Record")
+                    };
                     outcome.record_probe(&verdict, false);
                     match &verdict {
                         ProbeVerdict::Undetermined(reason) => info!(
@@ -436,8 +516,7 @@ mod real {
                     }
                     continue;
                 }
-                super::PresenceVerdict::HoldsKeys => true,
-                super::PresenceVerdict::Unsettled => false,
+                super::SweepStep::Export { had_presence } => had_presence,
             };
 
             let verdict = super::classify(
@@ -571,9 +650,66 @@ mod real {
                     }
                 }
             }
+
+            if !from_this_one.is_empty() {
+                recovered_from.push((legacy_key.clone(), from_this_one));
+            }
+        }
+
+        // The default-identity choice lives in the predecessor's secret
+        // namespace, so a re-key loses it and `resolve_default` silently falls
+        // back to the highest-tier key. `SignWithDefault` would then sign as a
+        // DIFFERENT identity than before the update, with no prompt, for any
+        // caller holding `Sign`. Carry it over.
+        //
+        // Only when this pass actually recovered something, which makes it a
+        // once-per-migration event rather than something that fights a choice
+        // the user makes later.
+        if outcome.recovered > 0 {
+            carry_default_identity(&recovered_from).await;
         }
 
         outcome
+    }
+
+    /// Ask each predecessor that supplied keys which identity it treated as
+    /// the default, and adopt the first answer naming a key we now hold.
+    async fn carry_default_identity(sources: &[(DelegateKey, BTreeSet<String>)]) {
+        let Some(fp) = default_key_from(sources).await else {
+            return;
+        };
+        match api::delegate::send_request(GhostkeyRequest::SetDefaultKey {
+            fingerprint: fp.clone(),
+        })
+        .await
+        {
+            Ok(GhostkeyResponse::DefaultKeySet { .. }) => {
+                info!("Carried the default identity {fp} across the update")
+            }
+            Ok(other) => warn!(
+                "Could not carry the default identity across: {}",
+                crate::api::delegate::response_kind(&other)
+            ),
+            Err(e) => warn!("Could not carry the default identity across: {e}"),
+        }
+    }
+
+    async fn default_key_from(sources: &[(DelegateKey, BTreeSet<String>)]) -> Option<String> {
+        let mut answers: Vec<(Option<String>, BTreeSet<String>)> = Vec::new();
+        for (legacy_key, recovered) in sources {
+            let answer = match api::delegate::send_to_delegate(
+                legacy_key,
+                GhostkeyRequest::GetDefaultKey,
+                LEGACY_PROBE_TIMEOUT_SECS,
+            )
+            .await
+            {
+                Ok(GhostkeyResponse::DefaultKeyResult { fingerprint }) => fingerprint,
+                _ => None,
+            };
+            answers.push((answer, recovered.clone()));
+        }
+        super::default_to_adopt(&answers)
     }
 
     async fn presence_probe(legacy_key: &DelegateKey) -> super::PresenceVerdict {
@@ -601,9 +737,23 @@ mod real {
         if !outcome.is_conclusive() {
             // Logged, not shown. On a healthy node most legacy entries simply
             // do not answer, so this is the ordinary case rather than a fault.
+            // Every counter, or the line contradicts itself: it used to
+            // enumerate three while `is_conclusive` was broken by six, so it
+            // could print "0 silent, 0 answered with an error, 0 failed
+            // imports" directly beneath the claim that the sweep was
+            // incomplete. A debugging aid that reports all zeros for a failure
+            // is worse than none.
             warn!(
-                "Migration sweep incomplete: {} silent delegate(s), {} answered with an error, {} failed import(s)",
-                outcome.undetermined, outcome.answered_with_error, outcome.failed_imports
+                "Migration sweep incomplete: {} silent, {} not registered, {} answered with an error, \
+                 {} failed import(s), {} held keys we could not export, {} held keys then went silent, \
+                 {} too old to ask and exported nothing",
+                outcome.undetermined,
+                outcome.not_registered,
+                outcome.answered_with_error,
+                outcome.failed_imports,
+                outcome.present_but_unexportable,
+                outcome.present_but_silent,
+                outcome.unsettled_and_empty
             );
         }
 
@@ -611,6 +761,10 @@ mod real {
             return;
         }
 
+        // Every condition `needs_user_attention` is true for needs a branch
+        // here. Without one, the gate passes and the user is shown nothing --
+        // which is exactly the silent-clean-sweep failure the counters were
+        // added to end.
         if outcome.failed_imports > 0 {
             toast::show(
                 format!(
@@ -619,6 +773,19 @@ mod real {
                      once your node is fully started.",
                     outcome.failed_imports
                 ),
+                ToastKind::Error,
+            );
+        } else if outcome.present_but_silent > 0 {
+            toast::show(
+                "A previous vault version has identities stored but did not hand \
+                 them over. If it asked you to confirm and the prompt was missed, \
+                 reload the vault and allow it. Otherwise re-import from your backup.",
+                ToastKind::Error,
+            );
+        } else if outcome.present_but_unexportable > 0 {
+            toast::show(
+                "A previous vault version holds identities this vault could not \
+                 read. If one is missing here, re-import it from your backup.",
                 ToastKind::Error,
             );
         } else if outcome.answered_with_error > 0 {
@@ -774,6 +941,107 @@ mod tests {
             true,
         );
         assert!(o.is_conclusive());
+    }
+
+    fn set(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The sweep's per-entry decision, not just the classification feeding it.
+    /// Swapping two of these arms used to pass the entire suite.
+    #[test]
+    fn an_empty_predecessor_is_skipped_and_an_unsettled_one_is_not() {
+        assert_eq!(sweep_step(&PresenceVerdict::Empty), SweepStep::Skip);
+        assert_eq!(
+            sweep_step(&PresenceVerdict::Unsettled),
+            SweepStep::Export {
+                had_presence: false
+            },
+            "a delegate too old to know the question has NOT said it is empty"
+        );
+        assert_eq!(
+            sweep_step(&PresenceVerdict::HoldsKeys),
+            SweepStep::Export { had_presence: true }
+        );
+        assert_eq!(
+            sweep_step(&PresenceVerdict::NoAnswer(ProbeVerdict::Skipped)),
+            SweepStep::Record
+        );
+    }
+
+    /// An old predecessor that exports nothing is ambiguous, so it is counted
+    /// rather than dropped -- but it must not put a warning in front of every
+    /// user on every open.
+    #[test]
+    fn an_old_predecessor_exporting_nothing_is_counted_but_not_alarming() {
+        let mut o = MigrationOutcome::default();
+        o.record_probe(&ProbeVerdict::Exported(Vec::new()), false);
+        assert_eq!(o.unsettled_and_empty, 1);
+        assert_eq!(o.present_but_unexportable, 0);
+        assert!(!o.is_conclusive(), "it is logged");
+        assert!(!o.needs_user_attention(), "but it is not news");
+    }
+
+    #[test]
+    fn the_default_identity_comes_from_a_predecessor_that_supplied_it() {
+        assert_eq!(
+            default_to_adopt(&[(Some("fpA".into()), set(&["fpA", "fpB"]))]),
+            Some("fpA".to_string())
+        );
+    }
+
+    /// A default naming a key we did not recover must be ignored, or
+    /// `SignWithDefault` resolves to nothing or to some other identity.
+    #[test]
+    fn a_default_naming_a_key_we_do_not_hold_is_ignored() {
+        assert_eq!(
+            default_to_adopt(&[(Some("fpZ".into()), set(&["fpA"]))]),
+            None
+        );
+        assert_eq!(default_to_adopt(&[(None, set(&["fpA"]))]), None);
+        assert_eq!(default_to_adopt(&[]), None);
+    }
+
+    #[test]
+    fn the_first_usable_answer_wins() {
+        assert_eq!(
+            default_to_adopt(&[
+                (Some("fpZ".into()), set(&["fpA"])),
+                (Some("fpB".into()), set(&["fpB"])),
+            ]),
+            Some("fpB".to_string())
+        );
+    }
+
+    /// The sweep code is wasm-only, so nothing else here can observe that the
+    /// carry-across is actually WIRED IN. It was written once, lost to a
+    /// stray checkout, and compiled warning-free afterwards because the
+    /// leftover scaffolding still counted as a use. This pins the wiring.
+    #[test]
+    fn the_sweep_carries_the_default_identity_across() {
+        // Only the code above the test module, so the needles below cannot
+        // match themselves through `include_str!`.
+        let src = include_str!("migration.rs");
+        let code = src
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("test module marker");
+
+        for needle in [
+            "SetDefaultKey",
+            "default_to_adopt",
+            "carry_default_identity",
+        ] {
+            assert!(
+                code.contains(needle),
+                "the default-identity carry-across is not wired in: `{needle}` is missing"
+            );
+        }
+        assert!(
+            code.contains("if outcome.recovered > 0 {"),
+            "the carry-across must be gated on a pass that actually recovered something, \
+             or it fights a choice the user makes later"
+        );
     }
 
     #[test]

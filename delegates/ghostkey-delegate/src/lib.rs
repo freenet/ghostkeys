@@ -150,8 +150,23 @@ impl DelegateInterface for GhostkeyDelegate {
                     ));
                 }
 
-                let requestor = SignatureRequestor::Delegate(del_msg.sender);
-                handle_request(ctx, &del_msg.payload, &requestor)
+                // `del_msg.sender` is a field on the inbound message, and an
+                // inbound `DelegateMessage` reaches here verbatim from
+                // whatever posted it -- core sanitises `sender` only when a
+                // delegate SENDS one. Taking it as the caller identity would
+                // let anyone claim to be any delegate, promptless and silent.
+                //
+                // The attested origin is the only trustworthy answer, so it is
+                // what authorises the request. The claimed sender still has to
+                // agree with it: ignoring a mismatch would silently accept a
+                // forged claim, and refusing makes it loud.
+                let attested = requestor_from_origin(origin)?;
+                if attested != SignatureRequestor::Delegate(del_msg.sender) {
+                    return Err(DelegateError::Other(
+                        "delegate message sender does not match the attested origin".into(),
+                    ));
+                }
+                handle_request(ctx, &del_msg.payload, &attested)
             }
 
             InboundDelegateMsg::UserResponse(user_resp) => {
@@ -245,9 +260,14 @@ fn handle_request(
                     // `gk:perms:<that string>` -- a dialog-spam surface and an
                     // unbounded secret write, for a key that does not exist.
                     if !handlers::has_certificate(ctx, &fp) {
-                        return respond(ghostkey_common::GhostkeyResponse::KeyNotFound {
-                            fingerprint: fp,
-                        });
+                        // Deliberately the same answer as the hard-deny below,
+                        // not `KeyNotFound`. An ungranted caller that could
+                        // tell "no such key" from "not yours" would have a
+                        // silent oracle for whether this vault holds a given
+                        // fingerprint -- no dialog, no trace -- which is a
+                        // cross-app correlation probe. It costs nothing to
+                        // answer both the same way.
+                        return deny_immediately(&fp, requestor);
                     }
                     return request_user_permission(ctx, &fp, requestor, payload);
                 }
@@ -639,13 +659,31 @@ fn next_prompt_request_id(ctx: &mut dyn DelegateEnv) -> Result<u32, DelegateErro
 /// Per-vault secret that makes prompt ids unguessable. Generated once, on
 /// first use, from the host RNG.
 fn prompt_id_seed(ctx: &mut dyn DelegateEnv) -> Result<[u8; 32], DelegateError> {
+    // An all-zero seed is rejected rather than used, on read as well as on
+    // write. The host RNG writes into a const-zeroed buffer and has paths that
+    // return without writing anything at all (freenet-stdlib's `rand_bytes`
+    // over freenet-core's `native_api`), so "32 zero bytes" is a reachable
+    // outcome, not a hypothetical. Persisting one would make every prompt id
+    // derivable by anyone who knows the counter -- permanently, since the seed
+    // is generated once -- and it would do so silently. Failing closed costs a
+    // refused prompt; not checking costs the binding the seed exists to
+    // provide.
     if let Some(existing) = ctx
         .get_secret(PROMPT_SEED_KEY)
         .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
     {
-        return Ok(existing);
+        if existing != [0u8; 32] {
+            return Ok(existing);
+        }
+        logging::info("Stored prompt id seed is all zeroes; refusing to use it");
     }
+
     let fresh = random_seed();
+    if fresh == [0u8; 32] {
+        return Err(DelegateError::Other(
+            "the random source produced an unusable prompt id seed".into(),
+        ));
+    }
     if !ctx.set_secret(PROMPT_SEED_KEY, &fresh) {
         return Err(DelegateError::Other(
             "could not store the prompt id seed".into(),
@@ -667,6 +705,8 @@ fn random_seed() -> [u8; 32] {
 /// must never be what ships, hence the `cfg`.
 #[cfg(not(target_family = "wasm"))]
 fn random_seed() -> [u8; 32] {
+    // Non-zero, so the all-zero rejection above is never the reason a test
+    // fails, and so the tests exercise the same path production does.
     [0x5a; 32]
 }
 
@@ -1002,8 +1042,12 @@ fn handle_user_response(
     let pending: PendingPrompt = from_cbor(&pending_bytes)
         .map_err(|e| DelegateError::Other(format!("deserialize pending: {e}")))?;
 
-    ctx.context_clear();
-
+    // Deliberately NOT cleared yet. The slot is one per delegate, shared by
+    // every caller, so clearing before the checks below would let anyone
+    // destroy an in-flight prompt by posting a `UserResponse` with the wrong
+    // id -- the user's later Allow would then error out. A rejected answer
+    // leaves the question standing.
+    //
     // An answer only counts for the question it was asked about.
     //
     // There is exactly one pending-prompt slot per delegate, so a second
@@ -1038,6 +1082,9 @@ fn handle_user_response(
             "user response did not come from the caller the prompt was raised for".into(),
         ));
     }
+
+    // Answered by the right caller, for the right question: consume it.
+    ctx.context_clear();
 
     match pending {
         PendingPrompt::Fingerprint {
@@ -1770,6 +1817,14 @@ mod tests {
     /// They come from the secret store precisely because a wasm `static` is
     /// re-initialised on every inbound message, which would hand out the same
     /// id every time and make the check silently vacuous.
+    ///
+    /// Scope, so this is not read as more than it is: off wasm the seed is a
+    /// FIXED stand-in, so these ids are deterministic. What the assertion
+    /// below rules out is a bare counter, and nothing more -- it cannot
+    /// demonstrate unpredictability, because the real entropy comes from the
+    /// host RNG that only exists on wasm. The `cfg` on `random_seed` is what
+    /// keeps the fixed seed out of a shipped build, and that is a compile
+    /// target, not a feature, so no test build can leak into one.
     #[test]
     fn prompt_ids_do_not_repeat_across_invocations() {
         let mut env = MemEnv::new();
@@ -2223,6 +2278,22 @@ mod tests {
             GhostkeyRequest::ListPermissions {
                 fingerprint: bogus.into(),
             },
+            // Safe today because they need `Admin`/`Sign`, which no prompt can
+            // grant, so they hard-deny before reaching a dialog. Listed anyway:
+            // the claim this test makes is "every fingerprint-naming variant",
+            // and a partial list that reads as exhaustive is how the next
+            // variant slips through.
+            GhostkeyRequest::GrantPermission {
+                fingerprint: bogus.into(),
+                requestor: webapp(0x03),
+            },
+            GhostkeyRequest::RevokePermission {
+                fingerprint: bogus.into(),
+                requestor: webapp(0x03),
+            },
+            GhostkeyRequest::SetDefaultKey {
+                fingerprint: bogus.into(),
+            },
         ];
 
         for request in requests {
@@ -2240,6 +2311,139 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A claimed delegate sender must agree with the attested origin.
+    ///
+    /// `DelegateMessage.sender` is a field on an inbound message and reaches
+    /// the delegate verbatim from whoever posted it, so taking it as the
+    /// caller identity would let anyone be any delegate -- silently, with no
+    /// prompt, on a path that never touches the scope checks' assumptions
+    /// about who is asking.
+    #[test]
+    fn a_forged_delegate_sender_is_refused() {
+        use freenet_stdlib::prelude::{
+            CodeHash, DelegateContext, DelegateKey, DelegateMessage, InboundDelegateMsg, Parameters,
+        };
+
+        let victim = DelegateKey::new([7u8; 32], CodeHash::new([8u8; 32]));
+        let payload = to_cbor(&GhostkeyRequest::ListGhostKeys).unwrap();
+
+        // Posted by a web app, but claiming to be a delegate.
+        let msg = InboundDelegateMsg::DelegateMessage(DelegateMessage {
+            target: victim.clone(),
+            sender: victim,
+            payload,
+            processed: false,
+            context: DelegateContext::default(),
+        });
+
+        let SignatureRequestor::WebApp(id) = webapp(0x02) else {
+            unreachable!("webapp() builds a WebApp requestor")
+        };
+        let mut ctx = unsafe { DelegateCtx::__new() };
+        let result = GhostkeyDelegate::process(
+            &mut ctx,
+            Parameters::from(Vec::new()),
+            Some(MessageOrigin::WebApp(id)),
+            msg,
+        );
+        assert!(
+            result.is_err(),
+            "a sender that disagrees with the attested origin must be refused"
+        );
+    }
+
+    /// A seed of all zeroes is not a seed. The host RNG writes into a
+    /// zero-initialised buffer and has paths that return without writing, so
+    /// this is reachable -- and persisting one would make every future prompt
+    /// id derivable, permanently and silently.
+    #[test]
+    fn an_all_zero_prompt_seed_is_refused() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        env.set_secret(b"gk:prompt-seed", &[0u8; 32]);
+
+        let payload = to_cbor(&GhostkeyRequest::ExportGhostKey { fingerprint: fp }).unwrap();
+        // Re-rolled to a usable seed rather than used as-is.
+        assert!(handle_request(&mut env, &payload, &vault).is_ok());
+        assert_ne!(
+            env.get_secret(b"gk:prompt-seed").unwrap(),
+            vec![0u8; 32],
+            "an all-zero seed must not survive"
+        );
+    }
+
+    /// A rejected answer must leave the question standing. The pending slot is
+    /// one per delegate, shared by every caller, so consuming it before the
+    /// checks would let anyone cancel the user's in-flight export by posting a
+    /// wrong-id response.
+    #[test]
+    fn a_rejected_answer_does_not_cancel_the_pending_prompt() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        let (id, _) = only_prompt(&dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportGhostKey {
+                fingerprint: fp.clone(),
+            },
+            &vault,
+        ));
+
+        // Wrong id, and a different caller: both must be refused...
+        assert!(answer(&mut env, id.wrapping_add(1), b"Allow").is_err());
+        assert!(answer_as(&mut env, &webapp(0x02), id, b"Allow").is_err());
+
+        // ...and the user's genuine Allow must still work.
+        match only_response(&answer_prompt(&mut env, id, b"Allow")) {
+            GhostkeyResponse::ExportResult { fingerprint, .. } => assert_eq!(fingerprint, fp),
+            other => panic!("the pending prompt was destroyed: {other:?}"),
+        }
+    }
+
+    /// An ungranted caller must not be able to tell "no such key" from "not
+    /// yours". Distinguishing them is a silent oracle for whether this vault
+    /// holds a given fingerprint, with no dialog and no trace.
+    #[test]
+    fn an_ungranted_caller_cannot_probe_which_keys_exist() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let stranger = webapp(0x02);
+        let real_fp = vault_with_one_key(&mut env, &vault);
+
+        let held = dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportGhostKey {
+                fingerprint: real_fp,
+            },
+            &stranger,
+        );
+        let absent = dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportGhostKey {
+                fingerprint: "notarealfingerprint".into(),
+            },
+            &stranger,
+        );
+
+        assert!(
+            matches!(
+                only_response(&held),
+                GhostkeyResponse::PermissionDenied { .. }
+            ),
+            "a key the vault holds must answer PermissionDenied to a stranger"
+        );
+        assert!(
+            matches!(
+                only_response(&absent),
+                GhostkeyResponse::PermissionDenied { .. }
+            ),
+            "and so must one it does not hold, or the difference is an oracle"
+        );
     }
 
     #[test]

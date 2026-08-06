@@ -116,10 +116,19 @@ echo "OK: all ${#ALL_HASHES[@]} recorded entries are internally consistent."
 #
 # Publishing again on top of that would bake the omission in, so refuse.
 #
-# This used to be gated on `[ -z "$BASE_LEGACY" ]`, and check-migration.yml
-# always passes a base -- so the guard against the failure that actually
-# orphans users never ran in CI, only locally. It runs whenever a git tree is
-# available now, which includes the CI checkout.
+# Scope, stated plainly because it is easy to mistake this for more than it is:
+# this is a LOCAL, publish-time guard. It looks for a dirty working tree, and a
+# CI checkout is pristine by construction -- no job step writes this file -- so
+# in CI the condition cannot arise and this can never go red there. It runs in
+# CI only because refusing to gate it costs nothing; it protects the publisher,
+# not the pull request.
+#
+# The window it was written for is closed at the source instead:
+# `record-migration.sh` now commits the record itself, so there is no interval
+# in which it exists only in a working tree. A check that a pull request's
+# recorded tail matches the delegate actually DEPLOYED would be the real CI
+# gate, and it needs to read the published pointer from a node, which no CI job
+# here can do. That belongs in the publish/verify path, not this script.
 if git rev-parse --git-dir >/dev/null 2>&1; then
     # `git diff HEAD`, not plain `git diff`: the latter compares against the
     # index, so `git add`-ing the record and stopping there would slip past
