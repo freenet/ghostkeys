@@ -103,21 +103,6 @@ impl MigrationOutcome {
 
     /// Whether the user needs telling.
     ///
-    /// Deliberately NOT "the sweep was inconclusive". A node does not answer a
-    /// probe for a delegate it does not have -- measured rather than assumed:
-    /// nine legacy entries produced nine timeouts and no error response for
-    /// any of them. So an undetermined probe is the NORMAL case on any node
-    /// that has not run every previous vault version, which is essentially
-    /// every node. Warning on it would put a red error in front of every user
-    /// on every open, forever, and train them to dismiss the one warning that
-    /// would matter. It stays counted and logged, but it is not news.
-    ///
-    /// A failed import is different: a legacy delegate handed us a key and we
-    /// could not bring it over. That is positive evidence of something
-    /// recoverable that was not recovered, it is rare, and the user can act on
-    /// it by re-importing from their backup.
-    /// Whether the user needs telling.
-    ///
     /// Nothing branches on this any more -- `user_message` decides what to
     /// show. It is kept as the independent statement of the same predicate, so
     /// `every_attention_case_has_a_message` can assert the two agree. That
@@ -386,6 +371,22 @@ pub(crate) enum UserMessage {
 
 /// The message a sweep outcome warrants, if any. Ordered most specific first,
 /// because only one is shown.
+///
+/// What is deliberately NOT here is anything driven by silence. A node does
+/// not answer a probe for a delegate it does not have -- measured rather than
+/// assumed: nine legacy entries produced nine timeouts and no error response
+/// for any of them. So an undetermined probe is the NORMAL case on any node
+/// that has not run every previous vault version, which is essentially every
+/// node. Warning on it would put a red error in front of every user on every
+/// open, forever, and train them to dismiss the one warning that would matter.
+/// Those stay counted and logged, and are not news.
+///
+/// A failed import is different: a legacy delegate handed us a key and we
+/// could not bring it over. That is positive evidence of something recoverable
+/// that was not recovered, it is rare, and the user can act on it by
+/// re-importing from their backup. The two present-but-* cases are the same
+/// shape: a delegate that said it holds identities and then did not produce
+/// them.
 pub(crate) fn user_message(outcome: &MigrationOutcome) -> Option<UserMessage> {
     if outcome.failed_imports > 0 {
         Some(UserMessage::FailedImports(outcome.failed_imports))

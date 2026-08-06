@@ -9,11 +9,8 @@ use freenet_stdlib::prelude::DelegateKey;
     feature = "example-data"
 ))]
 use freenet_stdlib::client_api::HostResponse;
-#[cfg(any(
-    not(target_family = "wasm"),
-    feature = "no-sync",
-    feature = "example-data"
-))]
+// Unconditional: the delivery predicates below are module-level precisely so
+// they exist in every build and can be tested off wasm.
 use ghostkey_common::{GhostkeyRequest, GhostkeyResponse};
 
 /// Why a delegate call did not yield a `GhostkeyResponse`.
@@ -126,6 +123,55 @@ pub(crate) fn attribute_error(err: &ClientError) -> Option<(DelegateKey, Delegat
         )),
         _ => None,
     }
+}
+
+/// Requests whose reply carries a raw private signing key.
+///
+/// Deliberately SEPARATE from [`waits_for_user_confirmation`], even though the
+/// two sets happen to be identical today. They answer different questions --
+/// "how long may this take?" and "may this caller be handed a private key?" --
+/// and only the second is a security boundary. One predicate serving both is a
+/// trap: the delegate already prompts for `RequestAnyAccess` and
+/// `SignWithDefault`, so the moment a prompting non-export variant is added to
+/// a shared set, its waiter becomes eligible to receive an `ExportResult` and
+/// the leak reopens silently. `the_two_request_sets_are_not_interchangeable`
+/// pins them apart.
+pub(crate) fn expects_private_key(request: &GhostkeyRequest) -> bool {
+    matches!(
+        request,
+        GhostkeyRequest::ExportGhostKey { .. } | GhostkeyRequest::ExportAllGhostKeys
+    )
+}
+
+/// Requests the delegate answers only after a user confirmation, and which
+/// therefore need a human-scale deadline.
+pub(crate) fn waits_for_user_confirmation(request: &GhostkeyRequest) -> bool {
+    matches!(
+        request,
+        GhostkeyRequest::ExportGhostKey { .. } | GhostkeyRequest::ExportAllGhostKeys
+    )
+}
+
+/// Replies that carry a raw private signing key.
+pub(crate) fn reply_carries_private_key(response: &GhostkeyResponse) -> bool {
+    matches!(
+        response,
+        GhostkeyResponse::ExportResult { .. } | GhostkeyResponse::ExportAllResult { .. }
+    )
+}
+
+/// Whether a reply may be handed to the call at the front of the queue.
+///
+/// The one rule: a private key never goes to a caller that did not ask for
+/// one. Replies carry no id and are matched by arrival order, so a reply that
+/// arrives after its own call has timed out meets whoever is next -- and the
+/// sites issuing ordinary calls discard their value, so a private key would
+/// land somewhere written to ignore it.
+pub(crate) fn may_deliver(
+    reply_carries_private_key: bool,
+    waiter_expects_private_key: bool,
+) -> bool {
+    !reply_carries_private_key || waiter_expects_private_key
 }
 
 /// How long the node gives the user to answer a delegate's dialog.
@@ -264,10 +310,7 @@ mod real {
     /// waiting call goes on to time out normally, which is the honest outcome:
     /// it did not get its answer.
     fn deliver(key_bytes: &[u8], response: GhostkeyResponse) {
-        let carries_private_key = matches!(
-            response,
-            GhostkeyResponse::ExportResult { .. } | GhostkeyResponse::ExportAllResult { .. }
-        );
+        let carries_private_key = super::reply_carries_private_key(&response);
 
         let claimed = {
             let Ok(mut pending) = PENDING.lock() else {
@@ -278,23 +321,26 @@ mod real {
                 return;
             };
             match calls.waiters.front() {
-                Some(w) if carries_private_key && !w.asked_for_private_key => {
+                Some(w) if !super::may_deliver(carries_private_key, w.asked_for_private_key) => {
                     warn!(
                         "Refusing to hand a private-key reply to a call that did not ask for one; \
-                         it is almost certainly a late answer to a call that already timed out"
+                         it is almost certainly a late answer to a call that already timed out. \
+                         The waiting call is left to time out normally."
                     );
                     None
                 }
                 Some(_) => calls.waiters.pop_front().map(|w| w.sender),
-                None => None,
+                None => {
+                    warn!("Discarding delegate response with no waiting caller");
+                    None
+                }
             }
         };
 
-        match claimed {
-            Some(sender) => {
-                let _ = sender.send(Ok(response));
-            }
-            None => warn!("Discarding delegate response with no waiting caller"),
+        // A refusal or an absent waiter is already logged above, with the
+        // reason; there is nothing to add here.
+        if let Some(sender) = claimed {
+            let _ = sender.send(Ok(response));
         }
     }
 
@@ -355,20 +401,12 @@ mod real {
         request: GhostkeyRequest,
     ) -> Result<GhostkeyResponse, DelegateCallError> {
         let key = current_delegate_key();
-        let timeout = if waits_for_the_user(&request) {
+        let timeout = if super::waits_for_user_confirmation(&request) {
             super::USER_CONFIRMATION_TIMEOUT_SECS
         } else {
             10
         };
         send_to_delegate(&key, request, timeout).await
-    }
-
-    /// Requests the delegate answers only after a user confirmation.
-    fn waits_for_the_user(request: &GhostkeyRequest) -> bool {
-        matches!(
-            request,
-            GhostkeyRequest::ExportGhostKey { .. } | GhostkeyRequest::ExportAllGhostKeys
-        )
     }
 
     /// One call per delegate key at a time.
@@ -453,7 +491,7 @@ mod real {
                 .push_back(Waiter {
                     token,
                     sender,
-                    asked_for_private_key: waits_for_the_user(&request),
+                    asked_for_private_key: super::expects_private_key(&request),
                 });
         }
 
@@ -644,6 +682,100 @@ pub fn handle_client_error(_err: &ClientError) {}
 mod tests {
     use super::*;
     use freenet_stdlib::prelude::{Delegate, DelegateCode, Parameters};
+
+    /// Exactly the export requests, and nothing else, may receive a private
+    /// key. Named individually rather than by a wildcard so a new variant does
+    /// not join by accident.
+    #[test]
+    fn only_export_requests_expect_a_private_key() {
+        assert!(expects_private_key(&GhostkeyRequest::ExportGhostKey {
+            fingerprint: "fp".into()
+        }));
+        assert!(expects_private_key(&GhostkeyRequest::ExportAllGhostKeys));
+
+        for request in [
+            GhostkeyRequest::ListGhostKeys,
+            GhostkeyRequest::HasIdentity,
+            GhostkeyRequest::GetDefaultKey,
+            GhostkeyRequest::RequestAnyAccess,
+            GhostkeyRequest::SignWithDefault { message: vec![] },
+            GhostkeyRequest::GetCertificate {
+                fingerprint: "fp".into(),
+            },
+            GhostkeyRequest::MarkBackedUp {
+                fingerprint: "fp".into(),
+            },
+        ] {
+            assert!(
+                !expects_private_key(&request),
+                "{request:?} must not be eligible to receive a private key"
+            );
+        }
+    }
+
+    /// The two sets must stay separate concepts.
+    ///
+    /// They are identical today, which is exactly what makes collapsing them
+    /// into one predicate tempting. The delegate already prompts for
+    /// `RequestAnyAccess` and `SignWithDefault`, so a shared set would mark
+    /// their waiters private-key-eligible the moment either is added to it,
+    /// and the leak would reopen with nothing to notice it. What must hold is
+    /// the one-way implication: anything expecting a private key also waits
+    /// for the user, never the reverse by construction.
+    #[test]
+    fn the_two_request_sets_are_not_interchangeable() {
+        let prompting_but_not_private = [
+            GhostkeyRequest::RequestAnyAccess,
+            GhostkeyRequest::SignWithDefault { message: vec![] },
+        ];
+        for request in prompting_but_not_private {
+            assert!(
+                !expects_private_key(&request),
+                "{request:?} prompts, but its reply carries no private key"
+            );
+        }
+
+        for request in [
+            GhostkeyRequest::ExportGhostKey {
+                fingerprint: "fp".into(),
+            },
+            GhostkeyRequest::ExportAllGhostKeys,
+        ] {
+            assert!(
+                waits_for_user_confirmation(&request),
+                "{request:?} expects a private key, so it must get the human-scale deadline"
+            );
+        }
+    }
+
+    #[test]
+    fn only_export_replies_carry_a_private_key() {
+        assert!(reply_carries_private_key(&GhostkeyResponse::ExportResult {
+            fingerprint: "fp".into(),
+            certificate_pem: String::new(),
+            signing_key_pem: String::new(),
+            label: None,
+        }));
+        assert!(reply_carries_private_key(
+            &GhostkeyResponse::ExportAllResult { keys: vec![] }
+        ));
+        assert!(!reply_carries_private_key(
+            &GhostkeyResponse::GhostKeyList { keys: vec![] }
+        ));
+        assert!(!reply_carries_private_key(
+            &GhostkeyResponse::NoIdentityAvailable
+        ));
+    }
+
+    /// The whole rule, as a truth table: a private key never reaches a caller
+    /// that did not ask for one, and nothing else is blocked.
+    #[test]
+    fn a_private_key_never_goes_to_a_caller_that_did_not_ask() {
+        assert!(!may_deliver(true, false), "this is the leak");
+        assert!(may_deliver(true, true));
+        assert!(may_deliver(false, false));
+        assert!(may_deliver(false, true));
+    }
 
     fn a_delegate_key() -> DelegateKey {
         let code = DelegateCode::from(vec![0u8, 1, 2, 3]);

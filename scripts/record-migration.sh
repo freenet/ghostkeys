@@ -57,6 +57,16 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
     exit 0
 fi
 
+# A detached HEAD would commit onto something no branch points at: the commit
+# succeeds, this script reports success, and the record is unreachable. That is
+# indistinguishable from the failure it exists to prevent, so refuse instead.
+if ! BRANCH=$(git symbolic-ref -q --short HEAD); then
+    echo "" >&2
+    echo "ERROR: HEAD is detached, so a commit here would be unreachable." >&2
+    echo "Check out a branch and re-run, or record legacy_delegates.toml by hand." >&2
+    exit 1
+fi
+
 git add legacy_delegates.toml
 if git diff --cached --quiet -- legacy_delegates.toml; then
     echo "Nothing to commit; the record was already in the tree."
@@ -65,5 +75,17 @@ fi
 
 git commit -q -m "chore: record the published delegate hash ${CODE_HASH:0:12}" \
     -- legacy_delegates.toml
-echo "Committed the record. Push it so the next delegate change can migrate"
-echo "from this deployed state."
+echo "Committed the record on '$BRANCH'."
+
+# Committed-but-unpushed is now the most likely way for this to go wrong, so
+# say so at the moment it is true rather than leaving it to be discovered at
+# the next re-key.
+UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
+if [ -z "$UPSTREAM" ]; then
+    echo "WARNING: '$BRANCH' has no upstream, so nothing will push it." >&2
+    echo "Push it before the next delegate change." >&2
+elif [ "$(git rev-list --count "$UPSTREAM..HEAD" 2>/dev/null || echo 0)" -gt 0 ]; then
+    echo "WARNING: '$BRANCH' is ahead of $UPSTREAM; the record is committed but NOT pushed." >&2
+    echo "Push it before the next delegate change, or users of the delegate just" >&2
+    echo "published will have no migration path." >&2
+fi
