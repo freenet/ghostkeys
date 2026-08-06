@@ -325,16 +325,25 @@ fn scoped_presence(slots: &[KeySlot]) -> (usize, usize) {
         .map(|s| (s.has_certificate, s.has_signing_key))
         .collect();
 
-    if !readable.is_empty() {
-        return tally_presence(&readable);
-    }
-
     let all: Vec<(bool, bool)> = slots
         .iter()
         .map(|s| (s.has_certificate, s.has_signing_key))
         .collect();
-    let (usable, unusable) = tally_presence(&all);
-    (usable.min(1), unusable.min(1))
+
+    let (readable_usable, readable_unusable) = tally_presence(&readable);
+    let (total_usable, total_unusable) = tally_presence(&all);
+
+    // The floor is the existence bit, which `NoIdentityAvailable` already
+    // discloses to anyone who asks for a signature, so applying it leaks
+    // nothing new. It has to apply to a caller WITH grants too, not just one
+    // without: an app whose single granted key has lost its signing key would
+    // otherwise be told `usable: 0` while the user holds healthy keys, and
+    // would send someone who already paid off to buy another. More grant must
+    // never mean less truth.
+    (
+        readable_usable.max(total_usable.min(1)),
+        readable_unusable.max(total_unusable.min(1)),
+    )
 }
 
 /// Pure tally behind `handle_has_identity`. One `(has_certificate,
@@ -510,6 +519,13 @@ fn handle_delete(
     ctx.remove_secret(&cert_key(fp));
     ctx.remove_secret(&sk_key(fp));
     ctx.remove_secret(&label_key(fp));
+    // Grants and the backup marker are keyed by fingerprint too. Leaving them
+    // behind means a re-imported key silently inherits the grants of the key
+    // that used to hold that fingerprint, and that a deleted key still passes
+    // the scope check -- which is how an export prompt gets raised for
+    // something the vault no longer holds.
+    ctx.remove_secret(&backed_up_key(fp));
+    permissions::remove_all(ctx, fp);
 
     let mut index = load_index(ctx);
     index.retain(|f| f != fp);
@@ -947,14 +963,25 @@ fn handle_export(
 /// the user how many private keys are about to leave the vault, and so a
 /// caller that could extract nothing never gets to raise a dialog at all.
 pub(crate) fn exportable_count(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> usize {
-    load_index(ctx)
-        .iter()
-        .filter(|fp| permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Export))
-        .filter(|fp| load_cert(ctx, fp).is_some())
-        .count()
+    exportable_keys(ctx, requestor).len()
 }
 
-fn handle_export_all(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> GhostkeyResponse {
+/// Does the vault hold a certificate for this fingerprint? Used so the export
+/// prompt is not raised for a key that would answer `KeyNotFound` anyway --
+/// grants outlive a deleted key, so this is reachable.
+pub(crate) fn has_certificate(ctx: &dyn DelegateEnv, fp: &str) -> bool {
+    load_cert(ctx, fp).is_some()
+}
+
+/// Every ghostkey `requestor` can actually extract, fully materialised.
+///
+/// The single source of truth for both `ExportAllGhostKeys` and the count the
+/// confirmation prompt quotes. A separate, looser filter for the count would
+/// let the dialog say "all 3" while 2 arrive: `handle_export_all` drops a key
+/// whose signing key is absent, is not 32 bytes, or will not encode, and all
+/// three are reachable -- which is exactly why `HasIdentity` has an `unusable`
+/// counter.
+fn exportable_keys(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> Vec<ExportedGhostKey> {
     let index = load_index(ctx);
     let mut keys = Vec::new();
 
@@ -1001,7 +1028,13 @@ fn handle_export_all(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> G
         });
     }
 
-    GhostkeyResponse::ExportAllResult { keys }
+    keys
+}
+
+fn handle_export_all(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> GhostkeyResponse {
+    GhostkeyResponse::ExportAllResult {
+        keys: exportable_keys(ctx, requestor),
+    }
 }
 
 fn handle_grant_permission(
@@ -1292,6 +1325,48 @@ mod tests {
             load_index(&env).is_empty(),
             "a rejected import must leave nothing behind"
         );
+    }
+
+    /// A caller whose single granted key has lost its signing key must not be
+    /// told the user has nothing usable while the vault holds healthy keys.
+    /// More grant must never mean less truth.
+    #[test]
+    fn scoped_presence_never_reports_less_than_existence() {
+        let slots = [
+            KeySlot {
+                has_certificate: true,
+                has_signing_key: false,
+                caller_may_read: true,
+            },
+            KeySlot {
+                has_certificate: true,
+                has_signing_key: true,
+                caller_may_read: false,
+            },
+        ];
+        assert_eq!(
+            scoped_presence(&slots),
+            (1, 1),
+            "a granted-but-broken key must not mask that a usable identity exists"
+        );
+    }
+
+    #[test]
+    fn exportable_count_matches_what_export_all_returns() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+
+        let (cert, sk) = test_ghostkey(10);
+        seed_ghostkey(&mut env, &cert, &sk, &vault);
+        let (cert2, sk2) = test_ghostkey(20);
+        let half = seed_ghostkey(&mut env, &cert2, &sk2, &vault);
+        env.remove_secret(format!("gk:sk:{half}").as_bytes());
+
+        let counted = exportable_count(&env, &vault);
+        match handle_export_all(&env, &vault) {
+            GhostkeyResponse::ExportAllResult { keys } => assert_eq!(counted, keys.len()),
+            other => panic!("expected ExportAllResult, got {other:?}"),
+        }
     }
 
     #[test]

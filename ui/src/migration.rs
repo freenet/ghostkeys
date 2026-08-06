@@ -229,6 +229,22 @@ mod real {
     /// rather than being silently written off.
     const LEGACY_PROBE_TIMEOUT_SECS: u64 = 3;
 
+    /// Seconds to wait for the export itself, once a legacy delegate has shown
+    /// it holds something.
+    ///
+    /// This one CAN involve a human. A delegate from this version onward
+    /// requires a fresh user confirmation before it hands over private keys,
+    /// so the reply arrives only after the user answers a dialog. The node
+    /// gives them 60s (freenet-core's `USER_INPUT_TIMEOUT`); waiting less than
+    /// that here would abandon the call while the dialog is still on screen,
+    /// and the recovered keys would arrive with nobody waiting for them.
+    ///
+    /// It is safe to mix with the 3s probe on the same delegate key even
+    /// though replies are matched FIFO, because the export is only ever sent
+    /// AFTER the probe has been answered -- so there is never an abandoned
+    /// waiter on that key for the export's reply to be mis-delivered to.
+    const LEGACY_EXPORT_TIMEOUT_SECS: u64 = 90;
+
     pub(super) async fn run(already_held: Vec<String>) {
         if LEGACY_DELEGATES.is_empty() {
             return;
@@ -254,11 +270,41 @@ mod real {
                 continue;
             }
 
+            // Ask a cheap question first, and only ask for the keys if the
+            // answer says there are some.
+            //
+            // Asking for the keys outright used to be fine, because no
+            // delegate ever prompted for them. From this version onward one
+            // does, and an export probe against such a delegate would raise an
+            // unexplained private-key dialog on every vault open -- including
+            // for the eleven-or-so legacy entries that hold nothing -- and then
+            // time out at 3s while the dialog was still up, stranding the keys
+            // it was supposed to rescue and telling the user nothing.
+            //
+            // `HasIdentity` never prompts, by construction. A delegate too old
+            // to know the request answers with an error rather than silence,
+            // which is not "nothing to recover" -- so anything other than a
+            // definite empty answer falls through to the export.
+            match presence_probe(&legacy_key).await {
+                PresenceProbe::Empty => continue,
+                PresenceProbe::Silent(verdict) => {
+                    outcome.record_probe(&verdict);
+                    if let ProbeVerdict::Undetermined(reason) = verdict {
+                        info!(
+                            "Legacy delegate {} did not answer ({reason})",
+                            legacy_key.encode()
+                        );
+                    }
+                    continue;
+                }
+                PresenceProbe::MayHoldKeys => {}
+            }
+
             let verdict = super::classify(
                 api::delegate::send_to_delegate(
                     &legacy_key,
                     GhostkeyRequest::ExportAllGhostKeys,
-                    LEGACY_PROBE_TIMEOUT_SECS,
+                    LEGACY_EXPORT_TIMEOUT_SECS,
                 )
                 .await,
             );
@@ -386,6 +432,52 @@ mod real {
         }
 
         outcome
+    }
+
+    /// What the cheap, never-prompting presence question established.
+    enum PresenceProbe {
+        /// The delegate answered and holds nothing. Skip it without asking for
+        /// keys, so no dialog is raised for an empty predecessor.
+        Empty,
+        /// No answer, or a local failure. Carries the verdict to record.
+        Silent(ProbeVerdict),
+        /// It answered with keys, or answered in a way that does not settle the
+        /// question (an older delegate that does not know `HasIdentity`). Ask
+        /// for the keys.
+        MayHoldKeys,
+    }
+
+    async fn presence_probe(legacy_key: &DelegateKey) -> PresenceProbe {
+        use crate::api::delegate::DelegateCallError;
+
+        match api::delegate::send_to_delegate(
+            legacy_key,
+            GhostkeyRequest::HasIdentity,
+            LEGACY_PROBE_TIMEOUT_SECS,
+        )
+        .await
+        {
+            Ok(GhostkeyResponse::IdentityPresence { usable, unusable }) => {
+                if usable == 0 && unusable == 0 {
+                    PresenceProbe::Empty
+                } else {
+                    PresenceProbe::MayHoldKeys
+                }
+            }
+            // Same reading as `classify`: not registered is a fast skip and is
+            // counted as neither an error nor undetermined.
+            Err(DelegateCallError::NotRegistered) => PresenceProbe::Silent(ProbeVerdict::Skipped),
+            Err(DelegateCallError::TimedOut) => {
+                PresenceProbe::Silent(ProbeVerdict::Undetermined("no reply".into()))
+            }
+            Err(DelegateCallError::Transport(reason)) => {
+                PresenceProbe::Silent(ProbeVerdict::Undetermined(reason))
+            }
+            // A delegate that answered *something* else -- including "unsupported
+            // request variant" from a version predating `HasIdentity` -- has not
+            // told us it is empty. Ask for the keys.
+            _ => PresenceProbe::MayHoldKeys,
+        }
     }
 
     fn report(outcome: &MigrationOutcome) {

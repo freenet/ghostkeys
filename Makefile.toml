@@ -163,6 +163,6 @@ args = ["clippy", "--workspace", "--tests", "--", "-D", "warnings"]
 # --- Utility ---
 
 [tasks.generate-import-url]
-description = "Generate an import URL from PEM files. Usage: cargo make generate-import-url cert.pem sk.pem [master_vk.pem]"
+description = "Generate an import URL from PEM files. Usage: cargo make generate-import-url cert.pem sk.pem"
 command = "bash"
 args = ["scripts/generate-import-url.sh", "${@}"]

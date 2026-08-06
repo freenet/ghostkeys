@@ -172,6 +172,12 @@ fn export_one(fingerprint: String, mut on_downloaded: Signal<Option<String>>) {
                     toast::show("Could not save the backup file", ToastKind::Error);
                 }
             }
+            // The user was asked to confirm and said no (or the dialog expired).
+            // That is a decision, not a fault, so it must not read like one.
+            Ok(GhostkeyResponse::PermissionDenied { .. })
+            | Ok(GhostkeyResponse::AccessDenied { .. }) => {
+                toast::show("Backup cancelled", ToastKind::Info);
+            }
             Ok(GhostkeyResponse::Error { message }) => {
                 toast::show(format!("Backup failed: {message}"), ToastKind::Error);
             }
@@ -217,13 +223,27 @@ fn export_all() {
                     toast::show("Could not save the backup file", ToastKind::Error);
                 }
             }
+            Ok(GhostkeyResponse::PermissionDenied { .. })
+            | Ok(GhostkeyResponse::AccessDenied { .. }) => {
+                toast::show("Export cancelled", ToastKind::Info);
+            }
             Ok(GhostkeyResponse::Error { message }) => {
                 toast::show(format!("Export failed: {message}"), ToastKind::Error);
             }
             Err(e) => {
                 toast::show(format!("Export failed: {e}"), ToastKind::Error);
             }
-            _ => {}
+            // Previously a silent `_ => {}`: a denial or an unexpected reply
+            // left the user looking at a button that did nothing.
+            Ok(other) => {
+                toast::show(
+                    format!(
+                        "Export failed: unexpected response {}",
+                        crate::api::delegate::response_kind(&other)
+                    ),
+                    ToastKind::Error,
+                );
+            }
         }
     });
 }

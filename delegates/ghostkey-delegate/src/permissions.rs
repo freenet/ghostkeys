@@ -178,6 +178,13 @@ pub fn revoke_all(ctx: &mut dyn DelegateEnv, fingerprint: &str, requestor: &Sign
     save(ctx, fingerprint, &grants);
 }
 
+/// Drop every grant on `fingerprint`, for every requestor. Called when the
+/// ghostkey itself is deleted: a grant that outlives its key would be
+/// inherited by whatever is imported under that fingerprint next.
+pub fn remove_all(ctx: &mut dyn DelegateEnv, fingerprint: &str) {
+    ctx.remove_secret(&perm_key(fingerprint));
+}
+
 /// List the requestors that hold any grant on `fingerprint`. Preserves
 /// the wire shape of the existing `PermissionList` response.
 pub fn list_requestors(ctx: &dyn DelegateEnv, fingerprint: &str) -> Vec<SignatureRequestor> {

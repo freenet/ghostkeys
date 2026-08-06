@@ -262,11 +262,37 @@ mod real {
     }
 
     /// Send a request to the current ghostkey delegate.
+    ///
+    /// The deadline depends on whether the delegate will stop and ask the
+    /// user. Export does: it requires a fresh confirmation every time, so the
+    /// reply only arrives after someone reads a warning and clicks. Ten
+    /// seconds is not a reading speed, and giving up early is worse than a
+    /// spurious error here -- replies carry no id and are matched FIFO (see
+    /// `claim_waiter`), so an abandoned export whose reply lands later hands a
+    /// raw private signing key to whatever call is next in the queue.
     pub async fn send_request(
         request: GhostkeyRequest,
     ) -> Result<GhostkeyResponse, DelegateCallError> {
         let key = current_delegate_key();
-        send_to_delegate(&key, request, 10).await
+        let timeout = if waits_for_the_user(&request) {
+            USER_CONFIRMATION_TIMEOUT_SECS
+        } else {
+            10
+        };
+        send_to_delegate(&key, request, timeout).await
+    }
+
+    /// Longer than freenet-core's `USER_INPUT_TIMEOUT` (60s), so the vault is
+    /// still listening when the node gives up on the dialog and the delegate
+    /// answers.
+    const USER_CONFIRMATION_TIMEOUT_SECS: u64 = 90;
+
+    /// Requests the delegate answers only after a user confirmation.
+    fn waits_for_the_user(request: &GhostkeyRequest) -> bool {
+        matches!(
+            request,
+            GhostkeyRequest::ExportGhostKey { .. } | GhostkeyRequest::ExportAllGhostKeys
+        )
     }
 
     /// Send a request to a specific delegate key (for migration).

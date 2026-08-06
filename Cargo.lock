@@ -1565,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "ghostkey-common"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "bs58",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "ghostkey-delegate"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "bs58",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "ghostkey-ui"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "ciborium",

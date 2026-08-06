@@ -83,9 +83,14 @@ zero.
 
 ### Does this user have a ghost key?
 
-Ask with `HasIdentity`. It answers **without prompting**, and is deliberately
-not permission-filtered, so you can decide whether to offer a buy-a-key path
-before asking the user for anything:
+Ask with `HasIdentity`. It answers **without prompting**, so you can decide
+whether to offer a buy-a-key path before asking the user for anything.
+
+The answer is bounded by what you have been granted. Hold `ReadPublic` on some
+keys and you get the true counts for those; hold nothing and each count
+saturates at one, so you learn that an identity exists but not how many the
+user has. Either way an empty vault answers zero, which is the part this
+question exists to tell you apart from "I have no grant yet":
 
 ```rust
 use ghostkey_common::{GhostkeyRequest, GhostkeyResponse, to_cbor};
@@ -245,7 +250,7 @@ Each ghost key is identified by a fingerprint (first 8 bytes of BLAKE3 hash of t
 | `ListGhostKeys` | List ghost keys the caller has access to |
 | `GetGhostKey` | Get full certificate details for a key |
 | `GetCertificate` | Get just the public certificate (for sharing) |
-| `HasIdentity` | Does the user hold any key? Counts only, and never prompts |
+| `HasIdentity` | Does the user hold any key? Counts only, scoped to your grants, and never prompts |
 | `SignMessage` | Sign a message with a named ghost key (scoped to caller) |
 | `SignWithDefault` | Sign with the user's default key; prompts and replays if needed |
 | `GetDefaultKey` | Which key would `SignWithDefault` use? Never prompts |
