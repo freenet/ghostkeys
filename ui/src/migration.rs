@@ -1054,11 +1054,21 @@ mod tests {
     fn the_sweep_carries_the_default_identity_across() {
         // Only the code above the test module, so the needles below cannot
         // match themselves through `include_str!`.
+        //
+        // The marker's presence is asserted BEFORE splitting on it. `split`
+        // returns the whole input when the separator is absent, and `.next()`
+        // on that is `Some`, so an `.expect` here can never fire -- a renamed
+        // marker would silently widen the scrape to the entire file, at which
+        // point three of the needles below match their own string literals and
+        // the pin re-arms the self-matching defect it exists to prevent.
         let src = include_str!("migration.rs");
-        let code = src
-            .split("#[cfg(test)]\nmod tests {")
-            .next()
-            .expect("test module marker");
+        const TEST_MODULE_MARKER: &str = "#[cfg(test)]\nmod tests {";
+        assert!(
+            src.contains(TEST_MODULE_MARKER),
+            "the test-module marker moved; this scrape would otherwise search the whole \
+             file and match its own string literals"
+        );
+        let code = src.split(TEST_MODULE_MARKER).next().unwrap();
 
         // The CALL SITE, not just the symbol: a definition left behind while
         // the call is gone still contains every identifier, which is exactly
@@ -1073,10 +1083,18 @@ mod tests {
                 "the default-identity carry-across is not wired in: `{needle}` is missing"
             );
         }
+
+        // The gate, anchored to the call it guards. Checking for
+        // `if outcome.recovered > 0 {` on its own is satisfied by an unrelated
+        // occurrence in `report`, so deleting this gate and making the
+        // carry-across unconditional passed.
+        let call = "carry_default_identity(&recovered_from).await";
+        let call_at = code.find(call).expect("call site asserted above");
+        let preceding = &code[call_at.saturating_sub(200)..call_at];
         assert!(
-            code.contains("if outcome.recovered > 0 {"),
+            preceding.contains("if outcome.recovered > 0 {"),
             "the carry-across must be gated on a pass that actually recovered something, \
-             or it fights a choice the user makes later"
+             or it fights a choice the user makes later. Preceding source was: {preceding}"
         );
     }
 
@@ -1086,7 +1104,7 @@ mod tests {
     #[test]
     fn every_attention_case_has_a_message() {
         let mut cases = Vec::new();
-        for i in 0..0b111_1111u8 {
+        for i in 0..=0b111_1111u8 {
             cases.push(MigrationOutcome {
                 recovered: 0,
                 undetermined: (i & 1) as usize,
