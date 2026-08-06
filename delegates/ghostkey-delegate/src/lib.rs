@@ -238,6 +238,17 @@ fn handle_request(
                 // Allow on a request that the replay would still deny,
                 // because `grant_third_party` never adds those scopes.
                 if matches!(scope, GhostkeyScope::ReadPublic | GhostkeyScope::Sign) {
+                    // Never raise a dialog naming a key the vault does not
+                    // hold. The fingerprint comes from the caller, so without
+                    // this any app can put an arbitrary string in front of the
+                    // user and, on approval, have a grant written under
+                    // `gk:perms:<that string>` -- a dialog-spam surface and an
+                    // unbounded secret write, for a key that does not exist.
+                    if !handlers::has_certificate(ctx, &fp) {
+                        return respond(ghostkey_common::GhostkeyResponse::KeyNotFound {
+                            fingerprint: fp,
+                        });
+                    }
                     return request_user_permission(ctx, &fp, requestor, payload);
                 }
                 // Hard-deny without prompting. The user reaches these
@@ -2170,6 +2181,65 @@ mod tests {
             permissions::has_scope(&env, &fp, &app, GhostkeyScope::ReadPublic),
             "precondition for the assertion above: the grant really is still there"
         );
+    }
+
+    /// No request may put a dialog in front of the user naming a key the
+    /// vault does not hold.
+    ///
+    /// This is the general form of the defect that `TestPermissionPrompt` was:
+    /// a caller-supplied fingerprint reaching a prompt without first passing a
+    /// check that the key exists. On approval the delegate would write a grant
+    /// under `gk:perms:<caller string>` -- an unbounded secret write for a key
+    /// that is not there -- and the user would have authorised something
+    /// meaningless. Every fingerprint-naming variant is covered, so a future
+    /// one that skips the check fails here.
+    #[test]
+    fn no_request_raises_a_dialog_for_a_key_the_vault_does_not_hold() {
+        let bogus = "notarealfingerprint";
+        let requests = [
+            GhostkeyRequest::GetGhostKey {
+                fingerprint: bogus.into(),
+            },
+            GhostkeyRequest::GetCertificate {
+                fingerprint: bogus.into(),
+            },
+            GhostkeyRequest::SignMessage {
+                fingerprint: bogus.into(),
+                message: vec![1],
+            },
+            GhostkeyRequest::ExportGhostKey {
+                fingerprint: bogus.into(),
+            },
+            GhostkeyRequest::DeleteGhostKey {
+                fingerprint: bogus.into(),
+            },
+            GhostkeyRequest::SetLabel {
+                fingerprint: bogus.into(),
+                label: "x".into(),
+            },
+            GhostkeyRequest::MarkBackedUp {
+                fingerprint: bogus.into(),
+            },
+            GhostkeyRequest::ListPermissions {
+                fingerprint: bogus.into(),
+            },
+        ];
+
+        for request in requests {
+            let mut env = MemEnv::new();
+            let vault = webapp(0x01);
+            // A populated vault, so "nothing to prompt about" is not the
+            // reason: the bogus fingerprint is simply not one of its keys.
+            vault_with_one_key(&mut env, &vault);
+
+            let msgs = dispatch_in(&mut env, &request, &webapp(0x02));
+            for msg in &msgs {
+                assert!(
+                    !matches!(msg, OutboundDelegateMsg::RequestUserInput(_)),
+                    "{request:?} raised a dialog for a key the vault does not hold"
+                );
+            }
+        }
     }
 
     #[test]
