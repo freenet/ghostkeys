@@ -18,7 +18,7 @@
 
 use std::collections::BTreeSet;
 
-use freenet_stdlib::prelude::DelegateCtx;
+use crate::env::DelegateEnv;
 use ghostkey_common::{from_cbor, to_cbor, GhostkeyScope, SignatureRequestor};
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +36,7 @@ fn perm_key(fingerprint: &str) -> Vec<u8> {
     format!("gk:perms:{fingerprint}").into_bytes()
 }
 
-fn load(ctx: &DelegateCtx, fingerprint: &str) -> Vec<GrantEntry> {
+fn load(ctx: &dyn DelegateEnv, fingerprint: &str) -> Vec<GrantEntry> {
     let Some(bytes) = ctx.get_secret(&perm_key(fingerprint)) else {
         // No grant entry for this fingerprint -- normal for a freshly
         // imported key before any third-party grant.
@@ -61,7 +61,7 @@ fn load(ctx: &DelegateCtx, fingerprint: &str) -> Vec<GrantEntry> {
     }
 }
 
-fn save(ctx: &mut DelegateCtx, fingerprint: &str, grants: &[GrantEntry]) {
+fn save(ctx: &mut dyn DelegateEnv, fingerprint: &str, grants: &[GrantEntry]) {
     if let Ok(bytes) = to_cbor(&grants.to_vec()) {
         ctx.set_secret(&perm_key(fingerprint), &bytes);
     }
@@ -136,7 +136,7 @@ pub fn without_grants_for(
 
 /// Does `requestor` hold `scope` on `fingerprint`?
 pub fn has_scope(
-    ctx: &DelegateCtx,
+    ctx: &dyn DelegateEnv,
     fingerprint: &str,
     requestor: &SignatureRequestor,
     scope: GhostkeyScope,
@@ -147,7 +147,7 @@ pub fn has_scope(
 /// Add `scopes` to the grant for `requestor` on `fingerprint`. Creates the
 /// grant entry if the requestor has none yet.
 pub fn grant_scopes(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     fingerprint: &str,
     requestor: &SignatureRequestor,
     scopes: BTreeSet<GhostkeyScope>,
@@ -158,25 +158,29 @@ pub fn grant_scopes(
 
 /// Grant the full scope set. Called from `handle_import` so the vault
 /// (the importer) has complete authority over the ghostkey it brought in.
-pub fn grant_full(ctx: &mut DelegateCtx, fingerprint: &str, requestor: &SignatureRequestor) {
+pub fn grant_full(ctx: &mut dyn DelegateEnv, fingerprint: &str, requestor: &SignatureRequestor) {
     grant_scopes(ctx, fingerprint, requestor, full_scope_set());
 }
 
 /// Grant the third-party scope set. Called from the `RequestAnyAccess`
 /// approval path.
-pub fn grant_third_party(ctx: &mut DelegateCtx, fingerprint: &str, requestor: &SignatureRequestor) {
+pub fn grant_third_party(
+    ctx: &mut dyn DelegateEnv,
+    fingerprint: &str,
+    requestor: &SignatureRequestor,
+) {
     grant_scopes(ctx, fingerprint, requestor, third_party_scope_set());
 }
 
 /// Remove every grant `requestor` holds on `fingerprint`.
-pub fn revoke_all(ctx: &mut DelegateCtx, fingerprint: &str, requestor: &SignatureRequestor) {
+pub fn revoke_all(ctx: &mut dyn DelegateEnv, fingerprint: &str, requestor: &SignatureRequestor) {
     let grants = without_grants_for(load(ctx, fingerprint), requestor);
     save(ctx, fingerprint, &grants);
 }
 
 /// List the requestors that hold any grant on `fingerprint`. Preserves
 /// the wire shape of the existing `PermissionList` response.
-pub fn list_requestors(ctx: &DelegateCtx, fingerprint: &str) -> Vec<SignatureRequestor> {
+pub fn list_requestors(ctx: &dyn DelegateEnv, fingerprint: &str) -> Vec<SignatureRequestor> {
     load(ctx, fingerprint)
         .into_iter()
         .map(|g| g.requestor)

@@ -23,3 +23,8 @@ ciborium = { workspace = true }
 ed25519-dalek = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
 bs58 = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Used only to pin the JSON-visible field names of the wire types; serde tags
+# enum variants by name in CBOR too, so a JSON assertion catches a CBOR break.
+serde_json = { workspace = true }

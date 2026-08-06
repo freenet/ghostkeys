@@ -301,7 +301,6 @@ mod real {
                 match api::delegate::send_request(GhostkeyRequest::ImportGhostKey {
                     certificate_pem: key.certificate_pem.clone(),
                     signing_key_pem: key.signing_key_pem.clone(),
-                    master_verifying_key_pem: None,
                 })
                 .await
                 {

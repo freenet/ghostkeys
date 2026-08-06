@@ -1,8 +1,11 @@
 #![allow(unexpected_cfgs)]
 
+mod env;
 mod handlers;
 mod logging;
 mod permissions;
+
+use env::DelegateEnv;
 
 use freenet_stdlib::prelude::{
     delegate, ApplicationMessage, DelegateCtx, DelegateError, DelegateInterface,
@@ -46,6 +49,20 @@ enum PendingPrompt {
         request_id: u32,
         requestor: SignatureRequestor,
         fingerprints: Vec<String>,
+        original_payload: Vec<u8>,
+    },
+    /// Confirmation for an operation that hands out a raw private signing key.
+    ///
+    /// Unlike every other variant this grants NOTHING on approval. The caller
+    /// already holds `Export`; the prompt exists precisely because holding a
+    /// stored grant is not sufficient authority to extract a private key. The
+    /// approval covers the one replayed request and is not remembered.
+    ExportConfirm {
+        request_id: u32,
+        requestor: SignatureRequestor,
+        /// The key being exported, for a single-key export. `None` for
+        /// `ExportAllGhostKeys`, which names no fingerprint.
+        fingerprint: Option<String>,
         original_payload: Vec<u8>,
     },
 }
@@ -127,7 +144,7 @@ impl DelegateInterface for GhostkeyDelegate {
 }
 
 fn handle_request(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     payload: &[u8],
     requestor: &SignatureRequestor,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
@@ -198,6 +215,20 @@ fn handle_request(
         }
     }
 
+    // Handing out a raw private key is never authorised by a stored grant
+    // alone, no matter who holds it. A grant is a decision the user made once,
+    // possibly months ago, in a different context; an exported signing key is
+    // irrevocable and works forever without their node. So the export path
+    // asks again, every time, and the answer is not remembered.
+    //
+    // This runs AFTER the scope check above on purpose: a caller with no
+    // `Export` grant is still hard-denied without a prompt, so an app cannot
+    // put a scary dialog in front of the user for an operation that would be
+    // refused anyway.
+    if let Some(subject) = export_confirmation_subject(ctx, &request, requestor) {
+        return request_export_confirmation(ctx, requestor, payload, subject);
+    }
+
     let response = handlers::handle(ctx, request, requestor);
 
     let response_bytes =
@@ -205,6 +236,166 @@ fn handle_request(
 
     Ok(vec![OutboundDelegateMsg::ApplicationMessage(
         ApplicationMessage::new(response_bytes),
+    )])
+}
+
+/// Requests that hand the caller raw private signing keys.
+///
+/// `MarkBackedUp` is deliberately absent even though it is gated on the same
+/// `Export` scope: it writes a flag and discloses nothing, and the vault sends
+/// it immediately after a successful export, so prompting for it would mean
+/// two dialogs for one user action.
+fn discloses_private_key(request: &GhostkeyRequest) -> bool {
+    matches!(
+        request,
+        GhostkeyRequest::ExportGhostKey { .. } | GhostkeyRequest::ExportAllGhostKeys
+    )
+}
+
+/// What an export-confirmation prompt is about.
+#[derive(Debug, PartialEq, Eq)]
+enum ExportSubject {
+    /// One named key.
+    Single(String),
+    /// Every key the caller could extract, and how many that is.
+    All(usize),
+}
+
+/// Decide whether this request needs a fresh confirmation, and what the prompt
+/// should say it is about. `None` means "carry on to the handler".
+///
+/// For `ExportGhostKey` the scope check in `handle_request` has already run, so
+/// reaching here means the caller holds `Export` on that key. `ExportAllGhostKeys`
+/// names no fingerprint and so is never scope-checked there; it is filtered
+/// per-key inside the handler instead. Returning `None` when the caller could
+/// export nothing preserves that: an app with no grants gets the same empty
+/// list it always got, rather than the power to raise a dialog by asking.
+fn export_confirmation_subject(
+    ctx: &dyn DelegateEnv,
+    request: &GhostkeyRequest,
+    requestor: &SignatureRequestor,
+) -> Option<ExportSubject> {
+    match request {
+        GhostkeyRequest::ExportGhostKey { fingerprint } => {
+            Some(ExportSubject::Single(fingerprint.clone()))
+        }
+        GhostkeyRequest::ExportAllGhostKeys => {
+            let count = handlers::exportable_count(ctx, requestor);
+            (count > 0).then_some(ExportSubject::All(count))
+        }
+        _ => None,
+    }
+}
+
+/// Ask the user to confirm a private-key export.
+///
+/// Nothing is granted by approving: the caller already holds `Export`, and the
+/// point of this prompt is that holding it is not enough. The approval
+/// authorises exactly the request that is replayed, once.
+fn request_export_confirmation(
+    ctx: &mut dyn DelegateEnv,
+    requestor: &SignatureRequestor,
+    original_payload: &[u8],
+    subject: ExportSubject,
+) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    use freenet_stdlib::prelude::{ClientResponse, UserInputRequest};
+
+    let request_id = next_prompt_request_id();
+    let requestor_desc = requestor_short_label(requestor);
+
+    let (what, fingerprint) = match subject {
+        ExportSubject::Single(fp) => {
+            let name = handlers::get_label(ctx, &fp).unwrap_or_else(|| fp.clone());
+            (format!("your ghostkey \"{name}\""), Some(fp))
+        }
+        ExportSubject::All(1) => ("your ghostkey".to_string(), None),
+        ExportSubject::All(n) => (format!("all {n} of your ghostkeys"), None),
+    };
+
+    let prompt = format!(
+        "{requestor_desc} wants to take a copy of {what}, including the PRIVATE key.\n\n\
+         Anyone who gets that copy can sign as you forever, from anywhere, and it cannot \
+         be revoked. Only allow this if you just asked for a backup.\n\n\
+         Allow, or deny?"
+    );
+
+    logging::info(&format!("Requesting export confirmation: {prompt}"));
+
+    let pending = PendingPrompt::ExportConfirm {
+        request_id,
+        requestor: requestor.clone(),
+        fingerprint,
+        original_payload: original_payload.to_vec(),
+    };
+    let pending_bytes =
+        to_cbor(&pending).map_err(|e| DelegateError::Other(format!("serialize pending: {e}")))?;
+    ctx.context_write(&pending_bytes);
+
+    Ok(vec![OutboundDelegateMsg::RequestUserInput(
+        UserInputRequest {
+            request_id,
+            message: {
+                let json = serde_json::json!(prompt);
+                freenet_stdlib::prelude::NotificationMessage::try_from(&json)
+                    .expect("string to NotificationMessage")
+            },
+            responses: vec![
+                ClientResponse::new(b"Allow".to_vec()),
+                ClientResponse::new(b"Deny".to_vec()),
+            ],
+        },
+    )])
+}
+
+/// Handle the answer to an export confirmation.
+///
+/// Approving grants nothing and is not remembered: the next export asks again.
+fn handle_export_confirm_response(
+    ctx: &mut dyn DelegateEnv,
+    user_resp: &freenet_stdlib::prelude::UserInputResponse<'_>,
+    requestor: SignatureRequestor,
+    fingerprint: Option<String>,
+    original_payload: Vec<u8>,
+) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    let denial = |requestor: SignatureRequestor| match &fingerprint {
+        Some(fp) => ghostkey_common::GhostkeyResponse::PermissionDenied {
+            fingerprint: fp.clone(),
+            requestor,
+        },
+        None => ghostkey_common::GhostkeyResponse::AccessDenied { requestor },
+    };
+
+    if user_resp.response.bytes() != b"Allow" {
+        logging::info("User denied a private-key export");
+        return respond(denial(requestor));
+    }
+
+    let request: GhostkeyRequest = from_cbor(&original_payload)
+        .map_err(|e| DelegateError::Other(format!("deserialize original request: {e}")))?;
+
+    // The payload was written by `request_export_confirmation` and read back
+    // from the delegate's own context, so it should always be an export. Check
+    // anyway: an approval collected for "hand me your private key" must not be
+    // spendable on any other operation if that context slot is ever reachable
+    // from somewhere else.
+    if !discloses_private_key(&request) {
+        logging::info("Export confirmation replayed a non-export request; refusing");
+        return respond(denial(requestor));
+    }
+
+    logging::info("User approved a private-key export");
+    let response = handlers::handle(ctx, request, &requestor);
+    respond(response)
+}
+
+/// Wrap a response as the single outbound application message.
+fn respond(
+    response: ghostkey_common::GhostkeyResponse,
+) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    let bytes =
+        to_cbor(&response).map_err(|e| DelegateError::Other(format!("serialize response: {e}")))?;
+    Ok(vec![OutboundDelegateMsg::ApplicationMessage(
+        ApplicationMessage::new(bytes),
     )])
 }
 
@@ -386,7 +577,7 @@ fn has_duplicates(items: &[String]) -> bool {
 /// render the prompt (body list + buttons) and, later, to match the user's
 /// response back to a fingerprint -- the two must derive from the same
 /// function so they can never drift apart.
-fn key_choices(ctx: &DelegateCtx, fingerprints: &[String]) -> Vec<KeyChoice> {
+fn key_choices(ctx: &dyn DelegateEnv, fingerprints: &[String]) -> Vec<KeyChoice> {
     let names = fingerprints
         .iter()
         .map(|fp| handlers::get_label(ctx, fp).unwrap_or_else(|| fp.clone()))
@@ -396,7 +587,7 @@ fn key_choices(ctx: &DelegateCtx, fingerprints: &[String]) -> Vec<KeyChoice> {
 
 /// Request permission from the user for a specific-fingerprint operation.
 fn request_user_permission(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     fingerprint: &str,
     requestor: &SignatureRequestor,
     original_payload: &[u8],
@@ -424,7 +615,7 @@ fn request_user_permission(
     };
     let pending_bytes =
         to_cbor(&pending).map_err(|e| DelegateError::Other(format!("serialize pending: {e}")))?;
-    ctx.write(&pending_bytes);
+    ctx.context_write(&pending_bytes);
 
     // Two-button prompt: persistent grant on Allow, no grant on Deny. The
     // older "Allow Once" / "Always Allow" pair was removed because the
@@ -453,7 +644,7 @@ fn request_user_permission(
 /// with the requesting app. On approval the delegate grants the
 /// third-party scope set for the chosen fingerprint.
 fn request_any_access(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     requestor: &SignatureRequestor,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
     use freenet_stdlib::prelude::{ClientResponse, UserInputRequest};
@@ -522,7 +713,7 @@ fn request_any_access(
     };
     let pending_bytes =
         to_cbor(&pending).map_err(|e| DelegateError::Other(format!("serialize pending: {e}")))?;
-    ctx.write(&pending_bytes);
+    ctx.context_write(&pending_bytes);
 
     let mut responses: Vec<ClientResponse<'static>> = choices
         .into_iter()
@@ -546,7 +737,7 @@ fn request_any_access(
 /// Emit the key picker for a request that needs a key but names none, keeping
 /// the original request so it can be replayed on approval.
 fn request_any_access_then_replay(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     requestor: &SignatureRequestor,
     original_payload: &[u8],
     fingerprints: Vec<String>,
@@ -587,7 +778,7 @@ fn request_any_access_then_replay(
     };
     let pending_bytes =
         to_cbor(&pending).map_err(|e| DelegateError::Other(format!("serialize pending: {e}")))?;
-    ctx.write(&pending_bytes);
+    ctx.context_write(&pending_bytes);
 
     let mut responses: Vec<ClientResponse<'static>> = choices
         .into_iter()
@@ -610,11 +801,11 @@ fn request_any_access_then_replay(
 
 /// Handle the user's response to a permission prompt.
 fn handle_user_response(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     user_resp: &freenet_stdlib::prelude::UserInputResponse<'_>,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
     // Read pending state from context
-    let pending_bytes = ctx.read();
+    let pending_bytes = ctx.context_read();
     if pending_bytes.is_empty() {
         return Err(DelegateError::Other(
             "received UserResponse with no pending context".into(),
@@ -624,7 +815,7 @@ fn handle_user_response(
     let pending: PendingPrompt = from_cbor(&pending_bytes)
         .map_err(|e| DelegateError::Other(format!("deserialize pending: {e}")))?;
 
-    ctx.clear();
+    ctx.context_clear();
 
     match pending {
         PendingPrompt::Fingerprint {
@@ -650,6 +841,14 @@ fn handle_user_response(
             fingerprints,
             original_payload,
         ),
+        PendingPrompt::ExportConfirm {
+            requestor,
+            fingerprint,
+            original_payload,
+            ..
+        } => {
+            handle_export_confirm_response(ctx, user_resp, requestor, fingerprint, original_payload)
+        }
     }
 }
 
@@ -661,7 +860,7 @@ fn handle_user_response(
 /// would also drop unrelated pre-existing grants the same requestor
 /// held on this fingerprint).
 fn handle_fingerprint_response(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     user_resp: &freenet_stdlib::prelude::UserInputResponse<'_>,
     fingerprint: String,
     requestor: SignatureRequestor,
@@ -710,7 +909,7 @@ fn handle_fingerprint_response(
 /// `GhostKeyList` so the requesting app sees only the key the user chose
 /// to share.
 fn handle_any_access_response(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     user_resp: &freenet_stdlib::prelude::UserInputResponse<'_>,
     requestor: SignatureRequestor,
     fingerprints: Vec<String>,
@@ -839,7 +1038,7 @@ fn match_offered_fingerprint(response: &[u8], offered: &[KeyChoice]) -> AnyAcces
 /// third-party scope set on the chosen key, then replays the original request
 /// so the caller receives what it actually asked for.
 fn handle_any_access_then_replay_response(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     user_resp: &freenet_stdlib::prelude::UserInputResponse<'_>,
     requestor: SignatureRequestor,
     fingerprints: Vec<String>,
@@ -916,7 +1115,13 @@ mod tests {
             fingerprints: vec!["fp1".into(), "fp2".into()],
             original_payload: vec![4, 5, 6],
         };
-        for variant in [&fp, &any, &replay] {
+        let export = PendingPrompt::ExportConfirm {
+            request_id: 10,
+            requestor: webapp(0x12),
+            fingerprint: Some("ciQaxxSwKF8".into()),
+            original_payload: vec![7, 8, 9],
+        };
+        for variant in [&fp, &any, &replay, &export] {
             let bytes = to_cbor(variant).unwrap();
             // Round-trip exactly.
             let _decoded: PendingPrompt = from_cbor(&bytes).unwrap();
@@ -940,19 +1145,8 @@ mod tests {
         );
     }
 
+    use crate::env::MemEnv;
     use ghostkey_common::GhostkeyResponse;
-
-    /// A native `DelegateCtx` whose secret store is a permanent no-op (reads
-    /// return `None`, writes are dropped). That models exactly one real
-    /// situation -- an empty vault -- which is the situation these tests are
-    /// about, and the one where answering wrongly does the most damage.
-    ///
-    /// # Safety
-    /// `__new` only fabricates a handle. Off wasm the host functions it would
-    /// call are stubbed out, so no runtime environment is required.
-    fn empty_vault_ctx() -> DelegateCtx {
-        unsafe { DelegateCtx::__new() }
-    }
 
     fn only_response(msgs: &[OutboundDelegateMsg]) -> GhostkeyResponse {
         assert_eq!(msgs.len(), 1, "expected exactly one outbound message");
@@ -962,9 +1156,270 @@ mod tests {
         }
     }
 
-    fn dispatch(request: &GhostkeyRequest) -> Vec<OutboundDelegateMsg> {
+    /// The prompt a dispatch produced, or a panic naming what came back
+    /// instead. Used by tests that assert an operation ASKS rather than acts.
+    fn only_prompt(msgs: &[OutboundDelegateMsg]) -> String {
+        assert_eq!(msgs.len(), 1, "expected exactly one outbound message");
+        match &msgs[0] {
+            OutboundDelegateMsg::RequestUserInput(req) => {
+                String::from_utf8_lossy(req.message.bytes()).into_owned()
+            }
+            OutboundDelegateMsg::ApplicationMessage(app) => {
+                let response: GhostkeyResponse = from_cbor(&app.payload).unwrap();
+                panic!("expected a user prompt, got an immediate response: {response:?}")
+            }
+            other => panic!("expected a user prompt, got {other:?}"),
+        }
+    }
+
+    fn dispatch_in(
+        env: &mut MemEnv,
+        request: &GhostkeyRequest,
+        requestor: &SignatureRequestor,
+    ) -> Vec<OutboundDelegateMsg> {
         let payload = to_cbor(request).unwrap();
-        handle_request(&mut empty_vault_ctx(), &payload, &webapp(0x11)).unwrap()
+        handle_request(env, &payload, requestor).unwrap()
+    }
+
+    fn dispatch(request: &GhostkeyRequest) -> Vec<OutboundDelegateMsg> {
+        dispatch_in(&mut MemEnv::new(), request, &webapp(0x11))
+    }
+
+    /// Answer an in-flight prompt the way the runtime would.
+    fn answer_prompt(env: &mut MemEnv, button: &[u8]) -> Vec<OutboundDelegateMsg> {
+        use freenet_stdlib::prelude::{ClientResponse, UserInputResponse};
+        let response = UserInputResponse {
+            request_id: 0,
+            response: ClientResponse::new(button.to_vec()),
+            context: Default::default(),
+        };
+        handle_user_response(env, &response).unwrap()
+    }
+
+    /// A vault holding one ghostkey that `vault` imported, so `vault` holds
+    /// the full scope set on it -- `Export` included. Returns the fingerprint.
+    fn vault_with_one_key(env: &mut MemEnv, vault: &SignatureRequestor) -> String {
+        let (cert, sk) = handlers::test_ghostkey(100);
+        handlers::seed_ghostkey(env, &cert, &sk, vault)
+    }
+
+    /// Regression: a stored `Export` grant used to be sufficient authority to
+    /// extract a raw private signing key. The vault auto-grants itself
+    /// `Export` on import, so "the caller holds the grant" says only that some
+    /// key was once imported under this identity -- it is not evidence that
+    /// the user asked for a backup right now. Export must ask, every time, no
+    /// matter who is asking.
+    #[test]
+    fn export_prompts_even_when_the_caller_already_holds_the_export_grant() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        assert!(
+            permissions::has_scope(&env, &fp, &vault, GhostkeyScope::Export),
+            "precondition: the importer holds Export, so this is the cached-grant case"
+        );
+
+        let msgs = dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportGhostKey {
+                fingerprint: fp.clone(),
+            },
+            &vault,
+        );
+        let prompt = only_prompt(&msgs);
+        assert!(
+            prompt.contains("PRIVATE"),
+            "the prompt must say what is leaving the vault: {prompt}"
+        );
+    }
+
+    /// Same rule for the bulk path, which hands over every private key at once
+    /// and would otherwise be the obvious way around a per-key prompt.
+    #[test]
+    fn export_all_prompts_even_when_the_caller_already_holds_the_export_grant() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        vault_with_one_key(&mut env, &vault);
+
+        let msgs = dispatch_in(&mut env, &GhostkeyRequest::ExportAllGhostKeys, &vault);
+        only_prompt(&msgs);
+    }
+
+    /// Approving hands over the key -- the prompt is a gate, not a wall.
+    #[test]
+    fn approving_the_export_prompt_replays_the_export() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        let msgs = dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportGhostKey {
+                fingerprint: fp.clone(),
+            },
+            &vault,
+        );
+        only_prompt(&msgs);
+
+        match only_response(&answer_prompt(&mut env, b"Allow")) {
+            GhostkeyResponse::ExportResult {
+                fingerprint,
+                signing_key_pem,
+                ..
+            } => {
+                assert_eq!(fingerprint, fp);
+                assert!(!signing_key_pem.is_empty());
+            }
+            other => panic!("expected ExportResult after approval, got {other:?}"),
+        }
+    }
+
+    /// Denying withholds the key, and -- the part that matters -- approving
+    /// once must not be remembered. A grant that survived the prompt would
+    /// reduce this to a one-time speed bump.
+    #[test]
+    fn denying_the_export_prompt_withholds_the_key_and_approval_is_not_cached() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        let export = GhostkeyRequest::ExportGhostKey {
+            fingerprint: fp.clone(),
+        };
+
+        only_prompt(&dispatch_in(&mut env, &export, &vault));
+        match only_response(&answer_prompt(&mut env, b"Deny")) {
+            GhostkeyResponse::PermissionDenied { fingerprint, .. } => assert_eq!(fingerprint, fp),
+            other => panic!("expected PermissionDenied after denial, got {other:?}"),
+        }
+
+        // Approve once...
+        only_prompt(&dispatch_in(&mut env, &export, &vault));
+        answer_prompt(&mut env, b"Allow");
+
+        // ...and the next export still asks.
+        only_prompt(&dispatch_in(&mut env, &export, &vault));
+    }
+
+    /// The prompt must not become a way for any app to raise a scary dialog.
+    /// A caller with no `Export` grant is refused outright, exactly as before.
+    #[test]
+    fn export_from_an_ungranted_caller_is_denied_without_a_prompt() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        let msgs = dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportGhostKey { fingerprint: fp },
+            &webapp(0x02),
+        );
+        assert!(
+            matches!(
+                only_response(&msgs),
+                GhostkeyResponse::PermissionDenied { .. }
+            ),
+            "an app with no Export grant must be refused, not prompted"
+        );
+    }
+
+    /// `ExportAllGhostKeys` names no fingerprint, so it is never scope-checked
+    /// in the dispatcher. A caller that could extract nothing must therefore
+    /// get the same empty list it always got, not a dialog.
+    #[test]
+    fn export_all_from_an_ungranted_caller_answers_empty_without_a_prompt() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        vault_with_one_key(&mut env, &vault);
+
+        let msgs = dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportAllGhostKeys,
+            &webapp(0x02),
+        );
+        match only_response(&msgs) {
+            GhostkeyResponse::ExportAllResult { keys } => assert!(keys.is_empty()),
+            other => panic!("expected an empty ExportAllResult, got {other:?}"),
+        }
+    }
+
+    /// `MarkBackedUp` rides on the same `Export` scope but discloses nothing,
+    /// and the vault sends it straight after an export. Prompting for it would
+    /// mean two dialogs for one user action.
+    #[test]
+    fn mark_backed_up_does_not_prompt() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        let msgs = dispatch_in(
+            &mut env,
+            &GhostkeyRequest::MarkBackedUp {
+                fingerprint: fp.clone(),
+            },
+            &vault,
+        );
+        match only_response(&msgs) {
+            GhostkeyResponse::BackedUpMarked { fingerprint } => assert_eq!(fingerprint, fp),
+            other => panic!("expected BackedUpMarked, got {other:?}"),
+        }
+    }
+
+    /// Signing is unaffected: it is revocable, per-message, and already
+    /// scoped, so it keeps using the stored grant.
+    #[test]
+    fn signing_with_a_stored_grant_does_not_prompt() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        let msgs = dispatch_in(
+            &mut env,
+            &GhostkeyRequest::SignMessage {
+                fingerprint: fp,
+                message: b"hello".to_vec(),
+            },
+            &vault,
+        );
+        assert!(matches!(
+            only_response(&msgs),
+            GhostkeyResponse::SignResult { .. }
+        ));
+    }
+
+    /// An export approval must be spendable only on the export it was
+    /// collected for. This drives the guard directly, because the delegate
+    /// itself never writes a non-export payload into that slot.
+    #[test]
+    fn an_export_approval_cannot_be_spent_on_another_request() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        let smuggled = to_cbor(&GhostkeyRequest::DeleteGhostKey {
+            fingerprint: fp.clone(),
+        })
+        .unwrap();
+        let pending = PendingPrompt::ExportConfirm {
+            request_id: 1,
+            requestor: vault.clone(),
+            fingerprint: Some(fp.clone()),
+            original_payload: smuggled,
+        };
+        env.context_write(&to_cbor(&pending).unwrap());
+
+        assert!(
+            matches!(
+                only_response(&answer_prompt(&mut env, b"Allow")),
+                GhostkeyResponse::PermissionDenied { .. }
+            ),
+            "an approval collected for an export must not delete a key"
+        );
+        assert!(
+            handlers::load_index(&env).contains(&fp),
+            "the key must still be there"
+        );
     }
 
     #[test]

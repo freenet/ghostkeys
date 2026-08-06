@@ -87,7 +87,6 @@ fn test_request_response_serialization() {
         GhostkeyRequest::ImportGhostKey {
             certificate_pem: "test-cert".into(),
             signing_key_pem: "test-sk".into(),
-            master_verifying_key_pem: Some("test-mvk".into()),
         },
         GhostkeyRequest::ListGhostKeys,
         GhostkeyRequest::GetGhostKey {

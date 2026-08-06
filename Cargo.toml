@@ -32,6 +32,20 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 futures = "0.3"
 js-sys = "0.3"
 
+# Ed25519 field arithmetic is ~1000x slower unoptimised, and the delegate's
+# tests now generate real certificates so they can exercise the authorization
+# paths against a populated vault. Without this, one test that seeds three
+# ghostkeys takes ~34s. Dev-profile only: the release WASM the delegate key is
+# computed from is unaffected.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.blake3]
+opt-level = 3
+
 [profile.release]
 opt-level = "z"
 lto = true
