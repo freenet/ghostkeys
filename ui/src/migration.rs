@@ -116,6 +116,15 @@ impl MigrationOutcome {
     /// could not bring it over. That is positive evidence of something
     /// recoverable that was not recovered, it is rare, and the user can act on
     /// it by re-importing from their backup.
+    /// Whether the user needs telling.
+    ///
+    /// Nothing branches on this any more -- `user_message` decides what to
+    /// show. It is kept as the independent statement of the same predicate, so
+    /// `every_attention_case_has_a_message` can assert the two agree. That
+    /// disagreement is the bug it exists to catch: this returning true while
+    /// `user_message` returns `None` means the gate opens onto nothing and the
+    /// user is shown silence.
+    #[cfg(test)]
     pub(crate) fn needs_user_attention(&self) -> bool {
         self.failed_imports > 0
             || self.answered_with_error > 0
@@ -354,6 +363,42 @@ pub(crate) fn sweep_step(verdict: &PresenceVerdict) -> SweepStep {
 }
 
 use std::collections::BTreeSet;
+
+/// What, if anything, the sweep should tell the user.
+///
+/// Hoisted for the same reason as `sweep_step`: `report` is wasm-only, so
+/// deleting a branch of it passed the entire suite. The specific failure this
+/// exists to prevent is a gate that opens onto nothing -- `needs_user_attention`
+/// returning true while `report` has no branch for the condition that made it
+/// true, so the user is shown nothing at all. `every_attention_case_has_a_message`
+/// pins exactly that.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum UserMessage {
+    /// Keys were offered and could not be brought over.
+    FailedImports(usize),
+    /// A predecessor said it holds identities and then did not hand them over.
+    PresentButSilent,
+    /// A predecessor holds identities this vault cannot read.
+    PresentButUnexportable,
+    /// A predecessor answered with a failure.
+    AnsweredWithError,
+}
+
+/// The message a sweep outcome warrants, if any. Ordered most specific first,
+/// because only one is shown.
+pub(crate) fn user_message(outcome: &MigrationOutcome) -> Option<UserMessage> {
+    if outcome.failed_imports > 0 {
+        Some(UserMessage::FailedImports(outcome.failed_imports))
+    } else if outcome.present_but_silent > 0 {
+        Some(UserMessage::PresentButSilent)
+    } else if outcome.present_but_unexportable > 0 {
+        Some(UserMessage::PresentButUnexportable)
+    } else if outcome.answered_with_error > 0 {
+        Some(UserMessage::AnsweredWithError)
+    } else {
+        None
+    }
+}
 
 /// Which default identity to adopt after a recovery pass.
 ///
@@ -757,45 +802,33 @@ mod real {
             );
         }
 
-        if !outcome.needs_user_attention() {
+        // Rendering only. The decision lives in `super::user_message`, where a
+        // test can reach it -- deleting a branch from this function used to
+        // pass the whole suite.
+        let Some(message) = super::user_message(outcome) else {
             return;
-        }
+        };
 
-        // Every condition `needs_user_attention` is true for needs a branch
-        // here. Without one, the gate passes and the user is shown nothing --
-        // which is exactly the silent-clean-sweep failure the counters were
-        // added to end.
-        if outcome.failed_imports > 0 {
-            toast::show(
-                format!(
-                    "Found {} ghostkey(s) in a previous vault version but could not \
-                     import them. Re-import from your backup, or reopen the vault \
-                     once your node is fully started.",
-                    outcome.failed_imports
-                ),
-                ToastKind::Error,
-            );
-        } else if outcome.present_but_silent > 0 {
-            toast::show(
-                "A previous vault version has identities stored but did not hand \
-                 them over. If it asked you to confirm and the prompt was missed, \
-                 reload the vault and allow it. Otherwise re-import from your backup.",
-                ToastKind::Error,
-            );
-        } else if outcome.present_but_unexportable > 0 {
-            toast::show(
-                "A previous vault version holds identities this vault could not \
-                 read. If one is missing here, re-import it from your backup.",
-                ToastKind::Error,
-            );
-        } else if outcome.answered_with_error > 0 {
-            toast::show(
-                "A previous vault version reported a problem reading one of its \
-                 stored identities. If one is missing here, re-import it from \
-                 your backup.",
-                ToastKind::Error,
-            );
-        }
+        let text = match message {
+            super::UserMessage::FailedImports(n) => format!(
+                "Found {n} ghostkey(s) in a previous vault version but could not \
+                 import them. Re-import from your backup, or reopen the vault \
+                 once your node is fully started."
+            ),
+            super::UserMessage::PresentButSilent => "A previous vault version has identities \
+                 stored but did not hand them over. If it asked you to confirm and the prompt \
+                 was missed, reload the vault and allow it. Otherwise re-import from your backup."
+                .to_string(),
+            super::UserMessage::PresentButUnexportable => "A previous vault version holds \
+                 identities this vault could not read. If one is missing here, re-import it \
+                 from your backup."
+                .to_string(),
+            super::UserMessage::AnsweredWithError => "A previous vault version reported a \
+                 problem reading one of its stored identities. If one is missing here, \
+                 re-import it from your backup."
+                .to_string(),
+        };
+        toast::show(text, ToastKind::Error);
     }
 }
 
@@ -1027,10 +1060,13 @@ mod tests {
             .next()
             .expect("test module marker");
 
+        // The CALL SITE, not just the symbol: a definition left behind while
+        // the call is gone still contains every identifier, which is exactly
+        // the shape the lost work took.
         for needle in [
             "SetDefaultKey",
             "default_to_adopt",
-            "carry_default_identity",
+            "carry_default_identity(&recovered_from).await",
         ] {
             assert!(
                 code.contains(needle),
@@ -1042,6 +1078,71 @@ mod tests {
             "the carry-across must be gated on a pass that actually recovered something, \
              or it fights a choice the user makes later"
         );
+    }
+
+    /// The invariant X1 violated: the attention gate must never open onto
+    /// nothing. Every combination that warrants telling the user must produce
+    /// a message, and every one that does not must produce none.
+    #[test]
+    fn every_attention_case_has_a_message() {
+        let mut cases = Vec::new();
+        for i in 0..0b111_1111u8 {
+            cases.push(MigrationOutcome {
+                recovered: 0,
+                undetermined: (i & 1) as usize,
+                answered_with_error: ((i >> 1) & 1) as usize,
+                failed_imports: ((i >> 2) & 1) as usize,
+                present_but_unexportable: ((i >> 3) & 1) as usize,
+                present_but_silent: ((i >> 4) & 1) as usize,
+                not_registered: ((i >> 5) & 1) as usize,
+                unsettled_and_empty: ((i >> 6) & 1) as usize,
+            });
+        }
+
+        for outcome in cases {
+            assert_eq!(
+                outcome.needs_user_attention(),
+                user_message(&outcome).is_some(),
+                "attention and message disagree for {outcome:?}"
+            );
+        }
+    }
+
+    /// A predecessor that held keys and went silent is the case the counters
+    /// were added for, and it must reach the user rather than being logged and
+    /// swallowed.
+    #[test]
+    fn a_predecessor_that_held_keys_and_went_silent_tells_the_user() {
+        let outcome = MigrationOutcome {
+            present_but_silent: 1,
+            ..MigrationOutcome::default()
+        };
+        assert_eq!(user_message(&outcome), Some(UserMessage::PresentButSilent));
+    }
+
+    #[test]
+    fn a_predecessor_holding_unreadable_keys_tells_the_user() {
+        let outcome = MigrationOutcome {
+            present_but_unexportable: 1,
+            ..MigrationOutcome::default()
+        };
+        assert_eq!(
+            user_message(&outcome),
+            Some(UserMessage::PresentButUnexportable)
+        );
+    }
+
+    /// Ordinary absence stays quiet, or the warning that matters gets trained
+    /// away.
+    #[test]
+    fn ordinary_absence_says_nothing() {
+        let outcome = MigrationOutcome {
+            undetermined: 9,
+            not_registered: 9,
+            unsettled_and_empty: 9,
+            ..MigrationOutcome::default()
+        };
+        assert_eq!(user_message(&outcome), None);
     }
 
     #[test]
