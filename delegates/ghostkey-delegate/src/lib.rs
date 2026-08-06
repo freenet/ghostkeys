@@ -1686,6 +1686,183 @@ mod tests {
         ));
     }
 
+    /// Only the exact `Allow` bytes approve a private-key export.
+    ///
+    /// The response comes back through the client API, so "the UI only ever
+    /// sends Allow or Deny" is not a guarantee about what arrives. Without
+    /// this, rewriting the check to `== b"Deny"` -- treating anything
+    /// unrecognised as approval -- passes the whole suite, and that single
+    /// line is what decides whether a raw private key leaves the vault.
+    #[test]
+    fn only_allow_approves_an_export() {
+        for button in [&b"Yes"[..], b"allow", b"Allow ", b"", b"Deny"] {
+            let mut env = MemEnv::new();
+            let vault = webapp(0x01);
+            let fp = vault_with_one_key(&mut env, &vault);
+
+            let (id, _) = only_prompt(&dispatch_in(
+                &mut env,
+                &GhostkeyRequest::ExportGhostKey {
+                    fingerprint: fp.clone(),
+                },
+                &vault,
+            ));
+
+            match only_response(&answer_prompt(&mut env, id, button)) {
+                GhostkeyResponse::PermissionDenied { .. }
+                | GhostkeyResponse::AccessDenied { .. } => {}
+                other => panic!(
+                    "button {:?} must not authorise an export, got {other:?}",
+                    String::from_utf8_lossy(button)
+                ),
+            }
+        }
+    }
+
+    /// Same rule for the prompt that hands out a grant: only `Allow` grants.
+    #[test]
+    fn only_allow_grants_access_on_a_permission_prompt() {
+        for button in [&b"Yes"[..], b"allow", b"", b"Deny"] {
+            let mut env = MemEnv::new();
+            let vault = webapp(0x01);
+            let app = webapp(0x02);
+            let fp = vault_with_one_key(&mut env, &vault);
+
+            // An ungranted app asking to read a key raises the grant prompt.
+            let (id, _) = only_prompt(&dispatch_in(
+                &mut env,
+                &GhostkeyRequest::GetGhostKey {
+                    fingerprint: fp.clone(),
+                },
+                &app,
+            ));
+            answer_prompt(&mut env, id, button);
+
+            assert!(
+                !permissions::has_scope(&env, &fp, &app, GhostkeyScope::ReadPublic),
+                "button {:?} must not grant access",
+                String::from_utf8_lossy(button)
+            );
+        }
+    }
+
+    /// Denying a bulk export answers `AccessDenied`, which names no
+    /// fingerprint because the request did not either.
+    #[test]
+    fn denying_export_all_answers_access_denied() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        vault_with_one_key(&mut env, &vault);
+
+        let (id, _) = only_prompt(&dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportAllGhostKeys,
+            &vault,
+        ));
+        assert!(matches!(
+            only_response(&answer_prompt(&mut env, id, b"Deny")),
+            GhostkeyResponse::AccessDenied { .. }
+        ));
+    }
+
+    /// A grant can outlive its key (a grant seeded for a fingerprint the vault
+    /// never stored, or restored from elsewhere), and then the scope check
+    /// passes for a key that is not there. The export path must answer rather
+    /// than raise a private-key warning about something that does not exist.
+    #[test]
+    fn a_grant_without_a_key_does_not_raise_an_export_prompt() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let orphan = "ciQaxxSwKF8";
+        permissions::grant_full(&mut env, orphan, &vault);
+
+        assert!(
+            permissions::has_scope(&env, orphan, &vault, GhostkeyScope::Export),
+            "precondition: the scope check passes, so only the certificate gate stops the prompt"
+        );
+
+        let msgs = dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportGhostKey {
+                fingerprint: orphan.to_string(),
+            },
+            &vault,
+        );
+        assert!(matches!(
+            only_response(&msgs),
+            GhostkeyResponse::KeyNotFound { .. }
+        ));
+    }
+
+    /// Two independent lists decide which requests hand out private keys:
+    /// `export_confirmation_subject`'s match, and `discloses_private_key`.
+    /// They must agree, or a request could prompt but be refused on replay, or
+    /// skip the prompt entirely.
+    #[test]
+    fn the_two_private_key_lists_agree() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        let cases = [
+            (
+                GhostkeyRequest::ExportGhostKey {
+                    fingerprint: fp.clone(),
+                },
+                true,
+            ),
+            (GhostkeyRequest::ExportAllGhostKeys, true),
+            (
+                GhostkeyRequest::MarkBackedUp {
+                    fingerprint: fp.clone(),
+                },
+                false,
+            ),
+            (
+                GhostkeyRequest::SignMessage {
+                    fingerprint: fp,
+                    message: vec![],
+                },
+                false,
+            ),
+            (GhostkeyRequest::ListGhostKeys, false),
+        ];
+
+        for (request, is_disclosure) in cases {
+            assert_eq!(
+                discloses_private_key(&request),
+                is_disclosure,
+                "discloses_private_key disagrees for {request:?}"
+            );
+            assert_eq!(
+                export_confirmation_subject(&env, &request, &vault).is_some(),
+                is_disclosure,
+                "export_confirmation_subject disagrees for {request:?}"
+            );
+        }
+    }
+
+    /// If the pending prompt cannot be parked, no prompt is raised. Emitting
+    /// one anyway would leave the PREVIOUS pending state in the slot, so the
+    /// user's click would answer a question they are no longer being asked.
+    #[test]
+    fn a_prompt_is_not_raised_if_it_cannot_be_parked() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        env.fail_next_context_write();
+        let payload = to_cbor(&GhostkeyRequest::ExportGhostKey { fingerprint: fp }).unwrap();
+        assert!(
+            handle_request(&mut env, &payload, &vault).is_err(),
+            "a prompt that cannot be parked must fail the request, not be emitted"
+        );
+        assert!(
+            env.context_read().is_empty(),
+            "nothing a later response could act on may be left behind"
+        );
+    }
+
     #[test]
     fn only_sign_with_default_takes_the_prompt_route() {
         assert!(acts_on_a_key_it_does_not_name(

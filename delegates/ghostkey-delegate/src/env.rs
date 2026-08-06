@@ -23,9 +23,18 @@ use freenet_stdlib::prelude::DelegateCtx;
 /// delegate parks an in-flight prompt in.
 ///
 /// The context methods are prefixed `context_` rather than named `read` /
-/// `write` / `clear` so a call site can never be ambiguous about whether it
-/// is touching durable secrets or the scratch slot that is cleared between
-/// message batches.
+/// `write` / `clear` so a call site can never be ambiguous about whether it is
+/// touching durable secrets or the prompt slot.
+///
+/// The prompt slot PERSISTS between invocations, which is what makes the
+/// prompt round-trip work at all: the bytes written when `RequestUserInput` is
+/// emitted are still readable when the runtime re-enters with the matching
+/// `UserResponse`. freenet-stdlib's own doc calls it "reset between separate
+/// runtime calls" and that is stale -- freenet-core keeps it keyed by
+/// `DelegateKey` with a 10-minute TTL (`wasm_runtime/delegate/interface.rs`,
+/// `native_api::DELEGATE_CONTEXT_TTL`). Said explicitly because a reader who
+/// trusts the stdlib doc would "fix" `MemEnv` to drop the slot and quietly
+/// break every prompt test.
 pub trait DelegateEnv {
     fn get_secret(&self, key: &[u8]) -> Option<Vec<u8>>;
     fn set_secret(&mut self, key: &[u8], value: &[u8]) -> bool;
@@ -75,12 +84,22 @@ impl DelegateEnv for DelegateCtx {
 pub struct MemEnv {
     secrets: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
     context: Vec<u8>,
+    /// Makes the next `context_write` fail. Both real implementations return
+    /// `bool` and can genuinely refuse (an oversize context is dropped by the
+    /// runtime), so without a way to reproduce that here the failure branch of
+    /// `park_pending` would be unreachable from any test.
+    fail_next_context_write: bool,
 }
 
 #[cfg(test)]
 impl MemEnv {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Arrange for the next `context_write` to fail.
+    pub fn fail_next_context_write(&mut self) {
+        self.fail_next_context_write = true;
     }
 }
 
@@ -105,6 +124,9 @@ impl DelegateEnv for MemEnv {
     }
 
     fn context_write(&mut self, data: &[u8]) -> bool {
+        if std::mem::take(&mut self.fail_next_context_write) {
+            return false;
+        }
         self.context = data.to_vec();
         true
     }
