@@ -67,6 +67,34 @@ enum PendingPrompt {
     },
 }
 
+/// Map the runtime-attested origin to a caller identity.
+///
+/// Shared by the request path and the user-response path on purpose: the
+/// answer to a prompt is only bound to the questioner if both sides derive
+/// the identity the same way.
+fn requestor_from_origin(
+    origin: Option<MessageOrigin>,
+) -> Result<SignatureRequestor, DelegateError> {
+    match origin {
+        Some(MessageOrigin::WebApp(contract_id)) => Ok(SignatureRequestor::WebApp(contract_id)),
+        // stdlib 0.6 routes inter-delegate calls through
+        // MessageOrigin::Delegate(caller_key). Trust the runtime-attested
+        // caller identity for authorization.
+        Some(MessageOrigin::Delegate(delegate_key)) => {
+            Ok(SignatureRequestor::Delegate(delegate_key))
+        }
+        None => Err(DelegateError::Other(
+            "missing message origin for application message".into(),
+        )),
+        // Required by `#[non_exhaustive]` on MessageOrigin. Reject unknown
+        // origin kinds rather than silently granting access under an
+        // ambiguous identity.
+        Some(_) => Err(DelegateError::Other(
+            "unsupported message origin kind".into(),
+        )),
+    }
+}
+
 impl PendingPrompt {
     /// The prompt id this pending state was shown to the user under. Used to
     /// reject a response belonging to a different prompt -- see
@@ -77,6 +105,17 @@ impl PendingPrompt {
             | PendingPrompt::AnyAccess { request_id, .. }
             | PendingPrompt::AnyAccessThenReplay { request_id, .. }
             | PendingPrompt::ExportConfirm { request_id, .. } => *request_id,
+        }
+    }
+
+    /// The caller the prompt was raised for. An answer from anyone else is
+    /// not an answer to this question.
+    fn requestor(&self) -> &SignatureRequestor {
+        match self {
+            PendingPrompt::Fingerprint { requestor, .. }
+            | PendingPrompt::AnyAccess { requestor, .. }
+            | PendingPrompt::AnyAccessThenReplay { requestor, .. }
+            | PendingPrompt::ExportConfirm { requestor, .. } => requestor,
         }
     }
 }
@@ -99,30 +138,7 @@ impl DelegateInterface for GhostkeyDelegate {
                     ));
                 }
 
-                let requestor = match origin {
-                    Some(MessageOrigin::WebApp(contract_id)) => {
-                        SignatureRequestor::WebApp(contract_id)
-                    }
-                    Some(MessageOrigin::Delegate(delegate_key)) => {
-                        // stdlib 0.6 routes inter-delegate calls through
-                        // MessageOrigin::Delegate(caller_key). Trust the
-                        // runtime-attested caller identity for authorization.
-                        SignatureRequestor::Delegate(delegate_key)
-                    }
-                    None => {
-                        return Err(DelegateError::Other(
-                            "missing message origin for application message".into(),
-                        ));
-                    }
-                    // Required by `#[non_exhaustive]` on MessageOrigin.
-                    // Reject unknown origin kinds rather than silently
-                    // granting access under an ambiguous identity.
-                    Some(_) => {
-                        return Err(DelegateError::Other(
-                            "unsupported message origin kind".into(),
-                        ));
-                    }
-                };
+                let requestor = requestor_from_origin(origin)?;
 
                 handle_request(ctx, &app_msg.payload, &requestor)
             }
@@ -138,7 +154,15 @@ impl DelegateInterface for GhostkeyDelegate {
                 handle_request(ctx, &del_msg.payload, &requestor)
             }
 
-            InboundDelegateMsg::UserResponse(user_resp) => handle_user_response(ctx, &user_resp),
+            InboundDelegateMsg::UserResponse(user_resp) => {
+                // The runtime feeds the user's answer back in the SAME
+                // invocation chain as the request that raised the prompt, so
+                // the attested origin here is the app the prompt was raised
+                // FOR. Passing it on is what lets `handle_user_response` refuse
+                // an answer submitted by somebody else.
+                let answered_by = requestor_from_origin(origin)?;
+                handle_user_response(ctx, &user_resp, &answered_by)
+            }
 
             other => {
                 let msg_type = match &other {
@@ -164,11 +188,6 @@ fn handle_request(
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
     let request: GhostkeyRequest = from_cbor(payload)
         .map_err(|e| DelegateError::Other(format!("deserialize request: {e}")))?;
-
-    // TestPermissionPrompt always triggers the prompt.
-    if let GhostkeyRequest::TestPermissionPrompt { ref fingerprint } = request {
-        return request_user_permission(ctx, fingerprint, requestor, payload);
-    }
 
     // RequestAnyAccess routes to a multi-key picker prompt rather than
     // the single-fingerprint flow. The caller doesn't know any
@@ -289,8 +308,12 @@ fn discloses_private_key(request: &GhostkeyRequest) -> bool {
 enum ExportSubject {
     /// One named key.
     Single(String),
-    /// Every key the caller could extract, and how many that is.
-    All(usize),
+    /// Every key the caller could extract, named. Names rather than a bare
+    /// count because a warning that says only "your ghostkey" gives the user
+    /// nothing to judge: any app that has imported one key of its own can
+    /// raise this dialog at will, so "which keys?" is the question that
+    /// separates a backup they asked for from an app helping itself.
+    All(Vec<String>),
 }
 
 /// Decide whether this request needs a fresh confirmation, and what the prompt
@@ -316,8 +339,8 @@ fn export_confirmation_subject(
                 .then(|| ExportSubject::Single(fingerprint.clone()))
         }
         GhostkeyRequest::ExportAllGhostKeys => {
-            let count = handlers::exportable_count(ctx, requestor);
-            (count > 0).then_some(ExportSubject::All(count))
+            let names = handlers::exportable_names(ctx, requestor);
+            (!names.is_empty()).then_some(ExportSubject::All(names))
         }
         _ => None,
     }
@@ -336,22 +359,50 @@ fn request_export_confirmation(
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
     use freenet_stdlib::prelude::{ClientResponse, UserInputRequest};
 
-    let request_id = next_prompt_request_id(ctx);
+    let request_id = next_prompt_request_id(ctx)?;
     let requestor_desc = requestor_short_label(requestor);
+
+    /// Beyond this many, the dialog names a few and counts the rest, rather
+    /// than becoming a wall of text nobody reads.
+    const MAX_NAMED: usize = 8;
 
     let (what, fingerprint) = match subject {
         ExportSubject::Single(fp) => {
             let name = handlers::get_label(ctx, &fp).unwrap_or_else(|| fp.clone());
             (format!("your ghostkey \"{name}\""), Some(fp))
         }
-        ExportSubject::All(1) => ("your ghostkey".to_string(), None),
-        ExportSubject::All(n) => (format!("all {n} of your ghostkeys"), None),
+        ExportSubject::All(names) => {
+            let total = names.len();
+            let listed: Vec<String> = names
+                .iter()
+                .take(MAX_NAMED)
+                .map(|n| format!("\n  - {n}"))
+                .collect();
+            let rest = total.saturating_sub(MAX_NAMED);
+            let tail = if rest > 0 {
+                format!("\n  ...and {rest} more")
+            } else {
+                String::new()
+            };
+            let noun = if total == 1 { "ghostkey" } else { "ghostkeys" };
+            (
+                format!("{total} of your {noun}:{}{tail}", listed.concat()),
+                None,
+            )
+        }
     };
 
+    // The closing line has to work in BOTH situations this dialog appears in.
+    // It also fires during the vault's own recovery sweep after an update,
+    // where the user asked for nothing and denying costs them their keys, so
+    // "only allow this if you just asked for a backup" would instruct exactly
+    // the wrong answer in the case where it is most expensive.
     let prompt = format!(
         "{requestor_desc} wants to take a copy of {what}, including the PRIVATE key.\n\n\
          Anyone who gets that copy can sign as you forever, from anywhere, and it cannot \
-         be revoked. Only allow this if you just asked for a backup.\n\n\
+         be revoked.\n\n\
+         Expect this if you just asked for a backup, or if your vault is recovering your \
+         keys after an update. If neither is true, deny.\n\n\
          Allow, or deny?"
     );
 
@@ -519,7 +570,17 @@ fn requestor_short_label(requestor: &SignatureRequestor) -> String {
     }
 }
 
-/// Allocate a prompt request id that is unique across invocations.
+/// Allocate a prompt request id that is unique across invocations AND
+/// unguessable to anyone who cannot read the vault's secrets.
+///
+/// Uniqueness alone is not enough. A plain counter is readable by any caller
+/// -- raise one prompt of your own and you know the next id -- and the id is
+/// half of what binds an answer to a question. With a predictable id, an app
+/// can submit an answer for a prompt the VAULT raised and have the vault's own
+/// export replay under the vault's identity. So the id is derived from a
+/// per-vault random seed as well as the counter: the counter keeps ids from
+/// repeating, the seed keeps them from being predicted. The other half of the
+/// binding is the origin check in `handle_user_response`.
 ///
 /// This lives in the secret store rather than in a `static` on purpose. The
 /// runtime builds a FRESH wasm instance for every inbound application message
@@ -532,19 +593,74 @@ fn requestor_short_label(requestor: &SignatureRequestor) -> String {
 ///
 /// Wrapping is handled rather than ignored, skipping `0` so a wrapped counter
 /// cannot collide with an uninitialised read.
-fn next_prompt_request_id(ctx: &mut dyn DelegateEnv) -> u32 {
+fn next_prompt_request_id(ctx: &mut dyn DelegateEnv) -> Result<u32, DelegateError> {
     let current = ctx
         .get_secret(PROMPT_SEQ_KEY)
         .and_then(|bytes| <[u8; 4]>::try_from(bytes.as_slice()).ok())
         .map(u32::from_le_bytes)
         .unwrap_or(0);
-    let next = match current.wrapping_add(1) {
+    let counter = match current.wrapping_add(1) {
         0 => 1,
         n => n,
     };
-    ctx.set_secret(PROMPT_SEQ_KEY, &next.to_le_bytes());
-    next
+    // Fail closed. If the counter write is dropped, the NEXT prompt derives
+    // its id from the same counter value and reuses the id -- and with a
+    // single pending slot, one prompt on screen and another parked under the
+    // same id is exactly the cross-wiring this id exists to prevent.
+    if !ctx.set_secret(PROMPT_SEQ_KEY, &counter.to_le_bytes()) {
+        return Err(DelegateError::Other(
+            "could not record the prompt id".into(),
+        ));
+    }
+
+    let seed = prompt_id_seed(ctx)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&seed);
+    hasher.update(&counter.to_le_bytes());
+    let digest = hasher.finalize();
+    let id = u32::from_le_bytes(digest.as_bytes()[..4].try_into().expect("4 bytes"));
+    Ok(match id {
+        0 => 1,
+        n => n,
+    })
 }
+
+/// Per-vault secret that makes prompt ids unguessable. Generated once, on
+/// first use, from the host RNG.
+fn prompt_id_seed(ctx: &mut dyn DelegateEnv) -> Result<[u8; 32], DelegateError> {
+    if let Some(existing) = ctx
+        .get_secret(PROMPT_SEED_KEY)
+        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+    {
+        return Ok(existing);
+    }
+    let fresh = random_seed();
+    if !ctx.set_secret(PROMPT_SEED_KEY, &fresh) {
+        return Err(DelegateError::Other(
+            "could not store the prompt id seed".into(),
+        ));
+    }
+    Ok(fresh)
+}
+
+#[cfg(target_family = "wasm")]
+fn random_seed() -> [u8; 32] {
+    let bytes = freenet_stdlib::rand::rand_bytes(32);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes[..32]);
+    out
+}
+
+/// Off wasm there is no host RNG. Only tests run here, and they assert on
+/// unpredictability-independent properties, so a fixed seed is fine -- but it
+/// must never be what ships, hence the `cfg`.
+#[cfg(not(target_family = "wasm"))]
+fn random_seed() -> [u8; 32] {
+    [0x5a; 32]
+}
+
+/// Secret-store slot holding the prompt-id seed.
+const PROMPT_SEED_KEY: &[u8] = b"gk:prompt-seed";
 
 /// Secret-store slot holding the prompt-id counter.
 const PROMPT_SEQ_KEY: &[u8] = b"gk:prompt-seq";
@@ -653,7 +769,7 @@ fn request_user_permission(
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
     use freenet_stdlib::prelude::{ClientResponse, UserInputRequest};
 
-    let request_id = next_prompt_request_id(ctx);
+    let request_id = next_prompt_request_id(ctx)?;
     let requestor_desc = requestor_short_label(requestor);
 
     let key_name = handlers::get_label(ctx, fingerprint).unwrap_or_else(|| fingerprint.to_string());
@@ -740,7 +856,7 @@ fn request_any_access(
         .take(MAX_BUTTON_FINGERPRINTS)
         .collect();
 
-    let request_id = next_prompt_request_id(ctx);
+    let request_id = next_prompt_request_id(ctx)?;
     let requestor_desc = requestor_short_label(requestor);
     let choices = key_choices(ctx, &fingerprints);
 
@@ -809,7 +925,7 @@ fn request_any_access_then_replay(
         .take(MAX_BUTTON_FINGERPRINTS)
         .collect();
 
-    let request_id = next_prompt_request_id(ctx);
+    let request_id = next_prompt_request_id(ctx)?;
     let requestor_desc = requestor_short_label(requestor);
     let choices = key_choices(ctx, &fingerprints);
 
@@ -862,6 +978,7 @@ fn request_any_access_then_replay(
 fn handle_user_response(
     ctx: &mut dyn DelegateEnv,
     user_resp: &freenet_stdlib::prelude::UserInputResponse<'_>,
+    answered_by: &SignatureRequestor,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
     // Read pending state from context
     let pending_bytes = ctx.context_read();
@@ -892,6 +1009,22 @@ fn handle_user_response(
         );
         return Err(DelegateError::Other(
             "user response does not match the pending prompt".into(),
+        ));
+    }
+
+    // ...and it only counts from the caller the question was put to.
+    //
+    // The id says WHICH question. This says WHOSE. The runtime feeds a real
+    // answer back through the same invocation chain that raised the prompt, so
+    // a legitimate answer always arrives under the requestor's own origin;
+    // anything else is somebody answering a dialog that was not theirs. Without
+    // this, guessing the id would be enough to have another app's export replay
+    // under that app's identity, which is unbounded in a way that answering
+    // your own prompt is not.
+    if answered_by != pending.requestor() {
+        logging::info("Discarding a user response submitted by a different caller");
+        return Err(DelegateError::Other(
+            "user response did not come from the caller the prompt was raised for".into(),
         ));
     }
 
@@ -967,7 +1100,13 @@ fn handle_fingerprint_response(
     // operations (Export/Delete/Admin) deliberately stay vault-only and
     // never reach this code path -- `handle_request` hard-denies them
     // before a prompt fires.
-    permissions::grant_third_party(ctx, &fingerprint, &requestor);
+    if !permissions::grant_third_party(ctx, &fingerprint, &requestor) {
+        // The user said yes and the grant did not land. Replaying now would
+        // either fail confusingly or succeed once and never again; say so.
+        return Err(DelegateError::Other(
+            "could not record the access the user approved".into(),
+        ));
+    }
 
     let request: GhostkeyRequest = from_cbor(&original_payload)
         .map_err(|e| DelegateError::Other(format!("deserialize original request: {e}")))?;
@@ -1032,7 +1171,11 @@ fn handle_any_access_response(
     logging::info(&format!(
         "User approved any-access: granting third-party scopes on {fp}"
     ));
-    permissions::grant_third_party(ctx, &fp, &requestor);
+    if !permissions::grant_third_party(ctx, &fp, &requestor) {
+        return Err(DelegateError::Other(
+            "could not record the access the user approved".into(),
+        ));
+    }
 
     // Synthesise a `GhostKeyList` containing exactly the key the user
     // chose to share. Routing through `ListGhostKeys` is wrong here: if
@@ -1142,7 +1285,11 @@ fn handle_any_access_then_replay_response(
     logging::info(&format!(
         "User approved sign-with-default: granting third-party scopes on {fp}"
     ));
-    permissions::grant_third_party(ctx, &fp, &requestor);
+    if !permissions::grant_third_party(ctx, &fp, &requestor) {
+        return Err(DelegateError::Other(
+            "could not record the access the user approved".into(),
+        ));
+    }
 
     // Replay. `resolve_default` will now find this key, because the grant
     // above gives the caller `Sign` on it.
@@ -1272,8 +1419,9 @@ mod tests {
     /// Answer an in-flight prompt the way the runtime would.
     /// Answer an in-flight prompt the way the runtime would: the id the prompt
     /// was raised under, plus the button the user pressed.
-    fn answer(
+    fn answer_as(
         env: &mut MemEnv,
+        answered_by: &SignatureRequestor,
         request_id: u32,
         button: &[u8],
     ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
@@ -1283,7 +1431,17 @@ mod tests {
             response: ClientResponse::new(button.to_vec()),
             context: Default::default(),
         };
-        handle_user_response(env, &response)
+        handle_user_response(env, &response, answered_by)
+    }
+
+    /// Answer as the caller the prompt was raised for, which is what the
+    /// runtime does for a genuine answer.
+    fn answer(
+        env: &mut MemEnv,
+        request_id: u32,
+        button: &[u8],
+    ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+        answer_as(env, &webapp(0x01), request_id, button)
     }
 
     fn answer_prompt(env: &mut MemEnv, request_id: u32, button: &[u8]) -> Vec<OutboundDelegateMsg> {
@@ -1736,7 +1894,7 @@ mod tests {
                 },
                 &app,
             ));
-            answer_prompt(&mut env, id, button);
+            let _ = answer_as(&mut env, &app, id, button);
 
             assert!(
                 !permissions::has_scope(&env, &fp, &app, GhostkeyScope::ReadPublic),
@@ -1774,7 +1932,7 @@ mod tests {
         let mut env = MemEnv::new();
         let vault = webapp(0x01);
         let orphan = "ciQaxxSwKF8";
-        permissions::grant_full(&mut env, orphan, &vault);
+        assert!(permissions::grant_full(&mut env, orphan, &vault));
 
         assert!(
             permissions::has_scope(&env, orphan, &vault, GhostkeyScope::Export),
@@ -1860,6 +2018,157 @@ mod tests {
         assert!(
             env.context_read().is_empty(),
             "nothing a later response could act on may be left behind"
+        );
+    }
+
+    /// An answer only counts from the caller the question was put to.
+    ///
+    /// This is the difference between an app answering its own dialog, which
+    /// is bounded because it can only re-export what it already imported, and
+    /// an app answering the VAULT's, which hands it a key it never had. The
+    /// prompt id alone does not stop the second: ids are quantities an
+    /// attacker can try to predict, identities are not.
+    #[test]
+    fn an_export_approved_by_a_different_caller_is_refused() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let attacker = webapp(0x02);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        // The vault raises its own export confirmation.
+        let (id, _) = only_prompt(&dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportGhostKey {
+                fingerprint: fp.clone(),
+            },
+            &vault,
+        ));
+
+        // Somebody else submits the approval, with the correct id.
+        assert!(
+            answer_as(&mut env, &attacker, id, b"Allow").is_err(),
+            "an approval from another caller must not release the vault's private key"
+        );
+    }
+
+    /// Prompt ids must not be guessable from other prompts. A caller that can
+    /// see its own ids and predict the next one could answer somebody else's
+    /// dialog, so the sequence must not be an increment.
+    #[test]
+    fn prompt_ids_are_not_a_predictable_sequence() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+        let export = GhostkeyRequest::ExportGhostKey { fingerprint: fp };
+
+        let mut ids = Vec::new();
+        for _ in 0..6 {
+            let (id, _) = only_prompt(&dispatch_in(&mut env, &export, &vault));
+            ids.push(id);
+        }
+
+        assert!(
+            ids.windows(2).any(|w| w[1] != w[0].wrapping_add(1)),
+            "prompt ids look like a plain counter: {ids:?}"
+        );
+    }
+
+    /// A prompt whose id could not be recorded must not be raised: the next
+    /// one would reuse the id, and with a single pending slot that is the
+    /// cross-wiring the id exists to prevent.
+    #[test]
+    fn a_prompt_is_not_raised_if_its_id_cannot_be_recorded() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        env.fail_next_secret_write();
+        let payload = to_cbor(&GhostkeyRequest::ExportGhostKey { fingerprint: fp }).unwrap();
+        assert!(
+            handle_request(&mut env, &payload, &vault).is_err(),
+            "a prompt whose id was not recorded must fail the request"
+        );
+    }
+
+    /// The export dialog has to name what it is about to hand over. Any app
+    /// that has imported a key of its own can raise it at will, so a warning
+    /// that says only "your ghostkey" gives the user nothing to judge.
+    #[test]
+    fn the_export_all_prompt_names_the_keys() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+        assert!(matches!(
+            only_response(&dispatch_in(
+                &mut env,
+                &GhostkeyRequest::SetLabel {
+                    fingerprint: fp,
+                    label: "Bank login".into()
+                },
+                &vault,
+            )),
+            GhostkeyResponse::LabelSet { .. }
+        ));
+
+        let (_, prompt) = only_prompt(&dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportAllGhostKeys,
+            &vault,
+        ));
+        assert!(
+            prompt.contains("Bank login"),
+            "the dialog must name the key it is about to copy: {prompt}"
+        );
+    }
+
+    /// The closing line has to work in the recovery case too, where the user
+    /// asked for nothing and denying costs them their keys.
+    #[test]
+    fn the_export_prompt_does_not_instruct_a_deny_during_recovery() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let fp = vault_with_one_key(&mut env, &vault);
+
+        let (_, prompt) = only_prompt(&dispatch_in(
+            &mut env,
+            &GhostkeyRequest::ExportGhostKey { fingerprint: fp },
+            &vault,
+        ));
+        assert!(
+            prompt.contains("recovering"),
+            "the dialog also fires during the vault's own recovery sweep, and must say so: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Only allow this if you just asked for a backup"),
+            "that wording instructs a deny in the case where denying loses the keys: {prompt}"
+        );
+    }
+
+    /// A revoke that did not land must never report success.
+    #[test]
+    fn a_revoke_that_cannot_be_written_is_not_reported_as_done() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let app = webapp(0x02);
+        let fp = vault_with_one_key(&mut env, &vault);
+        assert!(permissions::grant_third_party(&mut env, &fp, &app));
+
+        env.fail_next_secret_write();
+        let msgs = dispatch_in(
+            &mut env,
+            &GhostkeyRequest::RevokePermission {
+                fingerprint: fp.clone(),
+                requestor: app.clone(),
+            },
+            &vault,
+        );
+        assert!(
+            matches!(only_response(&msgs), GhostkeyResponse::Error { .. }),
+            "a failed revoke must not answer PermissionRevoked"
+        );
+        assert!(
+            permissions::has_scope(&env, &fp, &app, GhostkeyScope::ReadPublic),
+            "precondition for the assertion above: the grant really is still there"
         );
     }
 

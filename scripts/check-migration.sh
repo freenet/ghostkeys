@@ -114,9 +114,13 @@ echo "OK: all ${#ALL_HASHES[@]} recorded entries are internally consistent."
 # user was actually running -- silently unreachable ghostkeys, which is the
 # failure this whole table exists to prevent.
 #
-# Publishing again on top of that would bake the omission in, so refuse. Only
-# checked when a git tree is available; the CI path passes an explicit base.
-if [ -z "$BASE_LEGACY" ] && git rev-parse --git-dir >/dev/null 2>&1; then
+# Publishing again on top of that would bake the omission in, so refuse.
+#
+# This used to be gated on `[ -z "$BASE_LEGACY" ]`, and check-migration.yml
+# always passes a base -- so the guard against the failure that actually
+# orphans users never ran in CI, only locally. It runs whenever a git tree is
+# available now, which includes the CI checkout.
+if git rev-parse --git-dir >/dev/null 2>&1; then
     # `git diff HEAD`, not plain `git diff`: the latter compares against the
     # index, so `git add`-ing the record and stopping there would slip past
     # this check while leaving it just as uncommitted. Verified by staging one

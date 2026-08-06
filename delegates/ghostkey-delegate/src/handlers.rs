@@ -135,14 +135,6 @@ pub fn handle(
             handle_list_permissions(ctx, &fingerprint, requestor)
         }
 
-        GhostkeyRequest::TestPermissionPrompt { .. } => {
-            // Handled in lib.rs before reaching here; if we get here
-            // it means the user approved the prompt, return success
-            GhostkeyResponse::Error {
-                message: "Test prompt approved".into(),
-            }
-        }
-
         // Required by `#[non_exhaustive]` on GhostkeyRequest so adding new
         // request variants in future ghostkey-common releases is not a
         // breaking change. A delegate built against an older ghostkey-common
@@ -232,7 +224,14 @@ fn handle_import(
     // importer (typically the vault) is the user's agent for this key
     // and gets every scope the delegate enforces, including Admin so it
     // can manage other apps' grants on the user's behalf.
-    permissions::grant_full(ctx, &fp, requestor);
+    if !permissions::grant_full(ctx, &fp, requestor) {
+        // The key material is stored but the importer owns nothing on it.
+        // Reporting success would leave the vault listing a key it cannot
+        // export, sign with, or delete, with no indication why.
+        return GhostkeyResponse::Error {
+            message: "imported the ghostkey but could not record ownership of it".into(),
+        };
+    }
 
     GhostkeyResponse::ImportResult {
         fingerprint: fp,
@@ -333,9 +332,13 @@ fn scoped_presence(slots: &[KeySlot]) -> (usize, usize) {
     let (readable_usable, readable_unusable) = tally_presence(&readable);
     let (total_usable, total_unusable) = tally_presence(&all);
 
-    // The floor is the existence bit, which `NoIdentityAvailable` already
-    // discloses to anyone who asks for a signature, so applying it leaks
-    // nothing new. It has to apply to a caller WITH grants too, not just one
+    // The floor discloses that AN identity exists, and -- via `unusable` --
+    // that at least one is broken. The first bit is already free to anyone who
+    // asks for a signature (`NoIdentityAvailable`); the second is not, and is
+    // the deliberate price of the question this request exists to answer,
+    // since "you have one and it is broken" and "you have none" call for
+    // different things from the app. Nothing beyond those two bits leaks: the
+    // magnitude stays hidden. It has to apply to a caller WITH grants too, not just one
     // without: an app whose single granted key has lost its signing key would
     // otherwise be told `usable: 0` while the user holds healthy keys, and
     // would send someone who already paid off to buy another. More grant must
@@ -525,11 +528,17 @@ fn handle_delete(
     // the scope check -- which is how an export prompt gets raised for
     // something the vault no longer holds.
     ctx.remove_secret(&backed_up_key(fp));
-    permissions::remove_all(ctx, fp);
+    let grants_cleared = permissions::remove_all(ctx, fp);
 
     let mut index = load_index(ctx);
     index.retain(|f| f != fp);
     save_index(ctx, &index);
+
+    if !grants_cleared {
+        return GhostkeyResponse::Error {
+            message: format!("deleted {fp} but could not clear its grants"),
+        };
+    }
 
     logging::info(&format!("Deleted ghostkey {fp}"));
 
@@ -962,6 +971,7 @@ fn handle_export(
 /// `ExportAllGhostKeys`. Used by the export-confirmation prompt so it can tell
 /// the user how many private keys are about to leave the vault, and so a
 /// caller that could extract nothing never gets to raise a dialog at all.
+#[cfg(test)]
 pub(crate) fn exportable_count(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> usize {
     exportable_keys(ctx, requestor).len()
 }
@@ -971,6 +981,24 @@ pub(crate) fn exportable_count(ctx: &dyn DelegateEnv, requestor: &SignatureReque
 /// grants outlive a deleted key, so this is reachable.
 pub(crate) fn has_certificate(ctx: &dyn DelegateEnv, fp: &str) -> bool {
     load_cert(ctx, fp).is_some()
+}
+
+/// What the export confirmation should call each key `requestor` could
+/// extract: the user's label where there is one, else the fingerprint. Same
+/// walk as the export itself, so the dialog cannot name a set the replay does
+/// not produce.
+pub(crate) fn exportable_names(
+    ctx: &dyn DelegateEnv,
+    requestor: &SignatureRequestor,
+) -> Vec<String> {
+    exportable_keys(ctx, requestor)
+        .into_iter()
+        .map(|key| {
+            key.label
+                .filter(|l| !l.trim().is_empty())
+                .unwrap_or(key.fingerprint)
+        })
+        .collect()
 }
 
 /// Every ghostkey `requestor` can actually extract, fully materialised.
@@ -1058,7 +1086,11 @@ fn handle_grant_permission(
     // share-with-app flows match the `RequestAnyAccess` semantics. A
     // future protocol bump can add a scoped variant for vault UIs that
     // want finer control.
-    permissions::grant_third_party(ctx, fp, target);
+    if !permissions::grant_third_party(ctx, fp, target) {
+        return GhostkeyResponse::Error {
+            message: format!("could not record the grant for {fp}"),
+        };
+    }
 
     GhostkeyResponse::PermissionGranted {
         fingerprint: fp.to_string(),
@@ -1079,7 +1111,13 @@ fn handle_revoke_permission(
         };
     }
 
-    permissions::revoke_all(ctx, fp, target);
+    // A revoke that did not land must never be reported as done: the caller
+    // would believe access was withdrawn while the grant is still there.
+    if !permissions::revoke_all(ctx, fp, target) {
+        return GhostkeyResponse::Error {
+            message: format!("could not revoke access to {fp}; the grant is still in place"),
+        };
+    }
 
     GhostkeyResponse::PermissionRevoked {
         fingerprint: fp.to_string(),
@@ -1150,7 +1188,10 @@ pub(crate) fn seed_ghostkey(
         index.push(fp.clone());
         save_index(ctx, &index);
     }
-    permissions::grant_full(ctx, &fp, owner);
+    assert!(
+        permissions::grant_full(ctx, &fp, owner),
+        "seed grant failed"
+    );
     fp
 }
 
@@ -1183,7 +1224,7 @@ mod tests {
             fps.push(seed_ghostkey(&mut env, &cert, &sk, &vault));
         }
         // The app is allowed to see exactly one of the three.
-        permissions::grant_third_party(&mut env, &fps[1], &app);
+        assert!(permissions::grant_third_party(&mut env, &fps[1], &app));
 
         match handle_has_identity(&env, &app) {
             GhostkeyResponse::IdentityPresence { usable, unusable } => {

@@ -128,6 +128,28 @@ pub(crate) fn attribute_error(err: &ClientError) -> Option<(DelegateKey, Delegat
     }
 }
 
+/// How long the node gives the user to answer a delegate's dialog.
+///
+/// Mirrors `USER_INPUT_TIMEOUT` in freenet-core
+/// (`crates/core/src/contract/user_input.rs`), which is `pub(crate)` there and
+/// so cannot be imported. Pinned by `a_confirmation_outlives_the_node_dialog`
+/// so the relationship below is asserted rather than assumed.
+///
+/// At module level, not inside the wasm-only `mod real`, so the test that
+/// asserts the relationship actually compiles.
+pub(crate) const NODE_USER_INPUT_TIMEOUT_SECS: u64 = 60;
+
+/// Must exceed [`NODE_USER_INPUT_TIMEOUT_SECS`], so the vault is still
+/// listening when the node gives up on the dialog and the delegate answers.
+pub(crate) const USER_CONFIRMATION_TIMEOUT_SECS: u64 = 90;
+
+/// Compile-time gate rather than a test: if this relationship ever inverts,
+/// an approved export arrives with nobody waiting for it, and because replies
+/// are matched by arrival order the private key is handed to whatever call is
+/// next in the queue. A build failure is the right response to that, and a
+/// runtime assertion on two constants is one clippy rightly objects to.
+const _: () = assert!(USER_CONFIRMATION_TIMEOUT_SECS > NODE_USER_INPUT_TIMEOUT_SECS);
+
 // Real implementation: only compiled for WASM without mock features
 #[cfg(all(
     target_family = "wasm",
@@ -135,7 +157,7 @@ pub(crate) fn attribute_error(err: &ClientError) -> Option<(DelegateKey, Delegat
 ))]
 mod real {
     use std::collections::{HashMap, VecDeque};
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
 
     use dioxus::logger::tracing::{error, info, warn};
     use freenet_stdlib::client_api::ClientRequest::DelegateOp;
@@ -275,17 +297,12 @@ mod real {
     ) -> Result<GhostkeyResponse, DelegateCallError> {
         let key = current_delegate_key();
         let timeout = if waits_for_the_user(&request) {
-            USER_CONFIRMATION_TIMEOUT_SECS
+            super::USER_CONFIRMATION_TIMEOUT_SECS
         } else {
             10
         };
         send_to_delegate(&key, request, timeout).await
     }
-
-    /// Longer than freenet-core's `USER_INPUT_TIMEOUT` (60s), so the vault is
-    /// still listening when the node gives up on the dialog and the delegate
-    /// answers.
-    const USER_CONFIRMATION_TIMEOUT_SECS: u64 = 90;
 
     /// Requests the delegate answers only after a user confirmation.
     fn waits_for_the_user(request: &GhostkeyRequest) -> bool {
@@ -295,18 +312,54 @@ mod real {
         )
     }
 
-    /// Send a request to a specific delegate key (for migration).
+    /// One call per delegate key at a time.
     ///
-    /// What the reply-matching actually depends on: the node answers a given
-    /// delegate's requests in the order it received them, and calls to one key
-    /// share a deadline. Concurrent calls on one key DO happen -- the sweep
-    /// runs in the background while the UI stays interactive -- and FIFO
-    /// matching handles that correctly. What it cannot handle is a caller
-    /// giving up, since replies carry no id; mixing deadlines on a single key
-    /// would make that more likely by letting a later call time out first.
-    /// Today the legacy probes (3s) only target legacy keys and `send_request`
-    /// (10s) only the current one, so each key stays homogeneous.
+    /// Replies carry no id and are matched FIFO by `claim_waiter`, so the
+    /// correspondence between a reply and the call it belongs to only holds
+    /// while at most one call is outstanding. That was tolerable when every
+    /// call answered in milliseconds. It is not now: an export waits on a
+    /// human for up to 90s, and any refresh or list issued from the UI in that
+    /// window would have its reply handed to the export's waiter -- and the
+    /// `ExportResult`, which carries `signing_key_pem`, handed to a call site
+    /// that never expected a private key.
+    ///
+    /// Holding this across the whole exchange makes the queue depth one, so
+    /// FIFO cannot mismatch. The cost is that other delegate calls wait behind
+    /// an open dialog, which is the honest behaviour: the vault genuinely is
+    /// waiting for the user.
+    ///
+    /// A real fix for the underlying ambiguity needs request ids on the wire
+    /// (freenet-stdlib carries a standing TODO).
+    /// One in-flight-call lock per delegate key.
+    type CallLock = Arc<futures::lock::Mutex<()>>;
+
+    static CALL_LOCKS: LazyLock<Mutex<HashMap<Vec<u8>, CallLock>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    fn call_lock(key_bytes: &[u8]) -> Option<CallLock> {
+        let mut locks = CALL_LOCKS.lock().ok()?;
+        Some(
+            locks
+                .entry(key_bytes.to_vec())
+                .or_insert_with(|| Arc::new(futures::lock::Mutex::new(())))
+                .clone(),
+        )
+    }
+
+    /// Send a request to a specific delegate key (for migration).
     pub async fn send_to_delegate(
+        delegate_key: &DelegateKey,
+        request: GhostkeyRequest,
+        timeout_secs: u64,
+    ) -> Result<GhostkeyResponse, DelegateCallError> {
+        let key_bytes_for_lock = delegate_key.encode().into_bytes();
+        let lock = call_lock(&key_bytes_for_lock)
+            .ok_or_else(|| DelegateCallError::Transport("call lock poisoned".into()))?;
+        let _guard = lock.lock().await;
+        send_to_delegate_locked(delegate_key, request, timeout_secs).await
+    }
+
+    async fn send_to_delegate_locked(
         delegate_key: &DelegateKey,
         request: GhostkeyRequest,
         timeout_secs: u64,

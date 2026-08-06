@@ -190,8 +190,6 @@ pub enum GhostkeyRequest {
     },
     /// List permissions for a ghostkey.
     ListPermissions { fingerprint: String },
-    /// Debug: force a permission prompt regardless of existing permissions.
-    TestPermissionPrompt { fingerprint: String },
     /// A third-party app asks for any one of the user's ghostkeys. The
     /// delegate emits a user prompt that lets the user pick a key (or
     /// deny). On approval the delegate grants `{ReadPublic, Sign}` to
@@ -217,12 +215,15 @@ pub enum GhostkeyRequest {
     /// user off to buy a ghostkey wants to notice when they come back, and
     /// polling a prompt is not an option.
     ///
-    /// What this discloses without consent is a count. That is more than the
+    /// What this discloses without consent is bounded by scope: a caller
+    /// holding `ReadPublic` on some keys gets the true counts for THOSE, and a
+    /// caller holding nothing gets counts that saturate at one, so it learns
+    /// that an identity exists and that one may be broken, never how many. That is a little more than the
     /// bare existence bit `NoIdentityAvailable` already leaks to anyone who
     /// asks for a signature, and the trade is deliberate: no fingerprints,
-    /// labels or tiers are exposed, a count cannot be correlated across users,
-    /// and the alternative is that the vault cannot tell a half-lost identity
-    /// from a healthy one.
+    /// labels or tiers are exposed, and the alternative is that an app cannot
+    /// tell a half-lost identity from a healthy one, nor "you have none" from
+    /// "I have not been granted access".
     HasIdentity,
     /// Record that the user has exported this identity, so the vault can stop
     /// warning that it is the only copy. Requires `Export` scope, so only the

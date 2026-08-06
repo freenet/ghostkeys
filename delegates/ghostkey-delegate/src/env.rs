@@ -89,6 +89,9 @@ pub struct MemEnv {
     /// runtime), so without a way to reproduce that here the failure branch of
     /// `park_pending` would be unreachable from any test.
     fail_next_context_write: bool,
+    /// Makes the next `set_secret` fail, so the fail-closed paths around
+    /// dropped secret writes (prompt ids, grants, revokes) are reachable.
+    fail_next_secret_write: bool,
 }
 
 #[cfg(test)]
@@ -101,6 +104,11 @@ impl MemEnv {
     pub fn fail_next_context_write(&mut self) {
         self.fail_next_context_write = true;
     }
+
+    /// Arrange for the next `set_secret` to fail.
+    pub fn fail_next_secret_write(&mut self) {
+        self.fail_next_secret_write = true;
+    }
 }
 
 #[cfg(test)]
@@ -110,6 +118,9 @@ impl DelegateEnv for MemEnv {
     }
 
     fn set_secret(&mut self, key: &[u8], value: &[u8]) -> bool {
+        if std::mem::take(&mut self.fail_next_secret_write) {
+            return false;
+        }
         self.secrets.insert(key.to_vec(), value.to_vec());
         true
     }

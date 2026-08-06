@@ -61,9 +61,19 @@ fn load(ctx: &dyn DelegateEnv, fingerprint: &str) -> Vec<GrantEntry> {
     }
 }
 
-fn save(ctx: &mut dyn DelegateEnv, fingerprint: &str, grants: &[GrantEntry]) {
-    if let Ok(bytes) = to_cbor(&grants.to_vec()) {
-        ctx.set_secret(&perm_key(fingerprint), &bytes);
+/// Persist a grant list. Returns whether it actually landed.
+///
+/// The result is not decorative: a dropped write on the revoke path means the
+/// caller is told access was revoked while it still holds it, which is the one
+/// direction a permissions bug must never fail in.
+#[must_use]
+fn save(ctx: &mut dyn DelegateEnv, fingerprint: &str, grants: &[GrantEntry]) -> bool {
+    match to_cbor(&grants.to_vec()) {
+        Ok(bytes) => ctx.set_secret(&perm_key(fingerprint), &bytes),
+        Err(e) => {
+            logging::info(&format!("Failed to encode grants for {fingerprint}: {e}"));
+            false
+        }
     }
 }
 
@@ -146,43 +156,56 @@ pub fn has_scope(
 
 /// Add `scopes` to the grant for `requestor` on `fingerprint`. Creates the
 /// grant entry if the requestor has none yet.
+#[must_use]
 pub fn grant_scopes(
     ctx: &mut dyn DelegateEnv,
     fingerprint: &str,
     requestor: &SignatureRequestor,
     scopes: BTreeSet<GhostkeyScope>,
-) {
+) -> bool {
     let grants = with_grant(load(ctx, fingerprint), requestor, scopes);
-    save(ctx, fingerprint, &grants);
+    save(ctx, fingerprint, &grants)
 }
 
 /// Grant the full scope set. Called from `handle_import` so the vault
 /// (the importer) has complete authority over the ghostkey it brought in.
-pub fn grant_full(ctx: &mut dyn DelegateEnv, fingerprint: &str, requestor: &SignatureRequestor) {
-    grant_scopes(ctx, fingerprint, requestor, full_scope_set());
+#[must_use]
+pub fn grant_full(
+    ctx: &mut dyn DelegateEnv,
+    fingerprint: &str,
+    requestor: &SignatureRequestor,
+) -> bool {
+    grant_scopes(ctx, fingerprint, requestor, full_scope_set())
 }
 
 /// Grant the third-party scope set. Called from the `RequestAnyAccess`
 /// approval path.
+#[must_use]
 pub fn grant_third_party(
     ctx: &mut dyn DelegateEnv,
     fingerprint: &str,
     requestor: &SignatureRequestor,
-) {
-    grant_scopes(ctx, fingerprint, requestor, third_party_scope_set());
+) -> bool {
+    grant_scopes(ctx, fingerprint, requestor, third_party_scope_set())
 }
 
 /// Remove every grant `requestor` holds on `fingerprint`.
-pub fn revoke_all(ctx: &mut dyn DelegateEnv, fingerprint: &str, requestor: &SignatureRequestor) {
+#[must_use]
+pub fn revoke_all(
+    ctx: &mut dyn DelegateEnv,
+    fingerprint: &str,
+    requestor: &SignatureRequestor,
+) -> bool {
     let grants = without_grants_for(load(ctx, fingerprint), requestor);
-    save(ctx, fingerprint, &grants);
+    save(ctx, fingerprint, &grants)
 }
 
 /// Drop every grant on `fingerprint`, for every requestor. Called when the
 /// ghostkey itself is deleted: a grant that outlives its key would be
 /// inherited by whatever is imported under that fingerprint next.
-pub fn remove_all(ctx: &mut dyn DelegateEnv, fingerprint: &str) {
-    ctx.remove_secret(&perm_key(fingerprint));
+#[must_use]
+pub fn remove_all(ctx: &mut dyn DelegateEnv, fingerprint: &str) -> bool {
+    ctx.remove_secret(&perm_key(fingerprint))
 }
 
 /// List the requestors that hold any grant on `fingerprint`. Preserves

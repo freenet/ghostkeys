@@ -59,6 +59,21 @@ pub(crate) struct MigrationOutcome {
     pub answered_with_error: usize,
     /// Keys a legacy delegate handed over that would not re-import.
     pub failed_imports: usize,
+    /// Legacy delegates that said they hold identities and then handed over
+    /// nothing. Positive evidence of keys we cannot reach: reachable whenever
+    /// the holder granted `Export` to somebody other than this vault, since
+    /// importing needs no scope and grants the importer. Silence about this
+    /// would be a clean-sweep report over keys that are gone for good.
+    pub present_but_unexportable: usize,
+    /// Legacy delegates that said they hold identities and then did not answer
+    /// the export at all. NOT the ordinary silence of a delegate the node does
+    /// not have -- this one already spoke -- so it is worth telling the user
+    /// about, typically a dialog they missed.
+    pub present_but_silent: usize,
+    /// Legacy delegates the node reports it does not have. Ordinary and
+    /// expected, but nothing ever re-registers legacy code, so if one of these
+    /// does hold keys they are unreachable permanently.
+    pub not_registered: usize,
 }
 
 impl MigrationOutcome {
@@ -66,7 +81,12 @@ impl MigrationOutcome {
     /// re-imported. Purely a reporting distinction -- the sweep runs again on
     /// the next startup either way.
     pub(crate) fn is_conclusive(&self) -> bool {
-        self.undetermined == 0 && self.answered_with_error == 0 && self.failed_imports == 0
+        self.undetermined == 0
+            && self.answered_with_error == 0
+            && self.failed_imports == 0
+            && self.present_but_unexportable == 0
+            && self.present_but_silent == 0
+            && self.not_registered == 0
     }
 
     /// Whether the user needs telling.
@@ -85,14 +105,31 @@ impl MigrationOutcome {
     /// recoverable that was not recovered, it is rare, and the user can act on
     /// it by re-importing from their backup.
     pub(crate) fn needs_user_attention(&self) -> bool {
-        self.failed_imports > 0 || self.answered_with_error > 0
+        self.failed_imports > 0
+            || self.answered_with_error > 0
+            // Both of these are a delegate that SAID it holds identities and
+            // then did not hand them over. That is not the ordinary silence of
+            // a delegate the node lacks, it is the shape of a user whose keys
+            // did not come across, and it is the case a clean-looking sweep
+            // would otherwise hide.
+            || self.present_but_unexportable > 0
+            || self.present_but_silent > 0
     }
 
-    pub(crate) fn record_probe(&mut self, verdict: &ProbeVerdict) {
+    /// Record a probe verdict. `had_presence` says whether the delegate had
+    /// already told us it holds identities, which is what separates "did not
+    /// answer, like the ten others that are not installed" from "said it had
+    /// keys and then went quiet".
+    pub(crate) fn record_probe(&mut self, verdict: &ProbeVerdict, had_presence: bool) {
         match verdict {
+            ProbeVerdict::Undetermined(_) if had_presence => self.present_but_silent += 1,
             ProbeVerdict::Undetermined(_) => self.undetermined += 1,
             ProbeVerdict::AnsweredWithError(_) => self.answered_with_error += 1,
-            ProbeVerdict::Exported(_) | ProbeVerdict::Skipped => {}
+            ProbeVerdict::Exported(keys) if had_presence && keys.is_empty() => {
+                self.present_but_unexportable += 1
+            }
+            ProbeVerdict::Exported(_) => {}
+            ProbeVerdict::Skipped => self.not_registered += 1,
         }
     }
 
@@ -180,12 +217,98 @@ pub(crate) fn classify(
     }
 }
 
+/// What the cheap, never-prompting presence question established.
+///
+/// Deliberately at module level rather than inside the wasm-only `mod real`.
+/// The comment on `classify` above records that burying exactly this kind of
+/// judgement in there once made a key-losing decision reachable by no test at
+/// all; putting the next one back would repeat it.
+/// No `Debug`/`PartialEq`: `NoAnswer` wraps a `ProbeVerdict`, which carries
+/// `ExportedGhostKey` and therefore private signing keys. Tests compare
+/// [`PresenceVerdict::kind`] instead, which is secret-free by construction.
+pub(crate) enum PresenceVerdict {
+    /// The delegate answered and holds nothing. Skip it without asking for
+    /// keys, so no private-key dialog is raised for an empty predecessor.
+    Empty,
+    /// It answered and holds identities. Ask for the keys, and treat a later
+    /// silence or empty answer as evidence rather than as routine absence.
+    HoldsKeys,
+    /// It answered in a way that does not settle the question -- an older
+    /// delegate that does not know `HasIdentity` replies with an error, which
+    /// is not "empty". Ask for the keys, but do not claim it had any.
+    Unsettled,
+    /// No answer, or a local failure. Carries the verdict to record.
+    NoAnswer(ProbeVerdict),
+}
+
+/// The secret-free discriminant of a [`PresenceVerdict`], for assertions.
+///
+/// Test-only: the shipped code matches on `PresenceVerdict` itself. This
+/// exists because that type cannot derive `PartialEq`/`Debug` without exposing
+/// the private keys `ProbeVerdict` carries.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum PresenceKind {
+    Empty,
+    HoldsKeys,
+    Unsettled,
+    /// The node has no such delegate. Terminal: nothing re-registers legacy
+    /// code, so keys under it stay unreachable.
+    NotRegistered,
+    /// Silence or a local failure.
+    NoReply,
+}
+
+#[cfg(test)]
+impl PresenceVerdict {
+    pub(crate) fn kind(&self) -> PresenceKind {
+        match self {
+            PresenceVerdict::Empty => PresenceKind::Empty,
+            PresenceVerdict::HoldsKeys => PresenceKind::HoldsKeys,
+            PresenceVerdict::Unsettled => PresenceKind::Unsettled,
+            PresenceVerdict::NoAnswer(ProbeVerdict::Skipped) => PresenceKind::NotRegistered,
+            PresenceVerdict::NoAnswer(_) => PresenceKind::NoReply,
+        }
+    }
+}
+
+/// Decide what one presence reply means. Pure, so it is testable off wasm.
+pub(crate) fn classify_presence(
+    reply: Result<ghostkey_common::GhostkeyResponse, crate::api::delegate::DelegateCallError>,
+) -> PresenceVerdict {
+    use crate::api::delegate::DelegateCallError;
+    use ghostkey_common::GhostkeyResponse;
+
+    match reply {
+        Ok(GhostkeyResponse::IdentityPresence { usable, unusable }) => {
+            if usable == 0 && unusable == 0 {
+                PresenceVerdict::Empty
+            } else {
+                PresenceVerdict::HoldsKeys
+            }
+        }
+        // Same reading as `classify`: not registered is a fast skip, and it is
+        // counted rather than ignored because nothing ever re-registers legacy
+        // code, so keys under it are unreachable for good.
+        Err(DelegateCallError::NotRegistered) => PresenceVerdict::NoAnswer(ProbeVerdict::Skipped),
+        Err(DelegateCallError::TimedOut) => {
+            PresenceVerdict::NoAnswer(ProbeVerdict::Undetermined("no reply".into()))
+        }
+        Err(DelegateCallError::Transport(reason)) => {
+            PresenceVerdict::NoAnswer(ProbeVerdict::Undetermined(reason))
+        }
+        // A delegate-level failure, or any other reply, has not told us it is
+        // empty. Ask for the keys.
+        _ => PresenceVerdict::Unsettled,
+    }
+}
+
 /// Recover ghostkeys stored under earlier delegate versions.
 ///
 /// `already_held` is the set of fingerprints the current delegate already has,
 /// so a key present in both is neither re-imported nor reported as recovered
 /// on every startup.
-pub async fn try_migrate(already_held: Vec<String>) {
+pub async fn try_migrate(already_held: Option<Vec<String>>) {
     #[cfg(all(
         target_family = "wasm",
         not(any(feature = "no-sync", feature = "example-data"))
@@ -234,19 +357,21 @@ mod real {
     ///
     /// This one CAN involve a human. A delegate from this version onward
     /// requires a fresh user confirmation before it hands over private keys,
-    /// so the reply arrives only after the user answers a dialog. The node
-    /// gives them 60s (freenet-core's `USER_INPUT_TIMEOUT`); waiting less than
-    /// that here would abandon the call while the dialog is still on screen,
-    /// and the recovered keys would arrive with nobody waiting for them.
+    /// so the reply arrives only after the user answers a dialog. Waiting less
+    /// than the node's own dialog timeout would abandon the call while the
+    /// dialog is still on screen, and the recovered keys would arrive with
+    /// nobody waiting for them.
     ///
-    /// It is safe to mix with the 3s probe on the same delegate key even
-    /// though replies are matched FIFO, because the export is only ever sent
-    /// AFTER the probe has been answered -- so there is never an abandoned
-    /// waiter on that key for the export's reply to be mis-delivered to.
-    const LEGACY_EXPORT_TIMEOUT_SECS: u64 = 90;
+    /// One constant, shared with the current-delegate export path, so the two
+    /// cannot drift.
+    const LEGACY_EXPORT_TIMEOUT_SECS: u64 = api::delegate::USER_CONFIRMATION_TIMEOUT_SECS;
 
-    pub(super) async fn run(already_held: Vec<String>) {
+    pub(super) async fn run(already_held: Option<Vec<String>>) {
         if LEGACY_DELEGATES.is_empty() {
+            // Not reachable in a normal build -- `build.rs` fails rather than
+            // emit an empty table -- but if it ever were, silence would mean
+            // migration had turned itself off with no signal anywhere.
+            warn!("No legacy delegates compiled in; skipping the recovery sweep");
             return;
         }
 
@@ -255,12 +380,21 @@ mod real {
             LEGACY_DELEGATES.len()
         );
 
-        let outcome = run_pass(already_held.into_iter().collect()).await;
+        let known_held = already_held.is_some();
+        let outcome = run_pass(
+            already_held.unwrap_or_default().into_iter().collect(),
+            known_held,
+        )
+        .await;
         report(&outcome);
     }
 
     /// One sweep of the legacy delegate table.
-    async fn run_pass(mut held: BTreeSet<String>) -> MigrationOutcome {
+    /// `known_held` records whether `held` is trustworthy. When the current
+    /// delegate could not be listed, every key looks new: the sweep would
+    /// announce a recovery that did not happen and overwrite user-chosen
+    /// labels with legacy ones.
+    async fn run_pass(mut held: BTreeSet<String>, known_held: bool) -> MigrationOutcome {
         let current_key = api::delegate::get_current_delegate_key();
         let mut outcome = MigrationOutcome::default();
 
@@ -285,20 +419,26 @@ mod real {
             // to know the request answers with an error rather than silence,
             // which is not "nothing to recover" -- so anything other than a
             // definite empty answer falls through to the export.
-            match presence_probe(&legacy_key).await {
-                PresenceProbe::Empty => continue,
-                PresenceProbe::Silent(verdict) => {
-                    outcome.record_probe(&verdict);
-                    if let ProbeVerdict::Undetermined(reason) = verdict {
-                        info!(
+            let had_presence = match presence_probe(&legacy_key).await {
+                super::PresenceVerdict::Empty => continue,
+                super::PresenceVerdict::NoAnswer(verdict) => {
+                    outcome.record_probe(&verdict, false);
+                    match &verdict {
+                        ProbeVerdict::Undetermined(reason) => info!(
                             "Legacy delegate {} did not answer ({reason})",
                             legacy_key.encode()
-                        );
+                        ),
+                        ProbeVerdict::Skipped => info!(
+                            "Legacy delegate {} is not registered on this node",
+                            legacy_key.encode()
+                        ),
+                        _ => {}
                     }
                     continue;
                 }
-                PresenceProbe::MayHoldKeys => {}
-            }
+                super::PresenceVerdict::HoldsKeys => true,
+                super::PresenceVerdict::Unsettled => false,
+            };
 
             let verdict = super::classify(
                 api::delegate::send_to_delegate(
@@ -308,7 +448,7 @@ mod real {
                 )
                 .await,
             );
-            outcome.record_probe(&verdict);
+            outcome.record_probe(&verdict, had_presence);
 
             let exported = match verdict {
                 ProbeVerdict::Exported(keys) => keys,
@@ -329,6 +469,7 @@ mod real {
                 }
             };
 
+            let mut from_this_one: BTreeSet<String> = BTreeSet::new();
             for key in &exported {
                 // Import even a fingerprint the current delegate already
                 // lists. `ListGhostKeys` reports a key whenever its
@@ -342,7 +483,7 @@ mod real {
                 // What must NOT repeat is the announcing: counting it as a
                 // recovery, or restoring the legacy label over a name the user
                 // has since chosen.
-                let already_held = held.contains(&key.fingerprint);
+                let already_held = !known_held || held.contains(&key.fingerprint);
 
                 match api::delegate::send_request(GhostkeyRequest::ImportGhostKey {
                     certificate_pem: key.certificate_pem.clone(),
@@ -355,6 +496,7 @@ mod real {
                         notary_info,
                     }) => {
                         held.insert(fingerprint.clone());
+                        from_this_one.insert(fingerprint.clone());
                         ghostkey_list::add_ghostkey(GhostKeyInfo {
                             fingerprint: fingerprint.clone(),
                             label: key.label.clone(),
@@ -434,50 +576,15 @@ mod real {
         outcome
     }
 
-    /// What the cheap, never-prompting presence question established.
-    enum PresenceProbe {
-        /// The delegate answered and holds nothing. Skip it without asking for
-        /// keys, so no dialog is raised for an empty predecessor.
-        Empty,
-        /// No answer, or a local failure. Carries the verdict to record.
-        Silent(ProbeVerdict),
-        /// It answered with keys, or answered in a way that does not settle the
-        /// question (an older delegate that does not know `HasIdentity`). Ask
-        /// for the keys.
-        MayHoldKeys,
-    }
-
-    async fn presence_probe(legacy_key: &DelegateKey) -> PresenceProbe {
-        use crate::api::delegate::DelegateCallError;
-
-        match api::delegate::send_to_delegate(
-            legacy_key,
-            GhostkeyRequest::HasIdentity,
-            LEGACY_PROBE_TIMEOUT_SECS,
+    async fn presence_probe(legacy_key: &DelegateKey) -> super::PresenceVerdict {
+        super::classify_presence(
+            api::delegate::send_to_delegate(
+                legacy_key,
+                GhostkeyRequest::HasIdentity,
+                LEGACY_PROBE_TIMEOUT_SECS,
+            )
+            .await,
         )
-        .await
-        {
-            Ok(GhostkeyResponse::IdentityPresence { usable, unusable }) => {
-                if usable == 0 && unusable == 0 {
-                    PresenceProbe::Empty
-                } else {
-                    PresenceProbe::MayHoldKeys
-                }
-            }
-            // Same reading as `classify`: not registered is a fast skip and is
-            // counted as neither an error nor undetermined.
-            Err(DelegateCallError::NotRegistered) => PresenceProbe::Silent(ProbeVerdict::Skipped),
-            Err(DelegateCallError::TimedOut) => {
-                PresenceProbe::Silent(ProbeVerdict::Undetermined("no reply".into()))
-            }
-            Err(DelegateCallError::Transport(reason)) => {
-                PresenceProbe::Silent(ProbeVerdict::Undetermined(reason))
-            }
-            // A delegate that answered *something* else -- including "unsupported
-            // request variant" from a version predating `HasIdentity` -- has not
-            // told us it is empty. Ask for the keys.
-            _ => PresenceProbe::MayHoldKeys,
-        }
     }
 
     fn report(outcome: &MigrationOutcome) {
@@ -533,9 +640,140 @@ mod tests {
         MigrationOutcome {
             recovered,
             undetermined,
-            answered_with_error: 0,
             failed_imports,
+            ..MigrationOutcome::default()
         }
+    }
+
+    /// An empty predecessor is skipped without asking for keys. This is what
+    /// keeps the private-key dialog from firing on every vault open for the
+    /// legacy entries that hold nothing.
+    #[test]
+    fn an_empty_predecessor_is_skipped() {
+        assert_eq!(
+            classify_presence(Ok(GhostkeyResponse::IdentityPresence {
+                usable: 0,
+                unusable: 0
+            }))
+            .kind(),
+            PresenceKind::Empty
+        );
+    }
+
+    #[test]
+    fn a_predecessor_holding_keys_is_asked_for_them() {
+        for (usable, unusable) in [(1, 0), (0, 1), (3, 2)] {
+            assert_eq!(
+                classify_presence(Ok(GhostkeyResponse::IdentityPresence { usable, unusable }))
+                    .kind(),
+                PresenceKind::HoldsKeys,
+                "({usable}, {unusable}) must be treated as holding keys"
+            );
+        }
+    }
+
+    /// A delegate too old to know `HasIdentity` answers with an error. That is
+    /// NOT "empty" -- treating it as empty would skip a predecessor that holds
+    /// every key the user has, which is the whole population being migrated
+    /// from today.
+    #[test]
+    fn a_delegate_that_does_not_know_the_question_is_still_asked_for_keys() {
+        assert_eq!(
+            classify_presence(Ok(GhostkeyResponse::Error {
+                message: "Unsupported request variant for this delegate version".into()
+            }))
+            .kind(),
+            PresenceKind::Unsettled
+        );
+        assert_eq!(
+            classify_presence(Ok(GhostkeyResponse::NoIdentityAvailable)).kind(),
+            PresenceKind::Unsettled
+        );
+    }
+
+    /// Silence must not raise a dialog, and must not be mistaken for empty.
+    #[test]
+    fn silence_does_not_lead_to_an_export_attempt() {
+        assert_eq!(
+            classify_presence(Err(DelegateCallError::TimedOut)).kind(),
+            PresenceKind::NoReply
+        );
+        assert_eq!(
+            classify_presence(Err(DelegateCallError::Transport("socket".into()))).kind(),
+            PresenceKind::NoReply
+        );
+    }
+
+    /// A delegate the node does not have is terminal, not transient: nothing
+    /// re-registers legacy code. It is counted so a sweep that passed over one
+    /// cannot call itself conclusive.
+    #[test]
+    fn an_unregistered_predecessor_is_counted_not_ignored() {
+        assert_eq!(
+            classify_presence(Err(DelegateCallError::NotRegistered)).kind(),
+            PresenceKind::NotRegistered
+        );
+
+        let mut o = MigrationOutcome::default();
+        o.record_probe(&ProbeVerdict::Skipped, false);
+        assert_eq!(o.not_registered, 1);
+        assert!(
+            !o.is_conclusive(),
+            "a skipped predecessor is not a clean sweep"
+        );
+    }
+
+    /// A predecessor that SAID it holds identities and then handed over
+    /// nothing is positive evidence of keys we cannot reach. Reachable
+    /// whenever some other app imported the key, since importing needs no
+    /// scope and grants the importer.
+    #[test]
+    fn present_but_unexportable_is_surfaced() {
+        let mut o = MigrationOutcome::default();
+        o.record_probe(&ProbeVerdict::Exported(Vec::new()), true);
+        assert_eq!(o.present_but_unexportable, 1);
+        assert!(!o.is_conclusive());
+        assert!(
+            o.needs_user_attention(),
+            "keys that exist and cannot be recovered must not be reported as a clean sweep"
+        );
+    }
+
+    /// Presence positive followed by silence is not the ordinary absence case
+    /// -- this delegate already spoke -- so it must not be bucketed with it.
+    #[test]
+    fn present_then_silent_is_not_ordinary_absence() {
+        let mut o = MigrationOutcome::default();
+        o.record_probe(&ProbeVerdict::Undetermined("no reply".into()), true);
+        assert_eq!(o.present_but_silent, 1);
+        assert_eq!(o.undetermined, 0, "must not be filed as routine silence");
+        assert!(o.needs_user_attention());
+
+        let mut ordinary = MigrationOutcome::default();
+        ordinary.record_probe(&ProbeVerdict::Undetermined("no reply".into()), false);
+        assert_eq!(ordinary.undetermined, 1);
+        assert!(
+            !ordinary.needs_user_attention(),
+            "a delegate the node lacks is the normal case and must stay quiet"
+        );
+    }
+
+    /// An export that produced keys is unremarkable whether or not presence
+    /// was reported.
+    #[test]
+    fn a_successful_export_is_not_flagged() {
+        let mut o = MigrationOutcome::default();
+        o.record_probe(
+            &ProbeVerdict::Exported(vec![ghostkey_common::ExportedGhostKey {
+                fingerprint: "fp".into(),
+                certificate_pem: String::new(),
+                signing_key_pem: String::new(),
+                label: None,
+                notary_info: String::new(),
+            }]),
+            true,
+        );
+        assert!(o.is_conclusive());
     }
 
     #[test]
@@ -659,7 +897,7 @@ mod tests {
         assert!(matches!(verdict, ProbeVerdict::AnsweredWithError(_)));
 
         let mut o = MigrationOutcome::default();
-        o.record_probe(&verdict);
+        o.record_probe(&verdict, false);
         assert!(
             o.needs_user_attention(),
             "an answered failure is reportable"
@@ -673,7 +911,7 @@ mod tests {
     fn a_missing_secret_reaches_the_user() {
         let verdict = classify(Err(DelegateCallError::Failed("missing secret".into())));
         let mut o = MigrationOutcome::default();
-        o.record_probe(&verdict);
+        o.record_probe(&verdict, false);
         assert!(o.needs_user_attention());
     }
 
@@ -705,16 +943,16 @@ mod tests {
     #[test]
     fn only_undetermined_probes_count_as_undetermined() {
         let mut o = MigrationOutcome::default();
-        o.record_probe(&ProbeVerdict::Exported(Vec::new()));
-        o.record_probe(&ProbeVerdict::Skipped);
+        o.record_probe(&ProbeVerdict::Exported(Vec::new()), false);
+        o.record_probe(&ProbeVerdict::Skipped, false);
         assert_eq!(o.undetermined, 0);
 
-        o.record_probe(&ProbeVerdict::Undetermined("no answer".into()));
+        o.record_probe(&ProbeVerdict::Undetermined("no answer".into()), false);
         assert_eq!(o.undetermined, 1);
         assert_eq!(o.answered_with_error, 0);
         assert!(!o.needs_user_attention(), "counted, but not user-facing");
 
-        o.record_probe(&ProbeVerdict::AnsweredWithError("refused".into()));
+        o.record_probe(&ProbeVerdict::AnsweredWithError("refused".into()), false);
         assert_eq!(o.undetermined, 1, "silence and failures stay separate");
         assert_eq!(o.answered_with_error, 1);
         assert!(o.needs_user_attention());

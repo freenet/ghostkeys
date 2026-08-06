@@ -1,6 +1,11 @@
 #!/bin/bash
 # Append the just-published delegate WASM's hash to legacy_delegates.toml if
-# not already present, and commit the change.
+# not already present.
+#
+# It does NOT commit: it prints a reminder. The header used to claim otherwise,
+# which is how an append sat uncommitted on 2026-08-03 while the delegate it
+# named was live. `check-migration.sh` now refuses to pass while the file is
+# dirty, in CI as well as locally, so the reminder has a guard behind it.
 #
 # Called automatically by `cargo make publish-ghostkeys` after a successful
 # publish, so every deployed hash is recorded as the new baseline and the
