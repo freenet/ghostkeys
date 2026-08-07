@@ -172,6 +172,12 @@ fn export_one(fingerprint: String, mut on_downloaded: Signal<Option<String>>) {
                     toast::show("Could not save the backup file", ToastKind::Error);
                 }
             }
+            // The user was asked to confirm and said no (or the dialog expired).
+            // That is a decision, not a fault, so it must not read like one.
+            Ok(GhostkeyResponse::PermissionDenied { .. })
+            | Ok(GhostkeyResponse::AccessDenied { .. }) => {
+                toast::show("Backup cancelled", ToastKind::Info);
+            }
             Ok(GhostkeyResponse::Error { message }) => {
                 toast::show(format!("Backup failed: {message}"), ToastKind::Error);
             }
@@ -217,53 +223,26 @@ fn export_all() {
                     toast::show("Could not save the backup file", ToastKind::Error);
                 }
             }
+            Ok(GhostkeyResponse::PermissionDenied { .. })
+            | Ok(GhostkeyResponse::AccessDenied { .. }) => {
+                toast::show("Export cancelled", ToastKind::Info);
+            }
             Ok(GhostkeyResponse::Error { message }) => {
                 toast::show(format!("Export failed: {message}"), ToastKind::Error);
             }
             Err(e) => {
                 toast::show(format!("Export failed: {e}"), ToastKind::Error);
             }
-            _ => {}
-        }
-    });
-}
-
-fn test_permission_prompt() {
-    spawn(async {
-        use super::toast::{self, ToastKind};
-
-        let keys = GHOSTKEYS.read();
-        let fp = match keys.first() {
-            Some(k) => k.fingerprint.clone(),
-            None => {
-                toast::show("No ghostkeys to test with", ToastKind::Error);
-                return;
-            }
-        };
-        drop(keys);
-
-        toast::show("Sending test prompt request...", ToastKind::Info);
-
-        let result = crate::api::delegate::send_request(GhostkeyRequest::TestPermissionPrompt {
-            fingerprint: fp,
-        })
-        .await;
-
-        match result {
-            Ok(GhostkeyResponse::PermissionDenied { .. }) => {
-                toast::show("Permission denied by user", ToastKind::Info);
-            }
-            Ok(GhostkeyResponse::Error { message }) if message == "Test prompt approved" => {
-                toast::show("Permission prompt approved!", ToastKind::Success);
-            }
-            Ok(GhostkeyResponse::Error { message }) => {
-                toast::show(format!("Error: {message}"), ToastKind::Error);
-            }
-            Err(e) => {
-                toast::show(format!("Request failed: {e}"), ToastKind::Error);
-            }
-            _ => {
-                toast::show("Unexpected response", ToastKind::Info);
+            // Previously a silent `_ => {}`: a denial or an unexpected reply
+            // left the user looking at a button that did nothing.
+            Ok(other) => {
+                toast::show(
+                    format!(
+                        "Export failed: unexpected response {}",
+                        crate::api::delegate::response_kind(&other)
+                    ),
+                    ToastKind::Error,
+                );
             }
         }
     });
@@ -372,12 +351,6 @@ pub fn GhostKeyList() -> Element {
                     span { class: "key-count", "{keys.len()}" }
                 }
                 div { class: "header-actions",
-                    button {
-                        class: "action-btn",
-                        style: "color: var(--warning); border-color: var(--warning);",
-                        onclick: move |_| test_permission_prompt(),
-                        "Test Prompt"
-                    }
                     button {
                         class: "action-btn",
                         onclick: move |_| export_all(),

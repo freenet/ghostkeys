@@ -45,16 +45,13 @@ fn generate_legacy_delegates() {
     let toml_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../legacy_delegates.toml");
     let content = match fs::read_to_string(toml_path) {
         Ok(c) => c,
-        Err(_) => {
-            // No legacy delegates file, generate empty const
-            let out_dir = std::env::var("OUT_DIR").unwrap();
-            fs::write(
-                format!("{out_dir}/legacy_delegates.rs"),
-                "pub const LEGACY_DELEGATES: &[([u8; 32], [u8; 32])] = &[];\n",
-            )
-            .unwrap();
-            return;
-        }
+        // Fail the build rather than emit an empty table. An empty table
+        // silently disables migration: the sweep finds no entries, returns
+        // immediately, and every user's ghostkeys stay stranded under the
+        // previous delegate with nothing logged anywhere. A missing or
+        // unreadable table is a broken checkout, not a valid "no predecessors"
+        // state -- that state is an EMPTY file, which parses fine below.
+        Err(e) => panic!("cannot read {toml_path}: {e}. Migration would be silently disabled."),
     };
 
     let mut entries = Vec::new();

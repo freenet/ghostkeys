@@ -13,6 +13,13 @@ on:
       # user's data". Without it, a toolchain-bump-only PR re-keys the
       # delegate and skips this guard entirely.
       - 'rust-toolchain.toml'
+      # Both of these change the emitted WASM bytes, and therefore the
+      # delegate key, without touching any path above: the build script sets
+      # the registry remap that keeps the key machine-independent, and cargo
+      # config carries flags and the target dir. Omitting them let a re-key
+      # skip this guard for the same reason rust-toolchain.toml did.
+      - '.cargo/config.toml'
+      - 'scripts/build-delegate.sh'
       # The guard's main job is catching a PR that drops a recorded entry, and
       # a PR can drop one by editing nothing but this file.
       - 'legacy_delegates.toml'

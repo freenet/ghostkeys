@@ -17,7 +17,6 @@ use crate::components::toast::{self, ToastKind};
 pub struct PendingImport {
     certificate_pem: String,
     signing_key_pem: String,
-    master_verifying_key_pem: Option<String>,
     /// Where the user was before they went off to buy this key, as a validated
     /// contract instance id. Offering the trip back is the whole point of the
     /// round trip being tolerable.
@@ -32,7 +31,6 @@ pub struct PendingImport {
 /// Parse an import payload out of the URL hash, if there is one.
 ///
 /// Fragment format: `#import=<base64_cert>.<base64_sk>`
-/// Optional master key: `#import=<base64_cert>.<base64_sk>.<base64_master_vk>`
 /// Optional return target: `...&return_to=<base58_contract_key>`
 /// Optional return route:  `...&return_path=<percent-encoded relative suffix>`
 ///
@@ -92,18 +90,19 @@ fn parse_fragment(hash: &str) -> Option<PendingImport> {
         return reject("the signing key could not be decoded");
     };
 
-    let master_verifying_key_pem = parts.get(2).copied().and_then(|part| {
-        let decoded = decode_base64(part);
-        if decoded.is_none() {
-            warn!("Could not decode master verifying key from URL, using the default");
-        }
-        decoded
-    });
+    // A third part used to be a master verifying key that the delegate would
+    // trust in place of Freenet's own -- i.e. a link could tell the vault
+    // which trust root to believe. It is ignored now, and the delegate has no
+    // field to carry it: a certificate that only verifies under some other
+    // master key is a certificate the vault should refuse. Links are still
+    // accepted so an older purchase link keeps importing its (genuine) key.
+    if parts.len() == 3 {
+        warn!("Ignoring the master-verifying-key part of this import link: the certificate is always checked against Freenet's master key");
+    }
 
     Some(PendingImport {
         certificate_pem,
         signing_key_pem,
-        master_verifying_key_pem,
         return_to,
         return_path,
     })
@@ -300,7 +299,6 @@ pub async fn import(pending: PendingImport) {
     let result = api::delegate::send_request(GhostkeyRequest::ImportGhostKey {
         certificate_pem: pending.certificate_pem,
         signing_key_pem: pending.signing_key_pem,
-        master_verifying_key_pem: pending.master_verifying_key_pem,
     })
     .await;
 

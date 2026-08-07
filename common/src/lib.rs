@@ -120,12 +120,25 @@ pub struct ExportedGhostKey {
 #[non_exhaustive]
 pub enum GhostkeyRequest {
     /// Import a ghostkey from PEM-armored certificate and signing key.
-    /// If master_verifying_key_pem is None, uses the hardcoded Freenet master key.
+    ///
+    /// The certificate chain is always verified against the Freenet master
+    /// key compiled into the delegate. There is deliberately no way for a
+    /// caller to name a different trust root: this variant used to carry a
+    /// `master_verifying_key_pem` override marked "for testing", and which
+    /// authority a stored identity is checked against is not a caller's
+    /// decision to make. A test convenience does not belong on a production
+    /// wire type; tests seed the vault directly instead.
+    ///
+    /// Removing the field is wire-compatible in both directions: CBOR struct
+    /// variants are maps with named keys and nothing here sets
+    /// `deny_unknown_fields`, so an older caller that still sends the field
+    /// decodes fine (the value is ignored), and a newer caller that omits it
+    /// decodes fine against an older delegate (the field was `Option` with
+    /// `#[serde(default)]`). Pinned by `import_request_has_no_trust_root_field`
+    /// and `legacy_import_payload_still_decodes`.
     ImportGhostKey {
         certificate_pem: String,
         signing_key_pem: String,
-        #[serde(default)]
-        master_verifying_key_pem: Option<String>,
     },
     /// List all stored ghostkeys.
     ListGhostKeys,
@@ -177,8 +190,6 @@ pub enum GhostkeyRequest {
     },
     /// List permissions for a ghostkey.
     ListPermissions { fingerprint: String },
-    /// Debug: force a permission prompt regardless of existing permissions.
-    TestPermissionPrompt { fingerprint: String },
     /// A third-party app asks for any one of the user's ghostkeys. The
     /// delegate emits a user prompt that lets the user pick a key (or
     /// deny). On approval the delegate grants `{ReadPublic, Sign}` to
@@ -204,12 +215,15 @@ pub enum GhostkeyRequest {
     /// user off to buy a ghostkey wants to notice when they come back, and
     /// polling a prompt is not an option.
     ///
-    /// What this discloses without consent is a count. That is more than the
+    /// What this discloses without consent is bounded by scope: a caller
+    /// holding `ReadPublic` on some keys gets the true counts for THOSE, and a
+    /// caller holding nothing gets counts that saturate at one, so it learns
+    /// that an identity exists and that one may be broken, never how many. That is a little more than the
     /// bare existence bit `NoIdentityAvailable` already leaks to anyone who
     /// asks for a signature, and the trade is deliberate: no fingerprints,
-    /// labels or tiers are exposed, a count cannot be correlated across users,
-    /// and the alternative is that the vault cannot tell a half-lost identity
-    /// from a healthy one.
+    /// labels or tiers are exposed, and the alternative is that an app cannot
+    /// tell a half-lost identity from a healthy one, nor "you have none" from
+    /// "I have not been granted access".
     HasIdentity,
     /// Record that the user has exported this identity, so the vault can stop
     /// warning that it is the only copy. Requires `Export` scope, so only the
@@ -341,4 +355,72 @@ pub enum GhostkeyResponse {
     Error {
         message: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `ImportGhostKey` used to carry a `master_verifying_key_pem`
+    /// override marked "for testing", which let the caller decide which
+    /// authority the vault checked a stored identity against. The field is
+    /// gone and must stay gone -- this fails the moment one is re-added.
+    #[test]
+    fn import_request_has_no_trust_root_field() {
+        let request = GhostkeyRequest::ImportGhostKey {
+            certificate_pem: "CERT".into(),
+            signing_key_pem: "SK".into(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        let fields = json
+            .get("ImportGhostKey")
+            .and_then(|v| v.as_object())
+            .expect("ImportGhostKey serialises as a named-field object");
+
+        let mut names: Vec<&str> = fields.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["certificate_pem", "signing_key_pem"],
+            "ImportGhostKey must carry the key material and nothing else -- \
+             a caller-supplied trust root is an authorization hole, not a test hook"
+        );
+    }
+
+    /// The removal must not break an older client that still sends the field.
+    /// CBOR struct variants are maps with named keys and nothing here sets
+    /// `deny_unknown_fields`, so the extra key is ignored on read. Verified
+    /// rather than assumed.
+    #[test]
+    fn legacy_import_payload_still_decodes() {
+        /// The shape an older `ghostkey-common` produced.
+        #[derive(Serialize)]
+        enum LegacyRequest {
+            ImportGhostKey {
+                certificate_pem: String,
+                signing_key_pem: String,
+                master_verifying_key_pem: Option<String>,
+            },
+        }
+
+        for legacy_value in [None, Some("-----BEGIN VERIFYING_KEY_V1-----".to_string())] {
+            let bytes = to_cbor(&LegacyRequest::ImportGhostKey {
+                certificate_pem: "CERT".into(),
+                signing_key_pem: "SK".into(),
+                master_verifying_key_pem: legacy_value.clone(),
+            })
+            .unwrap();
+
+            match from_cbor::<GhostkeyRequest>(&bytes) {
+                Ok(GhostkeyRequest::ImportGhostKey {
+                    certificate_pem,
+                    signing_key_pem,
+                }) => {
+                    assert_eq!(certificate_pem, "CERT");
+                    assert_eq!(signing_key_pem, "SK");
+                }
+                other => panic!("legacy payload ({legacy_value:?}) did not decode: {other:?}"),
+            }
+        }
+    }
 }

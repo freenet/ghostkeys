@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.4"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/freenet/ghostkeys"
@@ -31,6 +31,43 @@ wasm-bindgen-futures = "0.4"
 gloo-timers = { version = "0.3", features = ["futures"] }
 futures = "0.3"
 js-sys = "0.3"
+
+# The delegate's tests generate real certificates so they can exercise the
+# authorization paths against a populated vault, and unoptimised that is
+# extremely slow: the suite took ~40s, one test 37s of it.
+#
+# The dominant cost is the RSA blind-signature work in `NotaryCertificateV1::new`
+# (ghostkey_lib -> blind-rsa-signatures -> rsa/num-bigint-dig), NOT the Ed25519
+# arithmetic an earlier version of this comment blamed -- overriding only the
+# dalek crates left that 37s test at 37s. Measured A/B: with the RSA crates
+# below the suite is ~1.5s. The dalek and blake3 entries are kept because they
+# are cheap and the delegate does sign and hash on these paths, but they are not
+# what made the difference.
+#
+# Dev-profile only: the release WASM the delegate key is computed from is
+# unaffected.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.blake3]
+opt-level = 3
+
+# Certificate creation is RSA blind-signature based (ghostkey_lib depends on
+# blind-rsa-signatures), so the dalek crates alone do not cover the cost.
+[profile.dev.package.blind-rsa-signatures]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3
+
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
 
 [profile.release]
 opt-level = "z"

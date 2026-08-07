@@ -1,5 +1,5 @@
+use crate::env::DelegateEnv;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use freenet_stdlib::prelude::DelegateCtx;
 use ghostkey_common::*;
 use ghostkey_lib::armorable::Armorable;
 use ghostkey_lib::ghost_key_certificate::GhostkeyCertificateV1;
@@ -24,13 +24,13 @@ fn backed_up_key(fp: &str) -> Vec<u8> {
     format!("gk:backedup:{fp}").into_bytes()
 }
 
-fn is_backed_up(ctx: &DelegateCtx, fp: &str) -> bool {
+fn is_backed_up(ctx: &dyn DelegateEnv, fp: &str) -> bool {
     ctx.get_secret(&backed_up_key(fp)).is_some()
 }
 
 /// The user-set label for a ghostkey, if any. Used by `lib.rs` to show a
 /// name the user picked instead of a raw fingerprint in permission prompts.
-pub(crate) fn get_label(ctx: &DelegateCtx, fp: &str) -> Option<String> {
+pub(crate) fn get_label(ctx: &dyn DelegateEnv, fp: &str) -> Option<String> {
     ctx.get_secret(&label_key(fp))
         .and_then(|b| String::from_utf8(b).ok())
         .filter(|s| !s.trim().is_empty())
@@ -39,21 +39,21 @@ pub(crate) fn get_label(ctx: &DelegateCtx, fp: &str) -> Option<String> {
 /// Load the fingerprint index from secrets. Exposed at crate visibility
 /// so the `RequestAnyAccess` prompt path in `lib.rs` can list keys for
 /// the user without recreating the storage layout knowledge.
-pub(crate) fn load_index(ctx: &DelegateCtx) -> Vec<String> {
+pub(crate) fn load_index(ctx: &dyn DelegateEnv) -> Vec<String> {
     ctx.get_secret(INDEX_KEY)
         .and_then(|bytes| from_cbor(&bytes).ok())
         .unwrap_or_default()
 }
 
 /// Save the fingerprint index to secrets.
-fn save_index(ctx: &mut DelegateCtx, index: &[String]) {
+fn save_index(ctx: &mut dyn DelegateEnv, index: &[String]) {
     if let Ok(bytes) = to_cbor(&index) {
         ctx.set_secret(INDEX_KEY, &bytes);
     }
 }
 
 /// Load a certificate from secrets.
-fn load_cert(ctx: &DelegateCtx, fp: &str) -> Option<GhostkeyCertificateV1> {
+fn load_cert(ctx: &dyn DelegateEnv, fp: &str) -> Option<GhostkeyCertificateV1> {
     let bytes = ctx.get_secret(&cert_key(fp))?;
     Armorable::from_bytes(&bytes).ok()
 }
@@ -64,7 +64,7 @@ fn notary_info(cert: &GhostkeyCertificateV1) -> String {
 }
 
 pub fn handle(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     request: GhostkeyRequest,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
@@ -72,18 +72,11 @@ pub fn handle(
         GhostkeyRequest::ImportGhostKey {
             certificate_pem,
             signing_key_pem,
-            master_verifying_key_pem,
-        } => handle_import(
-            ctx,
-            &certificate_pem,
-            &signing_key_pem,
-            master_verifying_key_pem.as_deref(),
-            requestor,
-        ),
+        } => handle_import(ctx, &certificate_pem, &signing_key_pem, requestor),
 
         GhostkeyRequest::ListGhostKeys => handle_list(ctx, requestor),
 
-        GhostkeyRequest::HasIdentity => handle_has_identity(ctx),
+        GhostkeyRequest::HasIdentity => handle_has_identity(ctx, requestor),
 
         GhostkeyRequest::MarkBackedUp { fingerprint } => {
             handle_mark_backed_up(ctx, &fingerprint, requestor)
@@ -142,14 +135,6 @@ pub fn handle(
             handle_list_permissions(ctx, &fingerprint, requestor)
         }
 
-        GhostkeyRequest::TestPermissionPrompt { .. } => {
-            // Handled in lib.rs before reaching here; if we get here
-            // it means the user approved the prompt, return success
-            GhostkeyResponse::Error {
-                message: "Test prompt approved".into(),
-            }
-        }
-
         // Required by `#[non_exhaustive]` on GhostkeyRequest so adding new
         // request variants in future ghostkey-common releases is not a
         // breaking change. A delegate built against an older ghostkey-common
@@ -162,10 +147,9 @@ pub fn handle(
 }
 
 fn handle_import(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     certificate_pem: &str,
     signing_key_pem: &str,
-    master_verifying_key_pem: Option<&str>,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
     // Deserialize certificate
@@ -178,21 +162,13 @@ fn handle_import(
         }
     };
 
-    // Parse optional master verifying key override (for testing)
-    let master_vk: Option<VerifyingKey> = match master_verifying_key_pem {
-        Some(pem) => match Armorable::from_armored_string(pem) {
-            Ok(vk) => Some(vk),
-            Err(e) => {
-                return GhostkeyResponse::Error {
-                    message: format!("invalid master verifying key PEM: {e}"),
-                }
-            }
-        },
-        None => None,
-    };
-
-    // Verify certificate chain (back to master key, or provided key)
-    let info = match cert.verify(&master_vk) {
+    // Verify the certificate chain against the Freenet master key compiled
+    // into the delegate. `None` here means "the built-in trust root", and it
+    // is the only one the vault will accept.
+    //
+    // do NOT re-add a master-key override parameter -- see the doc comment on
+    // `GhostkeyRequest::ImportGhostKey`.
+    let info = match cert.verify(&None) {
         Ok(info) => info,
         Err(e) => {
             return GhostkeyResponse::Error {
@@ -248,7 +224,14 @@ fn handle_import(
     // importer (typically the vault) is the user's agent for this key
     // and gets every scope the delegate enforces, including Admin so it
     // can manage other apps' grants on the user's behalf.
-    permissions::grant_full(ctx, &fp, requestor);
+    if !permissions::grant_full(ctx, &fp, requestor) {
+        // The key material is stored but the importer owns nothing on it.
+        // Reporting success would leave the vault listing a key it cannot
+        // export, sign with, or delete, with no indication why.
+        return GhostkeyResponse::Error {
+            message: "imported the ghostkey but could not record ownership of it".into(),
+        };
+    }
 
     GhostkeyResponse::ImportResult {
         fingerprint: fp,
@@ -261,7 +244,7 @@ fn handle_import(
 /// the response carries only the fingerprint the user just chose to
 /// share -- routing through `handle_list` would leak any other keys the
 /// requestor previously had `ReadPublic` on.
-pub(crate) fn lookup_single_key(ctx: &DelegateCtx, fp: &str) -> GhostkeyResponse {
+pub(crate) fn lookup_single_key(ctx: &dyn DelegateEnv, fp: &str) -> GhostkeyResponse {
     match load_cert(ctx, fp) {
         Some(cert) => {
             let label = ctx
@@ -288,28 +271,82 @@ pub(crate) fn lookup_single_key(ctx: &DelegateCtx, fp: &str) -> GhostkeyResponse
     }
 }
 
+/// One indexed fingerprint as `handle_has_identity` sees it.
+#[derive(Debug, Clone, Copy)]
+struct KeySlot {
+    has_certificate: bool,
+    has_signing_key: bool,
+    /// Whether the asking caller holds `ReadPublic` on this key.
+    caller_may_read: bool,
+}
+
 /// Answer "does the user hold a ghostkey?" without prompting and without
 /// naming anything.
 ///
-/// Deliberately NOT permission-filtered. The whole point is that an app with
-/// no grant can ask — otherwise it cannot distinguish "the user has none, send
-/// them to buy one" from "I have not been granted access yet", and would send
-/// a user who already owns a key off to buy a second one. The only thing
-/// disclosed is a count, which is the bit `NoIdentityAvailable` already
-/// reveals to anyone who asks for a signature.
-fn handle_has_identity(ctx: &DelegateCtx) -> GhostkeyResponse {
-    let slots: Vec<(bool, bool)> = load_index(ctx)
+/// The answer is bounded by scope. `HasIdentity` still never prompts and still
+/// answers a caller that holds no grant -- that is the whole reason it exists,
+/// and removing it would send a user who already paid for a ghostkey off to buy
+/// a second one -- but what it discloses is now proportionate to what the
+/// caller has been allowed to see. See [`scoped_presence`] for the split.
+fn handle_has_identity(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> GhostkeyResponse {
+    let slots: Vec<KeySlot> = load_index(ctx)
         .iter()
-        .map(|fp| {
-            (
-                load_cert(ctx, fp).is_some(),
-                ctx.get_secret(&sk_key(fp)).is_some(),
-            )
+        .map(|fp| KeySlot {
+            has_certificate: load_cert(ctx, fp).is_some(),
+            has_signing_key: ctx.get_secret(&sk_key(fp)).is_some(),
+            caller_may_read: permissions::has_scope(ctx, fp, requestor, GhostkeyScope::ReadPublic),
         })
         .collect();
 
-    let (usable, unusable) = tally_presence(&slots);
+    let (usable, unusable) = scoped_presence(&slots);
     GhostkeyResponse::IdentityPresence { usable, unusable }
+}
+
+/// Pure scope filter behind `handle_has_identity`.
+///
+/// Two cases, and the difference between them is the whole point:
+///
+/// - **The caller holds `ReadPublic` on something.** It gets the true counts
+///   for those keys and nothing about the rest. A grant on one key is not
+///   consent to be told how large the vault is.
+/// - **The caller holds nothing.** It gets existence and nothing more: each
+///   count saturates at one. That is exactly the bit `NoIdentityAvailable`
+///   already discloses to anyone who asks for a signature, so nothing new
+///   leaks, and it is still enough to answer "should I offer to sell this
+///   person a ghostkey?" and "is the one they have broken?".
+///
+/// An empty vault answers `(0, 0)` in both cases, which is the honest answer
+/// and the one the purchase round-trip depends on.
+fn scoped_presence(slots: &[KeySlot]) -> (usize, usize) {
+    let readable: Vec<(bool, bool)> = slots
+        .iter()
+        .filter(|s| s.caller_may_read)
+        .map(|s| (s.has_certificate, s.has_signing_key))
+        .collect();
+
+    let all: Vec<(bool, bool)> = slots
+        .iter()
+        .map(|s| (s.has_certificate, s.has_signing_key))
+        .collect();
+
+    let (readable_usable, readable_unusable) = tally_presence(&readable);
+    let (total_usable, total_unusable) = tally_presence(&all);
+
+    // The floor discloses that AN identity exists, and -- via `unusable` --
+    // that at least one is broken. The first bit is already free to anyone who
+    // asks for a signature (`NoIdentityAvailable`); the second is not, and is
+    // the deliberate price of the question this request exists to answer,
+    // since "you have one and it is broken" and "you have none" call for
+    // different things from the app. Nothing beyond those two bits leaks: the
+    // magnitude stays hidden. It has to apply to a caller WITH grants too, not just one
+    // without: an app whose single granted key has lost its signing key would
+    // otherwise be told `usable: 0` while the user holds healthy keys, and
+    // would send someone who already paid off to buy another. More grant must
+    // never mean less truth.
+    (
+        readable_usable.max(total_usable.min(1)),
+        readable_unusable.max(total_unusable.min(1)),
+    )
 }
 
 /// Pure tally behind `handle_has_identity`. One `(has_certificate,
@@ -340,7 +377,7 @@ fn tally_presence(slots: &[(bool, bool)]) -> (usize, usize) {
 /// Gated on `Export` — the scope that is only ever granted to the vault — so a
 /// third-party app cannot silence a warning about a key it has no backup of.
 fn handle_mark_backed_up(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     fp: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
@@ -363,7 +400,7 @@ fn handle_mark_backed_up(
     }
 }
 
-fn handle_list(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyResponse {
+fn handle_list(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> GhostkeyResponse {
     let index = load_index(ctx);
     let mut keys = Vec::new();
 
@@ -393,7 +430,7 @@ fn handle_list(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyRes
 }
 
 fn handle_get_detail(
-    ctx: &DelegateCtx,
+    ctx: &dyn DelegateEnv,
     fp: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
@@ -435,7 +472,7 @@ fn handle_get_detail(
 }
 
 fn handle_get_certificate(
-    ctx: &DelegateCtx,
+    ctx: &dyn DelegateEnv,
     fp: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
@@ -471,7 +508,7 @@ fn handle_get_certificate(
 }
 
 fn handle_delete(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     fp: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
@@ -485,10 +522,23 @@ fn handle_delete(
     ctx.remove_secret(&cert_key(fp));
     ctx.remove_secret(&sk_key(fp));
     ctx.remove_secret(&label_key(fp));
+    // Grants and the backup marker are keyed by fingerprint too. Leaving them
+    // behind means a re-imported key silently inherits the grants of the key
+    // that used to hold that fingerprint, and that a deleted key still passes
+    // the scope check -- which is how an export prompt gets raised for
+    // something the vault no longer holds.
+    ctx.remove_secret(&backed_up_key(fp));
+    let grants_cleared = permissions::remove_all(ctx, fp);
 
     let mut index = load_index(ctx);
     index.retain(|f| f != fp);
     save_index(ctx, &index);
+
+    if !grants_cleared {
+        return GhostkeyResponse::Error {
+            message: format!("deleted {fp} but could not clear its grants"),
+        };
+    }
 
     logging::info(&format!("Deleted ghostkey {fp}"));
 
@@ -498,7 +548,7 @@ fn handle_delete(
 }
 
 fn handle_set_label(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     fp: &str,
     label: &str,
     requestor: &SignatureRequestor,
@@ -527,7 +577,10 @@ fn handle_set_label(
 const DEFAULT_KEY: &[u8] = b"gk:default";
 
 /// Resolve the default ghostkey fingerprint: explicit default, or highest-tier.
-pub(crate) fn resolve_default(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> Option<String> {
+pub(crate) fn resolve_default(
+    ctx: &dyn DelegateEnv,
+    requestor: &SignatureRequestor,
+) -> Option<String> {
     // The "default key" is selected for signing, so the requestor needs
     // Sign on it. ReadPublic alone wouldn't be enough -- a third-party
     // app that hasn't been granted Sign for any key shouldn't get a
@@ -577,7 +630,7 @@ pub(crate) fn resolve_default(ctx: &DelegateCtx, requestor: &SignatureRequestor)
 ///
 /// Not permission-filtered: this exists for the prompt shown when the caller
 /// has no grant on anything, so filtering by grant would return nothing.
-pub(crate) fn signable_fingerprints_by_tier_desc(ctx: &DelegateCtx) -> Vec<String> {
+pub(crate) fn signable_fingerprints_by_tier_desc(ctx: &dyn DelegateEnv) -> Vec<String> {
     let with_tiers: Vec<(String, u32)> = load_index(ctx)
         .into_iter()
         .filter_map(|fp| {
@@ -616,7 +669,7 @@ fn extract_amount(info: &str) -> Option<u32> {
 }
 
 fn handle_sign_with_default(
-    ctx: &DelegateCtx,
+    ctx: &dyn DelegateEnv,
     message: &[u8],
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
@@ -627,7 +680,7 @@ fn handle_sign_with_default(
 }
 
 fn handle_set_default(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     fingerprint: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
@@ -654,13 +707,13 @@ fn handle_set_default(
     }
 }
 
-fn handle_get_default(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyResponse {
+fn handle_get_default(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> GhostkeyResponse {
     let fp = resolve_default(ctx, requestor);
     GhostkeyResponse::DefaultKeyResult { fingerprint: fp }
 }
 
 fn handle_sign(
-    ctx: &DelegateCtx,
+    ctx: &dyn DelegateEnv,
     fp: &str,
     message: &[u8],
     requestor: &SignatureRequestor,
@@ -843,7 +896,11 @@ fn handle_verify(signed_message: &[u8]) -> GhostkeyResponse {
     }
 }
 
-fn handle_export(ctx: &DelegateCtx, fp: &str, requestor: &SignatureRequestor) -> GhostkeyResponse {
+fn handle_export(
+    ctx: &dyn DelegateEnv,
+    fp: &str,
+    requestor: &SignatureRequestor,
+) -> GhostkeyResponse {
     // Export returns the private signing key. Catastrophic if granted to
     // a third-party app, so this scope is reserved for the vault.
     if !permissions::has_scope(ctx, fp, requestor, GhostkeyScope::Export) {
@@ -910,7 +967,49 @@ fn handle_export(ctx: &DelegateCtx, fp: &str, requestor: &SignatureRequestor) ->
     }
 }
 
-fn handle_export_all(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> GhostkeyResponse {
+/// How many stored ghostkeys `requestor` could actually extract via
+/// `ExportAllGhostKeys`. Used by the export-confirmation prompt so it can tell
+/// the user how many private keys are about to leave the vault, and so a
+/// caller that could extract nothing never gets to raise a dialog at all.
+#[cfg(test)]
+pub(crate) fn exportable_count(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> usize {
+    exportable_keys(ctx, requestor).len()
+}
+
+/// Does the vault hold a certificate for this fingerprint? Used so the export
+/// prompt is not raised for a key that would answer `KeyNotFound` anyway --
+/// grants outlive a deleted key, so this is reachable.
+pub(crate) fn has_certificate(ctx: &dyn DelegateEnv, fp: &str) -> bool {
+    load_cert(ctx, fp).is_some()
+}
+
+/// What the export confirmation should call each key `requestor` could
+/// extract: the user's label where there is one, else the fingerprint. Same
+/// walk as the export itself, so the dialog cannot name a set the replay does
+/// not produce.
+pub(crate) fn exportable_names(
+    ctx: &dyn DelegateEnv,
+    requestor: &SignatureRequestor,
+) -> Vec<String> {
+    exportable_keys(ctx, requestor)
+        .into_iter()
+        .map(|key| {
+            key.label
+                .filter(|l| !l.trim().is_empty())
+                .unwrap_or(key.fingerprint)
+        })
+        .collect()
+}
+
+/// Every ghostkey `requestor` can actually extract, fully materialised.
+///
+/// The single source of truth for both `ExportAllGhostKeys` and the count the
+/// confirmation prompt quotes. A separate, looser filter for the count would
+/// let the dialog say "all 3" while 2 arrive: `handle_export_all` drops a key
+/// whose signing key is absent, is not 32 bytes, or will not encode, and all
+/// three are reachable -- which is exactly why `HasIdentity` has an `unusable`
+/// counter.
+fn exportable_keys(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> Vec<ExportedGhostKey> {
     let index = load_index(ctx);
     let mut keys = Vec::new();
 
@@ -957,11 +1056,17 @@ fn handle_export_all(ctx: &DelegateCtx, requestor: &SignatureRequestor) -> Ghost
         });
     }
 
-    GhostkeyResponse::ExportAllResult { keys }
+    keys
+}
+
+fn handle_export_all(ctx: &dyn DelegateEnv, requestor: &SignatureRequestor) -> GhostkeyResponse {
+    GhostkeyResponse::ExportAllResult {
+        keys: exportable_keys(ctx, requestor),
+    }
 }
 
 fn handle_grant_permission(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     fp: &str,
     target: &SignatureRequestor,
     requestor: &SignatureRequestor,
@@ -981,7 +1086,11 @@ fn handle_grant_permission(
     // share-with-app flows match the `RequestAnyAccess` semantics. A
     // future protocol bump can add a scoped variant for vault UIs that
     // want finer control.
-    permissions::grant_third_party(ctx, fp, target);
+    if !permissions::grant_third_party(ctx, fp, target) {
+        return GhostkeyResponse::Error {
+            message: format!("could not record the grant for {fp}"),
+        };
+    }
 
     GhostkeyResponse::PermissionGranted {
         fingerprint: fp.to_string(),
@@ -990,7 +1099,7 @@ fn handle_grant_permission(
 }
 
 fn handle_revoke_permission(
-    ctx: &mut DelegateCtx,
+    ctx: &mut dyn DelegateEnv,
     fp: &str,
     target: &SignatureRequestor,
     requestor: &SignatureRequestor,
@@ -1002,7 +1111,13 @@ fn handle_revoke_permission(
         };
     }
 
-    permissions::revoke_all(ctx, fp, target);
+    // A revoke that did not land must never be reported as done: the caller
+    // would believe access was withdrawn while the grant is still there.
+    if !permissions::revoke_all(ctx, fp, target) {
+        return GhostkeyResponse::Error {
+            message: format!("could not revoke access to {fp}; the grant is still in place"),
+        };
+    }
 
     GhostkeyResponse::PermissionRevoked {
         fingerprint: fp.to_string(),
@@ -1011,7 +1126,7 @@ fn handle_revoke_permission(
 }
 
 fn handle_list_permissions(
-    ctx: &DelegateCtx,
+    ctx: &dyn DelegateEnv,
     fp: &str,
     requestor: &SignatureRequestor,
 ) -> GhostkeyResponse {
@@ -1034,9 +1149,266 @@ fn handle_list_permissions(
     }
 }
 
+/// Test-only: generate a self-contained ghostkey (master key -> notary cert
+/// -> ghostkey cert) with a throwaway master key.
+///
+/// Certificates a test can produce are signed by that throwaway key, never by
+/// the production Freenet master key, so they cannot be pushed through
+/// `handle_import` -- its chain check would (correctly) reject them. Seeding
+/// via [`seed_ghostkey`] is therefore the only way to exercise the
+/// authorization paths against a populated vault.
+#[cfg(test)]
+pub(crate) fn test_ghostkey(donation_amount: u32) -> (GhostkeyCertificateV1, SigningKey) {
+    use ghostkey_lib::notary_certificate::NotaryCertificateV1;
+    use rand_core::OsRng;
+
+    let (master_sk, _master_vk) = ghostkey_lib::util::create_keypair(&mut OsRng).unwrap();
+    let info = format!("donation_amount:{donation_amount}");
+    let (notary_cert, notary_sk) = NotaryCertificateV1::new(&master_sk, &info).unwrap();
+    GhostkeyCertificateV1::new(&notary_cert, &notary_sk)
+}
+
+/// Test-only: place a ghostkey in the vault exactly the way `handle_import`
+/// does once verification has passed -- same secret-store layout, same
+/// `grant_full` for the owner -- so a seeded vault cannot drift from a real
+/// one. Returns the fingerprint.
+#[cfg(test)]
+pub(crate) fn seed_ghostkey(
+    ctx: &mut dyn DelegateEnv,
+    cert: &GhostkeyCertificateV1,
+    sk: &SigningKey,
+    owner: &SignatureRequestor,
+) -> String {
+    let fp = fingerprint(&cert.verifying_key);
+    let cert_bytes = Armorable::to_bytes(cert).expect("serialize test certificate");
+    ctx.set_secret(&cert_key(&fp), &cert_bytes);
+    ctx.set_secret(&sk_key(&fp), sk.as_bytes());
+    let mut index = load_index(ctx);
+    if !index.contains(&fp) {
+        index.push(fp.clone());
+        save_index(ctx, &index);
+    }
+    assert!(
+        permissions::grant_full(ctx, &fp, owner),
+        "seed grant failed"
+    );
+    fp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::MemEnv;
+    use freenet_stdlib::prelude::ContractInstanceId;
+
+    fn webapp(seed: u8) -> SignatureRequestor {
+        let bytes = [seed; 32];
+        let id = ContractInstanceId::from_bytes(bs58::encode(&bytes).into_string()).unwrap();
+        SignatureRequestor::WebApp(id)
+    }
+
+    /// Regression: `HasIdentity` used to tally the WHOLE vault for any
+    /// caller, so an app with no grant on anything -- and an app granted a
+    /// single key -- both learned exactly how many identities the user holds
+    /// and how many of them are broken. The answer must be bounded by what the
+    /// caller has been allowed to see.
+    #[test]
+    fn has_identity_counts_only_keys_the_caller_may_read() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let app = webapp(0x02);
+
+        let mut fps = Vec::new();
+        for tier in [10u32, 20, 30] {
+            let (cert, sk) = test_ghostkey(tier);
+            fps.push(seed_ghostkey(&mut env, &cert, &sk, &vault));
+        }
+        // The app is allowed to see exactly one of the three.
+        assert!(permissions::grant_third_party(&mut env, &fps[1], &app));
+
+        match handle_has_identity(&env, &app) {
+            GhostkeyResponse::IdentityPresence { usable, unusable } => {
+                assert_eq!(
+                    (usable, unusable),
+                    (1, 0),
+                    "an app granted one key must not learn that the vault holds three"
+                );
+            }
+            other => panic!("expected IdentityPresence, got {other:?}"),
+        }
+
+        // The vault itself imported all three, so it still sees all three.
+        match handle_has_identity(&env, &vault) {
+            GhostkeyResponse::IdentityPresence { usable, unusable } => {
+                assert_eq!((usable, unusable), (3, 0));
+            }
+            other => panic!("expected IdentityPresence, got {other:?}"),
+        }
+    }
+
+    /// The other half of the same regression: a caller with no grant at all
+    /// still gets a truthful existence answer -- that is what `HasIdentity`
+    /// exists for -- but not a headcount.
+    #[test]
+    fn has_identity_discloses_existence_but_not_headcount_to_an_ungranted_caller() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+        let stranger = webapp(0x03);
+
+        for tier in [10u32, 20, 30] {
+            let (cert, sk) = test_ghostkey(tier);
+            seed_ghostkey(&mut env, &cert, &sk, &vault);
+        }
+
+        match handle_has_identity(&env, &stranger) {
+            GhostkeyResponse::IdentityPresence { usable, unusable } => {
+                assert_eq!(
+                    usable, 1,
+                    "an ungranted caller learns only that an identity exists, never how many"
+                );
+                assert_eq!(unusable, 0);
+            }
+            other => panic!("expected IdentityPresence, got {other:?}"),
+        }
+    }
+
+    /// An empty vault must still answer honestly, or an app that sends the
+    /// user off to buy a ghostkey can never tell "you have none" from "I
+    /// cannot see yours".
+    #[test]
+    fn has_identity_reports_an_empty_vault_as_empty() {
+        let env = MemEnv::new();
+        match handle_has_identity(&env, &webapp(0x03)) {
+            GhostkeyResponse::IdentityPresence { usable, unusable } => {
+                assert_eq!((usable, unusable), (0, 0));
+            }
+            other => panic!("expected IdentityPresence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scoped_presence_reports_only_granted_slots() {
+        let slots = [
+            KeySlot {
+                has_certificate: true,
+                has_signing_key: true,
+                caller_may_read: true,
+            },
+            KeySlot {
+                has_certificate: true,
+                has_signing_key: false,
+                caller_may_read: true,
+            },
+            KeySlot {
+                has_certificate: true,
+                has_signing_key: true,
+                caller_may_read: false,
+            },
+        ];
+        assert_eq!(scoped_presence(&slots), (1, 1));
+    }
+
+    #[test]
+    fn scoped_presence_saturates_for_a_caller_with_no_grants() {
+        let slots = [
+            KeySlot {
+                has_certificate: true,
+                has_signing_key: true,
+                caller_may_read: false,
+            },
+            KeySlot {
+                has_certificate: true,
+                has_signing_key: true,
+                caller_may_read: false,
+            },
+            KeySlot {
+                has_certificate: true,
+                has_signing_key: false,
+                caller_may_read: false,
+            },
+        ];
+        assert_eq!(
+            scoped_presence(&slots),
+            (1, 1),
+            "existence is disclosed, the count is not"
+        );
+    }
+
+    #[test]
+    fn scoped_presence_of_an_empty_vault_is_zero_for_anyone() {
+        assert_eq!(scoped_presence(&[]), (0, 0));
+    }
+
+    /// A certificate whose chain does not reach the production Freenet master
+    /// key must be refused. There is no longer any request field that can
+    /// substitute a different trust root -- this pins the behaviour that
+    /// removing `master_verifying_key_pem` is meant to guarantee.
+    #[test]
+    fn import_rejects_a_certificate_from_a_foreign_master_key() {
+        let mut env = MemEnv::new();
+        let (cert, sk) = test_ghostkey(100);
+        let cert_pem = Armorable::to_armored_string(&cert).unwrap();
+        let sk_pem = Armorable::to_armored_string(&sk).unwrap();
+
+        let response = handle(
+            &mut env,
+            GhostkeyRequest::ImportGhostKey {
+                certificate_pem: cert_pem,
+                signing_key_pem: sk_pem,
+            },
+            &webapp(0x01),
+        );
+        assert!(
+            matches!(response, GhostkeyResponse::Error { .. }),
+            "a certificate signed by a throwaway master key must not import, got {response:?}"
+        );
+        assert!(
+            load_index(&env).is_empty(),
+            "a rejected import must leave nothing behind"
+        );
+    }
+
+    /// A caller whose single granted key has lost its signing key must not be
+    /// told the user has nothing usable while the vault holds healthy keys.
+    /// More grant must never mean less truth.
+    #[test]
+    fn scoped_presence_never_reports_less_than_existence() {
+        let slots = [
+            KeySlot {
+                has_certificate: true,
+                has_signing_key: false,
+                caller_may_read: true,
+            },
+            KeySlot {
+                has_certificate: true,
+                has_signing_key: true,
+                caller_may_read: false,
+            },
+        ];
+        assert_eq!(
+            scoped_presence(&slots),
+            (1, 1),
+            "a granted-but-broken key must not mask that a usable identity exists"
+        );
+    }
+
+    #[test]
+    fn exportable_count_matches_what_export_all_returns() {
+        let mut env = MemEnv::new();
+        let vault = webapp(0x01);
+
+        let (cert, sk) = test_ghostkey(10);
+        seed_ghostkey(&mut env, &cert, &sk, &vault);
+        let (cert2, sk2) = test_ghostkey(20);
+        let half = seed_ghostkey(&mut env, &cert2, &sk2, &vault);
+        env.remove_secret(format!("gk:sk:{half}").as_bytes());
+
+        let counted = exportable_count(&env, &vault);
+        match handle_export_all(&env, &vault) {
+            GhostkeyResponse::ExportAllResult { keys } => assert_eq!(counted, keys.len()),
+            other => panic!("expected ExportAllResult, got {other:?}"),
+        }
+    }
 
     #[test]
     fn rank_puts_the_most_valuable_key_first() {
