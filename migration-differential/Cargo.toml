@@ -1,0 +1,20 @@
+[package]
+name = "migration-differential"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Test-only: replays ghostkeys' recorded migration observations through freenet-migrate 0.4.0 and reports where the two diverge"
+
+# Deliberately depends on NOTHING from ghostkeys. freenet-migrate requires
+# freenet-stdlib 0.8 while ghostkeys is on 0.6, and the two cannot be linked
+# into one binary (both export `#[no_mangle] __frnt_set_id`). The seam between
+# the halves is tests/migration-differential/observations.json.
+[dependencies]
+
+[dev-dependencies]
+freenet-migrate = { version = "0.4.0", default-features = false, features = ["ui"] }
+freenet-stdlib = { version = "0.8.2", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }

@@ -30,12 +30,3 @@ getrandom = { version = "0.2", features = ["js", "wasm-bindgen", "js-sys"], defa
 [build-dependencies]
 chrono = { workspace = true }
 
-[dev-dependencies]
-# Test-only: the differential test drives freenet-migrate 0.4.0's delegate
-# migration path against ghostkeys' shipped sweep. Not used by any production
-# code path (see ui/src/migration_differential.rs).
-freenet-migrate = { version = "0.4.0", default-features = false, features = ["ui"] }
-# The crate requires freenet-stdlib 0.8; ghostkeys is pinned to 0.6. Aliased so
-# the differential can hold both and convert by raw key bytes. See
-# `the_crate_forces_a_second_freenet_stdlib_into_the_graph`.
-freenet-stdlib-08 = { package = "freenet-stdlib", version = "0.8.2", default-features = false }

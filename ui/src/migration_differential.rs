@@ -1,27 +1,38 @@
-//! Differential test: ghostkeys' shipped sweep vs `freenet-migrate` 0.4.0.
+//! The ghostkeys half of the `freenet-migrate` differential (freenet-core#2776 §3).
 //!
 //! Test-only (`#[cfg(test)] mod` in `main.rs`). Nothing here is compiled into
-//! the vault, and nothing in [`crate::migration`] is changed by it.
+//! the vault, and `ui/src/migration.rs` is not modified.
 //!
-//! # What this is for
+//! # Why the differential is split across two crates
 //!
-//! freenet-core#2776 §3 proposes porting ghostkeys onto `freenet-migrate`'s
-//! delegate half, on the strength of the two having converged on the same
-//! probe / classify / import shape independently. This test checks that claim
-//! at the level of behaviour rather than structure: one fixture drives both
-//! implementations and the observable outcomes are compared.
+//! `freenet-migrate` 0.4.0 requires `freenet-stdlib` 0.8; ghostkeys is on 0.6.
+//! Cargo will happily resolve both, but the two **cannot be linked into one
+//! binary**: `freenet_stdlib::global` exports `#[no_mangle] extern "C"
+//! __frnt_set_id` unconditionally in every version, so the link fails with
+//! `duplicate symbol: __frnt_set_id`. `ghostkey-common` genuinely needs stdlib
+//! types (`SignatureRequestor` carries a `DelegateKey`), so *no* ghostkeys
+//! crate can link the migration crate today -- not even as a dev-dependency.
+//!
+//! That is a finding, not an inconvenience, so the test is built around it
+//! rather than hiding it:
+//!
+//! * this module runs the **shipped ghostkeys sweep** over the fixtures and
+//!   records what it observed into `tests/migration-differential/observations.json`;
+//! * the `migration-differential` crate (which links `freenet-migrate` and
+//!   stdlib 0.8, and nothing of ghostkeys) replays the *same* fixture inputs
+//!   through `migrate_delegate_secrets` and compares against that record.
+//!
+//! The record is recomputed and re-verified on every run of
+//! [`the_recorded_observations_match_the_shipped_sweep`], so it cannot rot into
+//! a stale copy of behaviour that has since changed.
 //!
 //! # The oracle is the SHIPPED sweep, not the crate
 //!
 //! An equivalence test whose expected values come from the new code proves only
-//! that the new code agrees with itself. So every judgement on the ghostkeys
-//! side is made by the real, field-proven functions in [`crate::migration`] --
-//! [`classify_presence`](crate::migration::classify_presence),
-//! [`sweep_step`](crate::migration::sweep_step),
-//! [`classify`](crate::migration::classify),
-//! [`MigrationOutcome::record_probe`](crate::migration::MigrationOutcome::record_probe)
-//! and [`record_import`](crate::migration::MigrationOutcome::record_import) --
-//! called here exactly as `migration::real::run_pass` calls them. Even the
+//! that the new code agrees with itself. So every judgement here is made by the
+//! real, field-proven functions in [`crate::migration`] -- `classify_presence`,
+//! `sweep_step`, `classify`, `MigrationOutcome::record_probe`, `record_import`
+//! -- called exactly as `migration::real::run_pass` calls them. Even the
 //! per-predecessor bucket names are *derived from the shipped code's effect*
 //! (see [`gk_bucket`]) rather than restated, so a change to `record_probe`
 //! moves the oracle automatically instead of leaving a stale copy behind.
@@ -30,33 +41,27 @@
 //!
 //! `run_pass` is `#[cfg(target_family = "wasm")]`, so its ~40 lines of loop
 //! wiring cannot be called from a native test. [`run_ghostkeys_sweep`] below
-//! re-expresses that wiring (only the wiring -- every decision inside it is the
-//! shipped function). [`the_harness_mirrors_the_shipped_sweep`] pins the two
-//! together by scraping `migration.rs`, in the same style as that file's own
+//! re-expresses that wiring -- only the wiring; every decision inside it is the
+//! shipped function. [`the_harness_mirrors_the_shipped_sweep`] pins the two
+//! together by scraping `migration.rs`, in the style of that file's own
 //! `the_sweep_carries_the_default_identity_across`.
 //!
 //! # Fidelity of the fixtures
 //!
-//! * Predecessor identities come from the real `legacy_delegates.toml`, parsed
-//!   here the way `ui/build.rs` parses it.
-//! * Replies are real `ghostkey_common::GhostkeyResponse` /
-//!   `DelegateCallError` values, the same types `send_to_delegate` returns.
-//! * The successor store is modelled as the delegate's actual secret
-//!   namespace -- `gk:cert:<fp>`, `gk:sk:<fp>`, `gk:label:<fp>` and the
-//!   `gk:index` CBOR fingerprint list (`delegates/ghostkey-delegate/src/handlers.rs`).
-//!   That matters: `ListGhostKeys` reads the index, so "which secrets are in
-//!   the store" and "which keys the user can see" are different questions and
-//!   the fixtures below answer both.
-//!
-//! # Findings
-//!
-//! The agreement/divergence table lives in [`SCENARIOS`], one row per scenario,
-//! and [`every_scenario_has_a_declared_agreement`] fails if a new scenario is
-//! added without deciding which it is.
+//! * Predecessor identities are real `legacy_delegates.toml` rows, parsed the
+//!   way `ui/build.rs` parses them.
+//! * Replies are real `ghostkey_common::GhostkeyResponse` / `DelegateCallError`
+//!   values, the same types `send_to_delegate` returns.
+//! * The successor store is the delegate's actual secret namespace --
+//!   `gk:cert:<fp>`, `gk:sk:<fp>`, `gk:label:<fp>` and the `gk:index` CBOR
+//!   fingerprint list (`delegates/ghostkey-delegate/src/handlers.rs`).
+//!   `ListGhostKeys` reads the index, so "which secrets are stored" and "which
+//!   keys the user can see" are different questions; both are recorded.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use ghostkey_common::{ExportedGhostKey, GhostkeyResponse};
+use serde::{Deserialize, Serialize};
 
 use crate::api::delegate::DelegateCallError;
 use crate::migration::{
@@ -64,14 +69,8 @@ use crate::migration::{
     SweepStep,
 };
 
-// The crate under test. `freenet-stdlib` is pulled in under an alias because
-// ghostkeys is pinned to 0.6 and freenet-migrate 0.4.0 requires 0.8 -- see
-// `the_crate_forces_a_second_freenet_stdlib_into_the_graph`.
-use freenet_migrate::{
-    migrate_delegate_secrets, DelegateLineageEntry, MigrationAuthorization, PredecessorMigration,
-    PredecessorSecretsIo, SecretPair, SecretSelectionPolicy, SecretStore, UnionAck,
-};
-use freenet_stdlib_08::prelude::{CodeHash as CodeHash08, DelegateKey as DelegateKey08};
+/// Where the recorded observations live, relative to this crate.
+const OBSERVATIONS_PATH: &str = "../tests/migration-differential/observations.json";
 
 // ---------------------------------------------------------------------------
 // The legacy registry, read the way build.rs reads it
@@ -129,6 +128,20 @@ fn hex32(hex: &str) -> [u8; 32] {
     out
 }
 
+/// A raw `(secret key, value)` pair, the shape `fetch_secrets` returns.
+type Pair = (Vec<u8>, Vec<u8>);
+
+/// freenet-migrate's completion-marker key prefix, spelled out because this
+/// crate cannot link the migration crate (see the module header). The
+/// crate-side test asserts this really is the crate's own
+/// `PRED_DONE_MARKER_KEY_PREFIX`, so a rename upstream fails rather than
+/// quietly turning the stale-marker fixture into an ordinary secret.
+const FREENET_MIGRATE_DONE_PREFIX: &[u8] = b"\0freenet-migrate/v1/pred-done:";
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 // ---------------------------------------------------------------------------
 // The shared fixture
 // ---------------------------------------------------------------------------
@@ -136,40 +149,42 @@ fn hex32(hex: &str) -> [u8; 32] {
 /// One ghostkey as a predecessor would hand it over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Key {
-    fp: &'static str,
-    cert: &'static str,
-    sk: &'static str,
-    label: Option<&'static str>,
+    fp: String,
+    cert: String,
+    sk: String,
+    label: Option<String>,
 }
 
 impl Key {
     fn exported(&self) -> ExportedGhostKey {
         ExportedGhostKey {
-            fingerprint: self.fp.to_string(),
-            certificate_pem: self.cert.to_string(),
-            signing_key_pem: self.sk.to_string(),
-            label: self.label.map(str::to_string),
+            fingerprint: self.fp.clone(),
+            certificate_pem: self.cert.clone(),
+            signing_key_pem: self.sk.clone(),
+            label: self.label.clone(),
             notary_info: "Freenet Notary".to_string(),
         }
     }
 }
 
-fn key(fp: &'static str, label: Option<&'static str>) -> Key {
+fn key(fp: &str, label: Option<&str>) -> Key {
     Key {
-        fp,
+        fp: fp.to_string(),
         // Real PEM would be armored certificate bytes; the differential never
         // parses them, it only tracks which bytes land where.
-        cert: "-----BEGIN GHOSTKEY_CERTIFICATE-----CERT",
-        sk: "-----BEGIN ED25519_SIGNING_KEY_V1-----SK",
-        label,
+        cert: format!("-----BEGIN GHOSTKEY_CERTIFICATE-----{fp}"),
+        sk: format!("-----BEGIN ED25519_SIGNING_KEY_V1-----{fp}"),
+        label: label.map(str::to_string),
     }
 }
 
 /// What one predecessor delegate does when the sweep reaches it.
 ///
-/// This is the single source of inputs: both drivers are handed the SAME
-/// `(presence_reply, export_reply)` pair produced from this state. Neither side
-/// gets fixtures of its own.
+/// This is the single source of inputs. The ghostkeys sweep consumes the
+/// `GhostkeyResponse` / `DelegateCallError` values below directly; the crate
+/// consumes the SAME values put through the adapter ([`probe_executable_from`]
+/// / [`fetch_secrets_from`]) and recorded into the observations file. Neither
+/// side gets fixtures of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PredecessorState {
     /// Registered, says it holds keys, hands them over.
@@ -181,35 +196,25 @@ enum PredecessorState {
     /// No reply to anything. The ordinary case for a delegate this node never
     /// ran: nine legacy entries, nine timeouts (see `migration.rs`'s header).
     Silent,
-    /// Says it holds keys, then never answers the export -- e.g. the user
-    /// missed the confirmation dialog.
-    HoldsThenSilent,
-    /// Says it holds keys, then exports nothing -- keys exist that this vault
-    /// has no `Export` scope on.
-    HoldsThenExportsNothing,
     /// A delegate-level failure (missing secret, execution error).
     AnswersWithError(&'static str),
     /// Too old to know `HasIdentity`: errors on the presence probe, exports
     /// fine. This is the OLDER half of the real table.
     TooOldButExports(Vec<Key>),
-    /// Too old to know `HasIdentity`, and exports nothing. Genuinely
-    /// ambiguous.
-    TooOldAndEmpty,
-    /// The request never left the browser (dead socket).
-    TransportFailure(&'static str),
+    /// Holds keys, and its secret namespace ALSO still carries a completion
+    /// marker from a migration it performed when it was the successor. This is
+    /// what the second re-key after adopting the crate looks like, and the
+    /// crate documents that such markers must never be swept forward.
+    HoldsKeysAndAStaleMigrationMarker(Vec<Key>),
 }
 
 impl PredecessorState {
     /// The reply to `GhostkeyRequest::HasIdentity`.
     fn presence_reply(&self) -> Result<GhostkeyResponse, DelegateCallError> {
         match self {
-            Self::HoldsAndExports(keys) => Ok(GhostkeyResponse::IdentityPresence {
-                usable: keys.len(),
-                unusable: 0,
-            }),
-            Self::HoldsThenSilent | Self::HoldsThenExportsNothing => {
+            Self::HoldsAndExports(keys) | Self::HoldsKeysAndAStaleMigrationMarker(keys) => {
                 Ok(GhostkeyResponse::IdentityPresence {
-                    usable: 1,
+                    usable: keys.len(),
                     unusable: 0,
                 })
             }
@@ -220,28 +225,26 @@ impl PredecessorState {
             Self::NotRegistered => Err(DelegateCallError::NotRegistered),
             Self::Silent => Err(DelegateCallError::TimedOut),
             Self::AnswersWithError(m) => Err(DelegateCallError::Failed((*m).to_string())),
-            Self::TooOldButExports(_) | Self::TooOldAndEmpty => Ok(GhostkeyResponse::Error {
+            Self::TooOldButExports(_) => Ok(GhostkeyResponse::Error {
                 message: "Unsupported request variant for this delegate version".into(),
             }),
-            Self::TransportFailure(m) => Err(DelegateCallError::Transport((*m).to_string())),
         }
     }
 
     /// The reply to `GhostkeyRequest::ExportAllGhostKeys`.
     fn export_reply(&self) -> Result<GhostkeyResponse, DelegateCallError> {
         match self {
-            Self::HoldsAndExports(keys) | Self::TooOldButExports(keys) => {
+            Self::HoldsAndExports(keys)
+            | Self::TooOldButExports(keys)
+            | Self::HoldsKeysAndAStaleMigrationMarker(keys) => {
                 Ok(GhostkeyResponse::ExportAllResult {
                     keys: keys.iter().map(Key::exported).collect(),
                 })
             }
-            Self::HoldsThenExportsNothing | Self::TooOldAndEmpty | Self::RegisteredButEmpty => {
-                Ok(GhostkeyResponse::ExportAllResult { keys: Vec::new() })
-            }
-            Self::HoldsThenSilent | Self::Silent => Err(DelegateCallError::TimedOut),
+            Self::RegisteredButEmpty => Ok(GhostkeyResponse::ExportAllResult { keys: Vec::new() }),
+            Self::Silent => Err(DelegateCallError::TimedOut),
             Self::NotRegistered => Err(DelegateCallError::NotRegistered),
             Self::AnswersWithError(m) => Err(DelegateCallError::Failed((*m).to_string())),
-            Self::TransportFailure(m) => Err(DelegateCallError::Transport((*m).to_string())),
         }
     }
 }
@@ -252,13 +255,13 @@ struct Predecessor {
     entry: LegacyEntry,
     /// Position in `legacy_delegates.toml`, oldest first. The crate needs a
     /// `generation`; the registry has none, so this is the only ordering
-    /// available -- see `the_registry_has_no_generation_field`.
+    /// available -- see [`the_registry_has_no_generation_field`].
     generation: u32,
     state: PredecessorState,
 }
 
-/// Build a scenario from states, assigning each the identity of the real
-/// registry row at the same position (oldest first).
+/// Build a scenario from states, giving each the identity of the real registry
+/// row at the same position (oldest first).
 fn predecessors(states: Vec<PredecessorState>) -> Vec<Predecessor> {
     let entries = legacy_entries();
     assert!(
@@ -310,11 +313,11 @@ impl Namespace {
         ns
     }
 
-    /// A successor holding a key whose certificate survived but whose signing
-    /// key did not -- the half-broken state `migration.rs` re-imports to heal.
+    /// A successor holding a key whose certificate is stale and whose signing
+    /// key is gone -- the half-broken state `migration.rs` re-imports to heal.
     fn with_cert_only(fp: &str) -> Self {
         let mut ns = Self::default();
-        ns.secrets.insert(cert_key(fp), b"CERT".to_vec());
+        ns.secrets.insert(cert_key(fp), b"STALE-CERT".to_vec());
         ns.set_index(&[fp.to_string()]);
         ns
     }
@@ -337,15 +340,15 @@ impl Namespace {
     /// (`handlers.rs::handle_import`): certificate, signing key, label, index.
     fn apply_import(&mut self, k: &Key) {
         self.secrets
-            .insert(cert_key(k.fp), k.cert.as_bytes().to_vec());
-        self.secrets.insert(sk_key(k.fp), k.sk.as_bytes().to_vec());
-        if let Some(label) = k.label {
+            .insert(cert_key(&k.fp), k.cert.as_bytes().to_vec());
+        self.secrets.insert(sk_key(&k.fp), k.sk.as_bytes().to_vec());
+        if let Some(label) = &k.label {
             self.secrets
-                .insert(label_key(k.fp), label.as_bytes().to_vec());
+                .insert(label_key(&k.fp), label.as_bytes().to_vec());
         }
         let mut index = self.index();
-        if !index.contains(&k.fp.to_string()) {
-            index.push(k.fp.to_string());
+        if !index.contains(&k.fp) {
+            index.push(k.fp.clone());
         }
         self.set_index(&index);
     }
@@ -368,30 +371,14 @@ impl Namespace {
             })
             .collect()
     }
-}
 
-impl SecretStore for Namespace {
-    fn list_secrets(&self, prefix: &[u8]) -> Vec<Vec<u8>> {
-        self.secrets
-            .keys()
-            .filter(|k| k.starts_with(prefix))
-            .cloned()
-            .collect()
-    }
-    fn get_secret(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.secrets.get(key).cloned()
-    }
-    fn has_secret(&self, key: &[u8]) -> bool {
-        self.secrets.contains_key(key)
-    }
-    fn set_secret(&mut self, key: &[u8], value: &[u8]) -> bool {
-        self.secrets.insert(key.to_vec(), value.to_vec());
-        true
+    fn to_wire(&self) -> Vec<(String, String)> {
+        self.secrets.iter().map(|(k, v)| (hex(k), hex(v))).collect()
     }
 }
 
 // ---------------------------------------------------------------------------
-// Side A -- the shipped ghostkeys sweep
+// The shipped ghostkeys sweep
 // ---------------------------------------------------------------------------
 
 /// The bucket one predecessor landed in, named by the field the SHIPPED
@@ -407,6 +394,16 @@ enum GkBucket {
     Exported(usize),
     /// A counter moved; this is its field name.
     Counted(&'static str),
+}
+
+impl GkBucket {
+    fn name(&self) -> String {
+        match self {
+            GkBucket::SkippedEmpty => "SkippedEmpty".to_string(),
+            GkBucket::Exported(n) => format!("Exported({n})"),
+            GkBucket::Counted(name) => (*name).to_string(),
+        }
+    }
 }
 
 /// Run the shipped `record_probe` on a fresh outcome and report which counter
@@ -441,11 +438,17 @@ struct GkResult {
     store: Namespace,
 }
 
+impl GkResult {
+    fn names(&self) -> Vec<String> {
+        self.per_predecessor.iter().map(GkBucket::name).collect()
+    }
+}
+
 /// One pass of the ghostkeys sweep over `preds`.
 ///
 /// The decisions are the shipped functions; only the loop wiring is
 /// re-expressed here, because `run_pass` is wasm-only. The order below is
-/// pinned against `migration.rs` by `the_harness_mirrors_the_shipped_sweep`.
+/// pinned against `migration.rs` by [`the_harness_mirrors_the_shipped_sweep`].
 fn run_ghostkeys_sweep(preds: &[Predecessor], mut store: Namespace) -> GkResult {
     // `run_pass` receives the current delegate's fingerprints and whether that
     // listing was trustworthy; the model's index is the listing.
@@ -490,16 +493,13 @@ fn run_ghostkeys_sweep(preds: &[Predecessor], mut store: Namespace) -> GkResult 
             // but whose signing key did not.
             let already_held = !known_held || held.contains(&exported_key.fingerprint);
             let k = Key {
-                fp: Box::leak(exported_key.fingerprint.clone().into_boxed_str()),
-                cert: Box::leak(exported_key.certificate_pem.clone().into_boxed_str()),
-                sk: Box::leak(exported_key.signing_key_pem.clone().into_boxed_str()),
-                label: exported_key
-                    .label
-                    .clone()
-                    .map(|l| &*Box::leak(l.into_boxed_str())),
+                fp: exported_key.fingerprint.clone(),
+                cert: exported_key.certificate_pem.clone(),
+                sk: exported_key.signing_key_pem.clone(),
+                label: exported_key.label.clone(),
             };
             store.apply_import(&k);
-            held.insert(k.fp.to_string());
+            held.insert(k.fp.clone());
             if !already_held {
                 outcome.record_import(true);
             }
@@ -514,51 +514,18 @@ fn run_ghostkeys_sweep(preds: &[Predecessor], mut store: Namespace) -> GkResult 
 }
 
 // ---------------------------------------------------------------------------
-// Side B -- freenet-migrate 0.4.0
+// The adapter a ghostkeys adopter would write
 // ---------------------------------------------------------------------------
 
-/// The transport error a ghostkeys adopter's adapter would surface.
-#[derive(Debug, PartialEq, Eq)]
-struct IoError(String);
-
-/// The `PredecessorSecretsIo` a ghostkeys adopter would write.
-///
-/// It is deliberately the most charitable adapter available: it uses
-/// `HasIdentity` as the "cheap no-op" preflight the crate asks for, treats any
-/// *reply* as proof the predecessor executed, and dumps the full secret
-/// namespace (certificate, signing key, label AND the `gk:index` list) so the
-/// crate's raw-pair import has everything it could need.
-struct GhostkeysIo<'a> {
-    preds: &'a [Predecessor],
-    probed: Vec<[u8; 32]>,
-    fetched: Vec<[u8; 32]>,
-}
-
-impl<'a> GhostkeysIo<'a> {
-    fn new(preds: &'a [Predecessor]) -> Self {
-        Self {
-            preds,
-            probed: Vec::new(),
-            fetched: Vec::new(),
-        }
-    }
-
-    fn state_of(&self, key: &DelegateKey08) -> &PredecessorState {
-        let bytes: [u8; 32] = key.bytes().try_into().expect("32-byte delegate key");
-        &self
-            .preds
-            .iter()
-            .find(|p| p.entry.delegate_key == bytes)
-            .expect("probe for a predecessor not in the fixture")
-            .state
-    }
-}
-
 /// The documented mapping from a ghostkeys presence reply to the crate's
-/// tri-state preflight. See the PR body's verdict table.
+/// tri-state `PredecessorSecretsIo::probe_executable`.
+///
+/// Deliberately the most charitable adapter available: `HasIdentity` is the
+/// "cheap no-op" preflight the crate asks for, and any *reply* is treated as
+/// proof the predecessor executed.
 fn probe_executable_from(
     reply: Result<GhostkeyResponse, DelegateCallError>,
-) -> Result<bool, IoError> {
+) -> Result<bool, String> {
     match reply {
         // It ran and answered, whatever it said. An old delegate that errors on
         // `HasIdentity` has still proved its WASM executes.
@@ -570,18 +537,24 @@ fn probe_executable_from(
         Err(DelegateCallError::TimedOut) => Ok(false),
         // It answered, with a delegate-level failure: executable.
         Err(DelegateCallError::Failed(_)) => Ok(true),
-        // Never left the browser.
-        Err(DelegateCallError::Transport(m)) => Err(IoError(format!("transport: {m}"))),
+        // Never left the browser: a transport error the crate attaches to
+        // `Unresponsive`.
+        Err(DelegateCallError::Transport(m)) => Err(format!("transport: {m}")),
     }
 }
 
 /// The documented mapping from a ghostkeys export reply to `fetch_secrets`.
+///
+/// Dumps the full namespace the predecessor's keys imply -- certificate,
+/// signing key, label AND the `gk:index` list -- so the crate's raw-pair import
+/// has everything it could need.
 fn fetch_secrets_from(
     reply: Result<GhostkeyResponse, DelegateCallError>,
-) -> Result<Vec<SecretPair>, IoError> {
+    stale_marker: bool,
+) -> Result<Vec<Pair>, String> {
     match reply {
         Ok(GhostkeyResponse::ExportAllResult { keys }) => {
-            let mut pairs: Vec<SecretPair> = Vec::new();
+            let mut pairs: Vec<Pair> = Vec::new();
             let mut index: Vec<String> = Vec::new();
             for k in &keys {
                 pairs.push((
@@ -603,687 +576,392 @@ fn fetch_secrets_from(
                     ghostkey_common::to_cbor(&index).expect("cbor"),
                 ));
             }
+            if stale_marker {
+                // A whole-namespace dump includes whatever else is in there,
+                // including a completion marker the predecessor wrote when IT
+                // was the successor of an earlier generation.
+                let mut k = FREENET_MIGRATE_DONE_PREFIX.to_vec();
+                k.extend_from_slice(&[0x11u8; 32]);
+                pairs.push((k, b"1".to_vec()));
+            }
             Ok(pairs)
         }
-        Ok(other) => Err(IoError(format!(
+        Ok(other) => Err(format!(
             "unexpected reply: {}",
             crate::api::delegate::response_kind(&other)
-        ))),
-        Err(e) => Err(IoError(e.to_string())),
+        )),
+        Err(e) => Err(e.to_string()),
     }
-}
-
-impl PredecessorSecretsIo for GhostkeysIo<'_> {
-    type Error = IoError;
-
-    async fn probe_executable(&mut self, predecessor: &DelegateKey08) -> Result<bool, IoError> {
-        self.probed
-            .push(predecessor.bytes().try_into().expect("32 bytes"));
-        probe_executable_from(self.state_of(predecessor).presence_reply())
-    }
-
-    async fn fetch_secrets(
-        &mut self,
-        predecessor: &DelegateKey08,
-    ) -> Result<Vec<SecretPair>, IoError> {
-        self.fetched
-            .push(predecessor.bytes().try_into().expect("32 bytes"));
-        fetch_secrets_from(self.state_of(predecessor).export_reply())
-    }
-}
-
-fn lineage(preds: &[Predecessor]) -> Vec<DelegateLineageEntry> {
-    preds
-        .iter()
-        .map(|p| DelegateLineageEntry {
-            generation: p.generation,
-            code_hash: p.entry.code_hash,
-            delegate_key: p.entry.delegate_key,
-            irregular_key: false,
-            note: "ghostkeys legacy_delegates.toml entry",
-        })
-        .collect()
-}
-
-#[derive(Debug)]
-struct CrateResult {
-    classifications: Vec<PredecessorMigration>,
-    store: Namespace,
-    probed: usize,
-    fetched: usize,
-}
-
-fn run_crate_migration(
-    preds: &[Predecessor],
-    store: Namespace,
-    policy: SecretSelectionPolicy,
-) -> CrateResult {
-    let mut store = store;
-    let mut io = GhostkeysIo::new(preds);
-    let entries = lineage(preds);
-    let report = futures::executor::block_on(migrate_delegate_secrets(
-        &mut store,
-        &mut io,
-        &entries,
-        MigrationAuthorization::app_author_ack(),
-        policy,
-    ));
-    CrateResult {
-        classifications: report.predecessors,
-        store,
-        probed: io.probed.len(),
-        fetched: io.fetched.len(),
-    }
-}
-
-fn union() -> SecretSelectionPolicy {
-    SecretSelectionPolicy::UnionAllGenerations(
-        UnionAck::i_understand_union_resurrects_deleted_by_absence_secrets(),
-    )
-}
-
-/// The classification variants, as bare names, in the crate's processing
-/// (newest-first) order.
-fn crate_names(r: &CrateResult) -> Vec<&'static str> {
-    r.classifications
-        .iter()
-        .map(|c| match c {
-            PredecessorMigration::Imported { .. } => "Imported",
-            PredecessorMigration::NoData { .. } => "NoData",
-            PredecessorMigration::AlreadyMigrated { .. } => "AlreadyMigrated",
-            PredecessorMigration::Unresponsive { .. } => "Unresponsive",
-            PredecessorMigration::Incomplete { .. } => "Incomplete",
-            PredecessorMigration::Superseded { .. } => "Superseded",
-        })
-        .collect()
-}
-
-/// ghostkeys' per-predecessor buckets as bare names, in ITS processing
-/// (oldest-first) order.
-fn gk_names(r: &GkResult) -> Vec<String> {
-    r.per_predecessor
-        .iter()
-        .map(|b| match b {
-            GkBucket::SkippedEmpty => "SkippedEmpty".to_string(),
-            GkBucket::Exported(n) => format!("Exported({n})"),
-            GkBucket::Counted(name) => (*name).to_string(),
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
-// The agreement table
+// The recorded observations (the seam between the two crates)
 // ---------------------------------------------------------------------------
 
-/// Whether the two implementations reach the same observable outcome for a
-/// scenario, and if not, the name of the divergence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether the two implementations reach the same observable outcome, and if
+/// not, what kind of divergence it is. Asserted mechanically on the crate side:
+/// the stores are equal if and only if this is not `DivergeOutcome`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Agreement {
-    /// Same secrets end up visible in the successor, same story per
-    /// predecessor.
+    /// Same secrets stored, same secrets visible.
     Agree,
-    /// Named divergence -- the finding, not a bug in the test. Never "fix" one
-    /// of these by editing a fixture.
-    Diverge(&'static str),
+    /// The stores agree; the crate cannot express ghostkeys' classification.
+    DivergeClassification(String),
+    /// Different secrets end up stored or visible. Key loss, or invisible keys.
+    DivergeOutcome(String),
 }
 
-/// Every scenario, with its declared agreement. Adding a scenario without a row
-/// here fails `every_scenario_has_a_declared_agreement`.
-const SCENARIOS: &[(&str, Agreement)] = &[
-    ("predecessor_holds_keys_and_exports_them", Agreement::Agree),
-    ("predecessor_registered_but_holds_nothing", Agreement::Agree),
-    (
-        "predecessor_not_registered",
-        Agreement::Diverge("not-registered and silence collapse into one Unresponsive"),
-    ),
-    (
-        "predecessor_times_out",
-        Agreement::Diverge("NewestSnapshotWins halts the whole walk on the first silence"),
-    ),
-    (
-        "predecessor_answers_with_an_error",
-        Agreement::Diverge("an answered failure is reported as Unresponsive, the silence bucket"),
-    ),
-    (
-        "multiple_generations_newest_already_has_the_data",
-        Agreement::Diverge("NewestSnapshotWins strands keys unique to an older generation"),
-    ),
-    (
-        "rerun_is_idempotent",
-        Agreement::Diverge("the crate seals a predecessor with a marker; the sweep re-probes"),
-    ),
-    (
-        "successor_holds_a_half_broken_key",
-        Agreement::Diverge("never-clobber leaves a cert-only key unhealed"),
-    ),
-    (
-        "imported_keys_are_visible_to_the_user",
-        Agreement::Diverge("never-clobber skips gk:index, so imported keys stay invisible"),
-    ),
-];
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RecordedPredecessor {
+    delegate_key: String,
+    code_hash: String,
+    generation: u32,
+    /// What the adapter's `probe_executable` returns for this predecessor.
+    probe: Result<bool, String>,
+    /// What the adapter's `fetch_secrets` returns, hex-encoded pairs.
+    fetch: Result<Vec<(String, String)>, String>,
+    /// The bucket the SHIPPED sweep filed this predecessor under.
+    ghostkeys_bucket: String,
+}
 
-fn declared(name: &str) -> Agreement {
-    SCENARIOS
-        .iter()
-        .find(|(n, _)| *n == name)
-        .unwrap_or_else(|| panic!("scenario `{name}` has no row in SCENARIOS"))
-        .1
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RecordedScenario {
+    name: String,
+    what_it_shows: String,
+    agreement: Agreement,
+    /// The successor's secret namespace before the sweep, hex-encoded.
+    initial_store: Vec<(String, String)>,
+    predecessors: Vec<RecordedPredecessor>,
+    /// What the shipped sweep produced.
+    ghostkeys_store: Vec<(String, String)>,
+    ghostkeys_visible: Vec<String>,
+    ghostkeys_complete_pairs: Vec<String>,
+    ghostkeys_recovered: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct Observations {
+    /// Read by `migration-differential`; regenerated by the ui-side test.
+    generated_by: String,
+    scenarios: Vec<RecordedScenario>,
+}
+
+/// A scenario definition: the inputs, plus what it is there to show.
+struct Scenario {
+    name: &'static str,
+    what_it_shows: &'static str,
+    agreement: Agreement,
+    initial: Namespace,
+    preds: Vec<Predecessor>,
+}
+
+/// Every scenario, defined once and consumed by both halves of the
+/// differential.
+fn scenarios() -> Vec<Scenario> {
+    vec![
+        Scenario {
+            name: "predecessor_holds_keys_and_exports_them",
+            what_it_shows: "The case the convergent-design claim rests on: a live, exporting \
+                 predecessor migrates identically both ways.",
+            agreement: Agreement::Agree,
+            initial: Namespace::default(),
+            preds: predecessors(vec![PredecessorState::HoldsAndExports(vec![
+                key("fpA", Some("work")),
+                key("fpB", None),
+            ])]),
+        },
+        Scenario {
+            name: "predecessor_registered_but_holds_nothing",
+            what_it_shows: "Nothing is imported either way. Different mechanics -- ghostkeys \
+                 skips before asking for keys, so no private-key dialog fires, while the crate \
+                 probes AND fetches -- but the same observable outcome.",
+            agreement: Agreement::Agree,
+            initial: Namespace::default(),
+            preds: predecessors(vec![PredecessorState::RegisteredButEmpty]),
+        },
+        Scenario {
+            name: "predecessor_not_registered",
+            what_it_shows: "ghostkeys keeps `not_registered` apart from silence because nothing \
+                 ever re-registers legacy code, so keys under it are unreachable permanently. \
+                 `probe_executable` is a bool, so the crate cannot.",
+            agreement: Agreement::DivergeClassification(
+                "not-registered and silence collapse into one Unresponsive".into(),
+            ),
+            initial: Namespace::default(),
+            preds: predecessors(vec![PredecessorState::NotRegistered]),
+        },
+        Scenario {
+            name: "predecessor_times_out",
+            what_it_shows: "Silence is the ORDINARY case -- nine legacy entries, nine timeouts \
+                 on a real node. ghostkeys walks past it. Under NewestSnapshotWins the crate \
+                 halts the whole walk, so the data-bearing older generation is never probed.",
+            agreement: Agreement::DivergeOutcome(
+                "NewestSnapshotWins halts the whole walk on the first silence".into(),
+            ),
+            initial: Namespace::default(),
+            preds: predecessors(vec![
+                PredecessorState::HoldsAndExports(vec![key("fpOld", None)]),
+                PredecessorState::Silent,
+            ]),
+        },
+        Scenario {
+            name: "predecessor_answers_with_an_error",
+            what_it_shows: "An answered failure is positive evidence and reaches the user; \
+                 silence must stay quiet. The crate reports both in the same variant.",
+            agreement: Agreement::DivergeClassification(
+                "an answered failure is reported as Unresponsive, the silence bucket".into(),
+            ),
+            initial: Namespace::default(),
+            preds: predecessors(vec![PredecessorState::AnswersWithError(
+                "missing secret gk:sk:abc",
+            )]),
+        },
+        Scenario {
+            name: "multiple_generations_newest_already_has_the_data",
+            what_it_shows: "Keys created under two different generations. ghostkeys recovers \
+                 both. NewestSnapshotWins stops at the newest data-bearing generation and \
+                 strands the older key; Union recovers its bytes but still cannot make it \
+                 visible.",
+            agreement: Agreement::DivergeOutcome(
+                "NewestSnapshotWins strands keys unique to an older generation".into(),
+            ),
+            initial: Namespace::default(),
+            preds: predecessors(vec![
+                PredecessorState::HoldsAndExports(vec![key("fpOld", None)]),
+                PredecessorState::RegisteredButEmpty,
+                PredecessorState::HoldsAndExports(vec![key("fpNew", None)]),
+            ]),
+        },
+        Scenario {
+            name: "predecessor_gains_data_after_an_empty_answer",
+            what_it_shows: "An empty export is not proof of absence -- ExportAllGhostKeys \
+                 silently skips keys the caller lacks Export scope on, and the reply carries no \
+                 count. ghostkeys therefore re-sweeps every startup; the crate's completion \
+                 marker seals the predecessor as done. The crate-side test runs an empty pass \
+                 first, then this one.",
+            agreement: Agreement::DivergeOutcome(
+                "the crate seals an empty predecessor with a marker; the sweep re-probes".into(),
+            ),
+            initial: Namespace::default(),
+            preds: predecessors(vec![PredecessorState::TooOldButExports(vec![key(
+                "fpLate", None,
+            )])]),
+        },
+        Scenario {
+            name: "predecessor_carries_a_stale_migration_marker",
+            what_it_shows: "What the SECOND re-key after adopting the crate looks like: the \
+                 predecessor's namespace still holds the completion marker it wrote when it was \
+                 the successor. The crate documents that markers must never be swept forward, \
+                 and strips them on import; ghostkeys never sees them at all, because it \
+                 migrates through ImportGhostKey rather than copying raw pairs.",
+            agreement: Agreement::Agree,
+            initial: Namespace::default(),
+            preds: predecessors(vec![PredecessorState::HoldsKeysAndAStaleMigrationMarker(
+                vec![key("fpChained", None)],
+            )]),
+        },
+        Scenario {
+            name: "successor_holds_a_half_broken_key",
+            what_it_shows: "ListGhostKeys reports a key whenever its CERTIFICATE loads and never \
+                 checks the signing key, so a cert-only key looks present and cannot sign. \
+                 ghostkeys overwrites both halves to heal it; never-clobber keeps the stale \
+                 certificate.",
+            agreement: Agreement::DivergeOutcome(
+                "never-clobber leaves the successor's stale certificate in place".into(),
+            ),
+            initial: Namespace::with_cert_only("fpA"),
+            preds: predecessors(vec![PredecessorState::HoldsAndExports(vec![key(
+                "fpA", None,
+            )])]),
+        },
+        Scenario {
+            name: "imported_keys_are_visible_to_the_user",
+            what_it_shows: "gk:index is a single CBOR secret and ListGhostKeys reads it. The \
+                 successor already has one (the user made a key on the new version), so \
+                 never-clobber skips the predecessor's index and the recovered key is stored \
+                 but invisible.",
+            agreement: Agreement::DivergeOutcome(
+                "never-clobber skips gk:index, so imported keys stay invisible".into(),
+            ),
+            initial: Namespace::with_keys(&[key("fpMine", None)]),
+            preds: predecessors(vec![PredecessorState::HoldsAndExports(vec![key(
+                "fpOld", None,
+            )])]),
+        },
+    ]
+}
+
+fn record(scenario: &Scenario) -> RecordedScenario {
+    let gk = run_ghostkeys_sweep(&scenario.preds, scenario.initial.clone());
+    let buckets = gk.names();
+    assert_eq!(
+        buckets.len(),
+        scenario.preds.len(),
+        "every predecessor must be classified"
+    );
+
+    RecordedScenario {
+        name: scenario.name.to_string(),
+        what_it_shows: scenario.what_it_shows.to_string(),
+        agreement: scenario.agreement.clone(),
+        initial_store: scenario.initial.to_wire(),
+        predecessors: scenario
+            .preds
+            .iter()
+            .zip(buckets)
+            .map(|(p, bucket)| RecordedPredecessor {
+                delegate_key: hex(&p.entry.delegate_key),
+                code_hash: hex(&p.entry.code_hash),
+                generation: p.generation,
+                probe: probe_executable_from(p.state.presence_reply()),
+                fetch: fetch_secrets_from(
+                    p.state.export_reply(),
+                    matches!(
+                        p.state,
+                        PredecessorState::HoldsKeysAndAStaleMigrationMarker(_)
+                    ),
+                )
+                .map(|pairs| pairs.iter().map(|(k, v)| (hex(k), hex(v))).collect()),
+                ghostkeys_bucket: bucket,
+            })
+            .collect(),
+        ghostkeys_store: gk.store.to_wire(),
+        ghostkeys_visible: gk.store.visible().into_iter().collect(),
+        ghostkeys_complete_pairs: gk.store.complete_pairs().into_iter().collect(),
+        ghostkeys_recovered: gk.outcome.recovered,
+    }
 }
 
 // ===========================================================================
-// Scenarios
+// Tests
 // ===========================================================================
 
-/// **Expected before running:** both sides import both keys, both make them
-/// visible, and both classify the predecessor as a successful data-bearing
-/// import. This is the case the convergent-design claim rests on, and it holds.
+/// The seam. Recomputes every scenario from the SHIPPED sweep and compares it
+/// against the committed record the `migration-differential` crate reads, so
+/// that record cannot rot into a stale copy of behaviour that has changed.
 #[test]
-fn predecessor_holds_keys_and_exports_them() {
-    let keys = vec![key("fpA", Some("work")), key("fpB", None)];
-    let preds = predecessors(vec![PredecessorState::HoldsAndExports(keys.clone())]);
+fn the_recorded_observations_match_the_shipped_sweep() {
+    let observed = Observations {
+        generated_by: "ui/src/migration_differential.rs (regenerate with \
+                       GK_REGENERATE_OBSERVATIONS=1 cargo test -p ghostkey-ui)"
+            .to_string(),
+        scenarios: scenarios().iter().map(record).collect(),
+    };
+    let json = serde_json::to_string_pretty(&observed).expect("serialize") + "\n";
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(OBSERVATIONS_PATH);
 
-    let gk = run_ghostkeys_sweep(&preds, Namespace::default());
-    assert_eq!(gk_names(&gk), vec!["Exported(2)"]);
+    if std::env::var("GK_REGENERATE_OBSERVATIONS").is_ok() {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, &json).expect("write observations");
+        return;
+    }
+
+    let committed = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read {}: {e}. Regenerate with \
+             GK_REGENERATE_OBSERVATIONS=1 cargo test -p ghostkey-ui",
+            path.display()
+        )
+    });
+    let committed: Observations =
+        serde_json::from_str(&committed).expect("the committed observations must parse");
+    assert_eq!(
+        committed.scenarios, observed.scenarios,
+        "the shipped sweep's behaviour no longer matches the recorded observations the \
+         migration-differential crate compares against. If the change is intended, \
+         regenerate with GK_REGENERATE_OBSERVATIONS=1 cargo test -p ghostkey-ui and re-read \
+         the divergence findings -- they may no longer hold."
+    );
+}
+
+/// **Expected before running:** both keys imported, both visible, one
+/// data-bearing export.
+#[test]
+fn the_sweep_recovers_an_exporting_predecessor() {
+    let s = &scenarios()[0];
+    let gk = run_ghostkeys_sweep(&s.preds, s.initial.clone());
+    assert_eq!(gk.names(), vec!["Exported(2)"]);
     assert_eq!(gk.outcome.recovered, 2);
     assert_eq!(
         gk.store.visible(),
         BTreeSet::from(["fpA".to_string(), "fpB".to_string()])
     );
-
-    let cr = run_crate_migration(
-        &preds,
-        Namespace::default(),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_eq!(crate_names(&cr), vec!["Imported"]);
-    assert_eq!(
-        cr.store.visible(),
-        BTreeSet::from(["fpA".to_string(), "fpB".to_string()])
-    );
-
-    assert_eq!(gk.store.visible(), cr.store.visible());
-    assert_eq!(gk.store.complete_pairs(), cr.store.complete_pairs());
-    assert_eq!(
-        declared("predecessor_holds_keys_and_exports_them"),
-        Agreement::Agree
-    );
 }
 
-/// **Expected before running:** nothing is imported either way, and neither
-/// side raises anything. ghostkeys skips before asking for keys (so no
-/// private-key dialog fires); the crate probes, fetches an empty set and
-/// records `NoData`. Different mechanics, same observable outcome.
+/// **Expected before running:** the sweep walks past silence and still recovers
+/// from the older, data-bearing predecessor -- and stays quiet, because silence
+/// is the ordinary case on any node that has not run every previous version.
 #[test]
-fn predecessor_registered_but_holds_nothing() {
-    let preds = predecessors(vec![PredecessorState::RegisteredButEmpty]);
-
-    let gk = run_ghostkeys_sweep(&preds, Namespace::default());
-    assert_eq!(gk_names(&gk), vec!["SkippedEmpty"]);
-    assert_eq!(gk.outcome.recovered, 0);
-    assert!(gk.outcome.is_conclusive());
-
-    let cr = run_crate_migration(
-        &preds,
-        Namespace::default(),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_eq!(crate_names(&cr), vec!["NoData"]);
-
-    assert_eq!(gk.store.visible(), cr.store.visible());
-    assert!(gk.store.visible().is_empty());
-    assert_eq!(
-        declared("predecessor_registered_but_holds_nothing"),
-        Agreement::Agree
-    );
-}
-
-/// **Expected before running:** ghostkeys files this under `not_registered`, a
-/// bucket it keeps separate from silence precisely because nothing ever
-/// re-registers legacy code. The crate has no such bucket -- `probe_executable`
-/// is a bool, so "the node does not have it" and "it did not answer in time"
-/// both land in `Unresponsive`.
-///
-/// **Divergence:** classification only, no key loss in this scenario.
-#[test]
-fn predecessor_not_registered() {
-    let preds = predecessors(vec![PredecessorState::NotRegistered]);
-
-    let gk = run_ghostkeys_sweep(&preds, Namespace::default());
-    assert_eq!(gk_names(&gk), vec!["not_registered"]);
-    assert_eq!(gk.outcome.not_registered, 1);
-    assert_eq!(gk.outcome.undetermined, 0, "kept apart from silence");
-
-    let cr = run_crate_migration(
-        &preds,
-        Namespace::default(),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_eq!(crate_names(&cr), vec!["Unresponsive"]);
-
-    // Same silent scenario, different ghostkeys bucket, SAME crate bucket:
-    // that is the collapse.
-    let silent = predecessors(vec![PredecessorState::Silent]);
-    let gk_silent = run_ghostkeys_sweep(&silent, Namespace::default());
-    let cr_silent = run_crate_migration(
-        &silent,
-        Namespace::default(),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_ne!(
-        gk_names(&gk),
-        gk_names(&gk_silent),
-        "ghostkeys distinguishes not-registered from silence"
-    );
-    assert_eq!(
-        crate_names(&cr),
-        crate_names(&cr_silent),
-        "the crate does not: both are Unresponsive"
-    );
-
-    assert_eq!(
-        declared("predecessor_not_registered"),
-        Agreement::Diverge("not-registered and silence collapse into one Unresponsive")
-    );
-}
-
-/// **Expected before running:** this is the important one. Silence is the
-/// ORDINARY case -- `migration.rs`'s header records nine legacy entries
-/// producing nine timeouts on a real node -- so the sweep must walk straight
-/// past it. The crate's default policy treats an unresponsive predecessor as a
-/// reason to STOP: `unresponsive_terminates()` is true under
-/// `NewestSnapshotWins`, and every older predecessor is then `Superseded`
-/// without ever being probed.
-///
-/// **Divergence: key loss under the crate's default policy.** With one silent
-/// newest predecessor in front of a data-bearing older one, ghostkeys recovers
-/// the keys and the crate recovers nothing. `UnionAllGenerations` does not
-/// terminate, and recovers them.
-#[test]
-fn predecessor_times_out() {
-    let keys = vec![key("fpOld", None)];
-    let preds = predecessors(vec![
-        PredecessorState::HoldsAndExports(keys.clone()), // generation 0, older
-        PredecessorState::Silent,                        // generation 1, newer
-    ]);
-
-    let gk = run_ghostkeys_sweep(&preds, Namespace::default());
-    assert_eq!(gk_names(&gk), vec!["Exported(1)", "undetermined"]);
+fn the_sweep_walks_past_silence() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "predecessor_times_out")
+        .expect("scenario");
+    let gk = run_ghostkeys_sweep(&s.preds, s.initial.clone());
+    assert_eq!(gk.names(), vec!["Exported(1)", "undetermined"]);
     assert_eq!(gk.store.visible(), BTreeSet::from(["fpOld".to_string()]));
     assert!(
         !gk.outcome.needs_user_attention(),
         "silence is the normal case and must stay quiet"
     );
-
-    let cr = run_crate_migration(
-        &preds,
-        Namespace::default(),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_eq!(
-        crate_names(&cr),
-        vec!["Unresponsive", "Superseded"],
-        "newest-first: the silent generation halts the walk"
-    );
-    assert_eq!(
-        cr.probed, 1,
-        "the older, data-bearing generation is never probed"
-    );
-    assert!(
-        cr.store.visible().is_empty(),
-        "the crate's default policy recovers nothing here"
-    );
-
-    // Union does not terminate on Unresponsive, and gets the keys.
-    let cr_union = run_crate_migration(&preds, Namespace::default(), union());
-    assert_eq!(crate_names(&cr_union), vec!["Unresponsive", "Imported"]);
-    assert_eq!(cr_union.store.visible(), gk.store.visible());
-
-    assert_ne!(gk.store.visible(), cr.store.visible());
-    assert_eq!(
-        declared("predecessor_times_out"),
-        Agreement::Diverge("NewestSnapshotWins halts the whole walk on the first silence")
-    );
 }
 
-/// **Expected before running:** ghostkeys files a delegate-level failure under
-/// `answered_with_error` and TELLS THE USER -- that bucket exists so the
-/// crying-wolf fix for silence does not also mute positive evidence that
-/// something is there and unreadable. The crate has one bucket for both, so an
-/// adopter reading `any_unresponsive()` cannot tell an error reply from the
-/// eleven routine timeouts it will see on every open.
-///
-/// **Divergence:** the user-facing signal is lost, not the keys.
+/// **Expected before running:** three distinct ghostkeys buckets, of which only
+/// the answered failure reaches the user. The crate has one variant for all
+/// three; that half is asserted in `migration-differential`.
 #[test]
-fn predecessor_answers_with_an_error() {
-    let preds = predecessors(vec![PredecessorState::AnswersWithError(
-        "missing secret gk:sk:abc",
-    )]);
+fn an_answered_failure_is_reported_and_silence_is_not() {
+    let all = scenarios();
+    let err = all
+        .iter()
+        .find(|s| s.name == "predecessor_answers_with_an_error")
+        .expect("scenario");
+    let gk = run_ghostkeys_sweep(&err.preds, err.initial.clone());
+    assert_eq!(gk.names(), vec!["answered_with_error"]);
+    assert!(gk.outcome.needs_user_attention());
 
-    let gk = run_ghostkeys_sweep(&preds, Namespace::default());
-    assert_eq!(gk_names(&gk), vec!["answered_with_error"]);
-    assert!(
-        gk.outcome.needs_user_attention(),
-        "an answered failure is positive evidence and reaches the user"
-    );
-
-    let cr = run_crate_migration(
-        &preds,
-        Namespace::default(),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_eq!(crate_names(&cr), vec!["Unresponsive"]);
-
-    // The crate does carry the error string, but in the same variant silence
-    // uses -- so `any_unresponsive()` cannot separate them.
     let silent = predecessors(vec![PredecessorState::Silent]);
-    let cr_silent = run_crate_migration(
-        &silent,
-        Namespace::default(),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_eq!(crate_names(&cr), crate_names(&cr_silent));
-
     let gk_silent = run_ghostkeys_sweep(&silent, Namespace::default());
-    assert!(
-        !gk_silent.outcome.needs_user_attention(),
-        "silence must stay quiet -- which is why the two buckets cannot merge"
-    );
+    assert_eq!(gk_silent.names(), vec!["undetermined"]);
+    assert!(!gk_silent.outcome.needs_user_attention());
 
-    assert_eq!(
-        declared("predecessor_answers_with_an_error"),
-        Agreement::Diverge("an answered failure is reported as Unresponsive, the silence bucket")
-    );
+    let absent = predecessors(vec![PredecessorState::NotRegistered]);
+    let gk_absent = run_ghostkeys_sweep(&absent, Namespace::default());
+    assert_eq!(gk_absent.names(), vec!["not_registered"]);
+    assert!(!gk_absent.outcome.needs_user_attention());
 }
 
-/// **Expected before running:** a user with one key created under generation 0
-/// and another under generation 2 has both recovered by ghostkeys, which sweeps
-/// every entry. Under `NewestSnapshotWins` the crate stops at generation 2 --
-/// the newest predecessor that yielded data is authoritative -- so `fpOld` is
-/// `Superseded` and lost. That is the policy working as designed
-/// (delete-by-absence preservation), and it is the wrong default for ghostkeys,
-/// whose predecessors are not snapshots of one evolving state but separate
-/// stores of independently-created purchased keys.
-///
-/// **Divergence: key loss.** `UnionAllGenerations` matches ghostkeys.
+/// **Expected before running:** a re-run over the store the previous pass left
+/// is a true no-op -- nothing new is announced and the store is byte-identical.
+/// ghostkeys achieves this with no completion marker at all.
 #[test]
-fn multiple_generations_newest_already_has_the_data() {
-    let preds = predecessors(vec![
-        PredecessorState::HoldsAndExports(vec![key("fpOld", None)]), // gen 0
-        PredecessorState::RegisteredButEmpty,                        // gen 1
-        PredecessorState::HoldsAndExports(vec![key("fpNew", None)]), // gen 2
-    ]);
-
-    let gk = run_ghostkeys_sweep(&preds, Namespace::default());
-    assert_eq!(
-        gk_names(&gk),
-        vec!["Exported(1)", "SkippedEmpty", "Exported(1)"]
-    );
-    assert_eq!(
-        gk.store.visible(),
-        BTreeSet::from(["fpOld".to_string(), "fpNew".to_string()]),
-        "the sweep recovers from every generation"
-    );
-
-    let cr = run_crate_migration(
-        &preds,
-        Namespace::default(),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_eq!(
-        crate_names(&cr),
-        vec!["Imported", "Superseded", "Superseded"],
-        "newest-first, stopping at the first data-bearing generation"
-    );
-    assert_eq!(
-        cr.store.visible(),
-        BTreeSet::from(["fpNew".to_string()]),
-        "fpOld is stranded"
-    );
-
-    // Union recovers the BYTES of both generations -- and still cannot make
-    // them both visible. `gk:index` is one slot, the newest generation writes
-    // it first, and never-clobber skips every later one. So no crate policy
-    // reproduces the sweep's result here; this was not predicted before the
-    // run, and it is the finding that survives switching policy.
-    let cr_union = run_crate_migration(&preds, Namespace::default(), union());
-    assert_eq!(
-        crate_names(&cr_union),
-        vec!["Imported", "NoData", "Imported"]
-    );
-    assert_eq!(
-        cr_union.store.complete_pairs(),
-        BTreeSet::from(["fpOld".to_string(), "fpNew".to_string()]),
-        "Union does fix the SELECTION divergence"
-    );
-    assert_eq!(
-        cr_union.store.visible(),
-        BTreeSet::from(["fpNew".to_string()]),
-        "but the older generation's index write is clobber-skipped, so fpOld stays invisible"
-    );
-    assert_ne!(cr_union.store.visible(), gk.store.visible());
-
-    assert_ne!(gk.store.visible(), cr.store.visible());
-    assert_eq!(
-        declared("multiple_generations_newest_already_has_the_data"),
-        Agreement::Diverge("NewestSnapshotWins strands keys unique to an older generation")
-    );
+fn a_rerun_over_an_unchanged_store_changes_nothing() {
+    let s = &scenarios()[0];
+    let first = run_ghostkeys_sweep(&s.preds, s.initial.clone());
+    let second = run_ghostkeys_sweep(&s.preds, first.store.clone());
+    assert_eq!(second.outcome.recovered, 0, "no double-counting");
+    assert_eq!(second.store, first.store, "re-import is idempotent");
 }
 
-/// **Expected before running:** ghostkeys' second pass re-probes everything and
-/// re-imports, by design -- its module header argues at length that no
-/// available signal justifies a "migration done" flag, because an empty export
-/// is not proof of absence (`ExportAllGhostKeys` silently skips keys the caller
-/// lacks `Export` scope on). The crate writes a `pred-done` marker, including
-/// for a predecessor that exported NOTHING, and short-circuits forever after.
-///
-/// **Divergence: the sealed-empty case.** A predecessor that answered empty
-/// because this vault had no `Export` scope at the time is marked done and
-/// never asked again, even once the scope is granted. Demonstrated below: the
-/// predecessor gains data between the two passes, ghostkeys recovers it, the
-/// crate does not.
+/// **Expected before running:** the sweep overwrites BOTH halves, replacing the
+/// stale certificate, and does not announce a recovery for a key already
+/// listed.
 #[test]
-fn rerun_is_idempotent() {
-    let first = predecessors(vec![PredecessorState::TooOldAndEmpty]);
-
-    // Pass 1: nothing to take, both sides agree.
-    let gk1 = run_ghostkeys_sweep(&first, Namespace::default());
-    assert_eq!(gk_names(&gk1), vec!["unsettled_and_empty"]);
-    let cr1 = run_crate_migration(
-        &first,
-        Namespace::default(),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_eq!(crate_names(&cr1), vec!["NoData"]);
-    assert!(gk1.store.visible().is_empty() && cr1.store.visible().is_empty());
-
-    // Pass 2 over the SAME store: the predecessor now hands over a key (the
-    // user granted Export scope, or a missed dialog was answered).
-    let second = predecessors(vec![PredecessorState::TooOldButExports(vec![key(
-        "fpLate", None,
-    )])]);
-
-    let gk2 = run_ghostkeys_sweep(&second, gk1.store.clone());
-    assert_eq!(gk_names(&gk2), vec!["Exported(1)"]);
-    assert_eq!(
-        gk2.store.visible(),
-        BTreeSet::from(["fpLate".to_string()]),
-        "re-sweeping every startup is what recovers this"
-    );
-
-    let cr2 = run_crate_migration(
-        &second,
-        cr1.store.clone(),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_eq!(
-        crate_names(&cr2),
-        vec!["AlreadyMigrated"],
-        "the empty marker written in pass 1 seals the predecessor"
-    );
-    assert_eq!(cr2.probed, 0, "not even probed on the re-run");
-    assert!(
-        cr2.store.visible().is_empty(),
-        "fpLate is never recovered by the crate"
-    );
-
-    // A true re-run with no change IS a no-op both ways -- the crate does
-    // nothing, and ghostkeys re-imports the same bytes over themselves, which
-    // leaves the store identical and reports no new recovery.
-    let gk_rerun = run_ghostkeys_sweep(&second, gk2.store.clone());
-    assert_eq!(gk_rerun.outcome.recovered, 0, "no double-counting");
-    assert_eq!(gk_rerun.store, gk2.store, "re-import is idempotent");
-
-    assert_eq!(
-        declared("rerun_is_idempotent"),
-        Agreement::Diverge("the crate seals a predecessor with a marker; the sweep re-probes")
-    );
-}
-
-/// **Expected before running:** the successor lists `fpA` because its
-/// certificate loaded, but its signing key is gone -- the key looks present and
-/// cannot sign. `migration.rs` re-imports unconditionally to overwrite both
-/// halves and heal it. The crate's import is never-clobber, so it writes the
-/// missing signing key (absent) but SKIPS the certificate (present) -- which
-/// happens to heal this particular shape.
-///
-/// **Divergence:** the crate leaves the stale certificate in place. Here the
-/// certificate is intact so the outcome is benign, but the inverse shape (a
-/// stale or corrupt certificate with a good signing key) is not healed at all,
-/// which is checked below.
-#[test]
-fn successor_holds_a_half_broken_key() {
-    let good = key("fpA", None);
-    let preds = predecessors(vec![PredecessorState::HoldsAndExports(vec![good.clone()])]);
-
-    let gk = run_ghostkeys_sweep(&preds, Namespace::with_cert_only("fpA"));
+fn the_sweep_heals_a_half_broken_key() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "successor_holds_a_half_broken_key")
+        .expect("scenario");
+    let gk = run_ghostkeys_sweep(&s.preds, s.initial.clone());
     assert_eq!(
         gk.store.secrets.get(&cert_key("fpA")).map(|v| v.as_slice()),
-        Some(good.cert.as_bytes()),
-        "the sweep overwrites both halves"
-    );
-    assert_eq!(
-        gk.store.secrets.get(&sk_key("fpA")).map(|v| v.as_slice()),
-        Some(good.sk.as_bytes())
+        Some(key("fpA", None).cert.as_bytes()),
+        "the stale certificate is replaced"
     );
     assert_eq!(
         gk.outcome.recovered, 0,
         "already listed, so healed without announcing a recovery"
     );
-
-    let cr = run_crate_migration(
-        &preds,
-        Namespace::with_cert_only("fpA"),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_eq!(
-        cr.store.secrets.get(&cert_key("fpA")).map(|v| v.as_slice()),
-        Some(b"CERT".as_slice()),
-        "never-clobber keeps the successor's stale certificate"
-    );
-    assert_eq!(
-        cr.store.secrets.get(&sk_key("fpA")).map(|v| v.as_slice()),
-        Some(good.sk.as_bytes()),
-        "the missing half IS written"
-    );
-
-    assert_ne!(gk.store.secrets, cr.store.secrets);
-    assert_eq!(
-        declared("successor_holds_a_half_broken_key"),
-        Agreement::Diverge("never-clobber leaves a cert-only key unhealed")
-    );
-}
-
-/// **Expected before running:** the severe one. `gk:index` is a single CBOR
-/// secret holding the fingerprint list, and `ListGhostKeys` reads it -- so a
-/// key whose `gk:cert:`/`gk:sk:` pair is stored but whose fingerprint is not in
-/// the index does not exist as far as the user is concerned.
-///
-/// ghostkeys imports through `ImportGhostKey`, whose handler appends to the
-/// index. The crate writes raw pairs never-clobber, and the successor's index
-/// already exists (the user made a key on the new version before the sweep
-/// ran), so the predecessor's index is SKIPPED. The recovered keys are in the
-/// store and invisible.
-///
-/// **Divergence: silent, total loss of the recovered keys from the user's
-/// point of view.** This is not a policy choice; it is the raw-pair transport
-/// meeting an app whose store has a derived index.
-#[test]
-fn imported_keys_are_visible_to_the_user() {
-    let own = key("fpMine", None);
-    let recovered = key("fpOld", None);
-    let preds = predecessors(vec![PredecessorState::HoldsAndExports(vec![
-        recovered.clone()
-    ])]);
-
-    let gk = run_ghostkeys_sweep(&preds, Namespace::with_keys(std::slice::from_ref(&own)));
-    assert_eq!(
-        gk.store.visible(),
-        BTreeSet::from(["fpMine".to_string(), "fpOld".to_string()]),
-        "the import handler appends to the index"
-    );
-
-    let cr = run_crate_migration(
-        &preds,
-        Namespace::with_keys(std::slice::from_ref(&own)),
-        SecretSelectionPolicy::NewestSnapshotWins,
-    );
-    assert_eq!(
-        cr.store.complete_pairs(),
-        BTreeSet::from(["fpMine".to_string(), "fpOld".to_string()]),
-        "both halves of fpOld ARE written"
-    );
-    assert_eq!(
-        cr.store.visible(),
-        BTreeSet::from(["fpMine".to_string()]),
-        "but gk:index was skipped by never-clobber, so fpOld is invisible"
-    );
-
-    assert_ne!(gk.store.visible(), cr.store.visible());
-    assert_eq!(
-        declared("imported_keys_are_visible_to_the_user"),
-        Agreement::Diverge("never-clobber skips gk:index, so imported keys stay invisible")
-    );
-}
-
-// ===========================================================================
-// Meta-tests: the oracle, the table, and the adoption costs
-// ===========================================================================
-
-/// Every `#[test]` in this module must have a row in [`SCENARIOS`], so a new
-/// fixture cannot be added without declaring whether the two implementations
-/// agree on it.
-#[test]
-fn every_scenario_has_a_declared_agreement() {
-    let src = include_str!("migration_differential.rs");
-    let marker = "// ===========================================================================\n// Scenarios";
-    assert!(src.contains(marker), "the scenario-section marker moved");
-    let scenarios_section = src
-        .split(marker)
-        .nth(1)
-        .expect("marker asserted above")
-        .split("// Meta-tests")
-        .next()
-        .expect("meta-test marker");
-
-    let mut found = Vec::new();
-    for line in scenarios_section.lines() {
-        if let Some(name) = line.trim().strip_prefix("fn ") {
-            found.push(name.trim_end_matches("() {").to_string());
-        }
-    }
-    assert!(!found.is_empty(), "scrape found no scenario tests");
-    for name in &found {
-        assert!(
-            SCENARIOS.iter().any(|(n, _)| n == name),
-            "scenario `{name}` has no row in SCENARIOS"
-        );
-    }
-    for (name, _) in SCENARIOS {
-        assert!(
-            found.contains(&name.to_string()),
-            "SCENARIOS lists `{name}`, which is not a scenario test"
-        );
-    }
 }
 
 /// The oracle's integrity check.
@@ -1291,9 +969,9 @@ fn every_scenario_has_a_declared_agreement() {
 /// [`run_ghostkeys_sweep`] re-expresses `run_pass`'s loop wiring because that
 /// function is wasm-only. This pins the two together: the shipped sweep must
 /// still call the same decisions in the same order, and must still walk the
-/// table without an early exit. If `run_pass` is restructured, this fails and
-/// the harness has to be brought back into line rather than silently becoming
-/// a test of something that is no longer shipped.
+/// whole table without an early exit. If `run_pass` is restructured, this fails
+/// and the harness has to be brought back into line rather than silently
+/// becoming a test of something that is no longer shipped.
 #[test]
 fn the_harness_mirrors_the_shipped_sweep() {
     let src = include_str!("migration.rs");
@@ -1304,8 +982,8 @@ fn the_harness_mirrors_the_shipped_sweep() {
     );
     let code = src.split(TEST_MODULE_MARKER).next().unwrap();
 
-    // The call sequence, in order. `find` from a moving offset, so a
-    // reordering fails rather than passing on mere presence.
+    // The call sequence, in order. `find` from a moving offset, so a reordering
+    // fails rather than passing on mere presence.
     let mut at = 0usize;
     for needle in [
         "let presence = presence_probe(&legacy_key).await;",
@@ -1339,44 +1017,17 @@ fn the_harness_mirrors_the_shipped_sweep() {
     );
 }
 
-/// Adoption cost, recorded as a test so it cannot rot: `freenet-migrate` 0.4.0
-/// requires `freenet-stdlib` 0.8, ghostkeys is on 0.6, and the two are
-/// semver-incompatible. They coexist here only because the crate is a
-/// dev-dependency and the differential converts between them by raw key bytes.
-/// A real adoption has to reconcile the versions, and bumping the stdlib the
-/// DELEGATE builds against re-keys the delegate -- i.e. adopting the migration
-/// crate would itself trigger a migration.
-#[test]
-fn the_crate_forces_a_second_freenet_stdlib_into_the_graph() {
-    let entry = legacy_entries()[0];
-    // ghostkeys' own stdlib (0.6)
-    let gk_key = freenet_stdlib::prelude::DelegateKey::new(
-        entry.delegate_key,
-        freenet_stdlib::prelude::CodeHash::new(entry.code_hash),
-    );
-    // the crate's stdlib (0.8)
-    let crate_key = DelegateKey08::new(entry.delegate_key, CodeHash08::new(entry.code_hash));
-    assert_eq!(
-        gk_key.bytes(),
-        crate_key.bytes(),
-        "the key bytes agree, so the differential's conversion is sound"
-    );
-    // Same bytes, different types: they cannot be compared without going
-    // through bytes, which is the whole problem.
-    assert_eq!(gk_key.encode(), crate_key.encode());
-}
-
-/// The registry the vault actually ships has no generation column, and the
-/// crate's `DelegateLineageEntry` requires one. File order is the only
-/// ordering available -- and it is not reliably chronological: two rows record
-/// a local build and a CI build of the SAME delegate change (the
-/// reproducibility gap documented in the file), so at least one pair of
-/// "generations" is an invention of the adapter, not a fact about the lineage.
+/// The registry the vault ships has no generation column, and the crate's
+/// `DelegateLineageEntry` requires one. File order is the only ordering
+/// available -- and it is not reliably chronological: two rows record a local
+/// build and a CI build of the SAME delegate change (the reproducibility gap
+/// documented in the file), so at least one pair of "generations" is an
+/// invention of the adapter, not a fact about the lineage.
 #[test]
 fn the_registry_has_no_generation_field() {
     assert!(
         !LEGACY_DELEGATES_TOML.contains("generation"),
-        "if a generation column has been added, this adapter's numbering is no longer a guess"
+        "if a generation column has been added, the adapter's numbering is no longer a guess"
     );
     let entries = legacy_entries();
     assert_eq!(entries.len(), 12, "the real registry, as build.rs reads it");
@@ -1389,15 +1040,4 @@ fn the_registry_has_no_generation_field() {
         entries.len(),
         "no duplicate keys"
     );
-}
-
-/// `MigrationAuthorization` is a compile-time forcing function with an empty
-/// runtime arm. Sound at this boundary (the caller is the app's own client
-/// code), and the whole cost of it is one explicit call -- worth recording,
-/// because it is the only *ergonomic* item on the adoption ledger that turns
-/// out to be free.
-#[test]
-fn the_authorization_gate_costs_one_call() {
-    let a = MigrationAuthorization::app_author_ack();
-    assert_eq!(a, MigrationAuthorization::app_author_ack());
 }
