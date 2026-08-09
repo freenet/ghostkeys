@@ -27,9 +27,31 @@ command = "bash"
 args = ["scripts/browser-test.sh"]
 
 [tasks.record-migration]
-description = "Append just-published delegate hash to legacy_delegates.toml"
+description = "Record the built delegate hash in legacy_delegates.toml on origin/main"
+# Depends on build-delegate for the same reason check-migration does: without
+# it this hashes whatever stale WASM happens to be sitting in target/ and
+# pushes that hash to a shared branch.
+dependencies = ["build-delegate"]
 command = "bash"
 args = ["scripts/record-migration.sh"]
+
+[tasks.preflight-migration]
+description = "Refuse to publish from a checkout whose migration table is behind main"
+# Read-only, and a dependency of sign-webapp rather than a step in the publish
+# script, so it runs BEFORE the UI is built rather than after it is signed.
+#
+# What it checks is the direction the rest of this machinery does not:
+# ui/build.rs compiles legacy_delegates.toml from the WORKING TREE into the
+# bundle, so a checkout that is merely behind main ships a sweep table missing
+# entries main already has, and orphans everyone running those delegates.
+dependencies = ["build-delegate"]
+command = "bash"
+args = ["scripts/record-migration.sh", "--preflight"]
+
+[tasks.test-scripts]
+description = "Test the migration-record machinery (git only, no network)"
+command = "bash"
+args = ["tests/record-migration.test.sh"]
 
 [tasks.build-delegate]
 description = "Build the ghostkey delegate WASM reproducibly"
@@ -72,7 +94,15 @@ args = ["scripts/check-delegate-pointer.sh"]
 
 [tasks.sign-webapp]
 description = "Sign the webapp archive with the web-container-tool"
-dependencies = ["compress-webapp", "check-migration", "check-delegate-pointer"]
+# preflight-migration first, and deliberately ahead of compress-webapp: it is
+# the one check whose answer can make the whole build pointless, so paying for
+# a UI build before asking it wastes the operator's time for nothing.
+dependencies = [
+  "preflight-migration",
+  "compress-webapp",
+  "check-migration",
+  "check-delegate-pointer",
+]
 script = '''
 VERSION=$(( $(date +%s) / 60 ))
 echo "Signing with version: $VERSION"
@@ -89,6 +119,32 @@ description = "Publish the ghostkey UI to the Freenet network"
 dependencies = ["sign-webapp"]
 script = '''
 set -e
+
+# Record BEFORE publishing, which is the opposite of the order this used to
+# run in, on purpose.
+#
+# The hash is knowable either way -- it comes from the WASM that sign-webapp
+# already built and bundled, not from anything the publish returns -- so the
+# only thing the old ordering bought was a window. If recording failed after a
+# successful publish, the delegate was already live and unrecorded, which is
+# precisely the 2026-08-03 incident; all the script could do was shout about a
+# state that already existed. Recording first turns that into an abort with
+# nothing deployed.
+#
+# The failure this ordering can produce instead is a recorded hash that never
+# gets published: the sweep then probes a delegate nobody runs, finds nothing,
+# and moves on. The file already carries such entries from 2026-05-05 and says
+# so. That is the right trade -- under-recording loses users' ghost keys --
+# but it is not free, and the cost is worse than "one wasted probe": every
+# user pays a bounded 3s background probe (LEGACY_PROBE_TIMEOUT_SECS,
+# ui/src/migration.rs) for that entry on EVERY vault load, permanently, and it
+# compounds with each one. check-migration's no-drop rule then makes it
+# unremovable by ordinary means. So if a publish is abandoned after the record
+# lands, treat the spare entry as a small debt worth clearing deliberately --
+# see the note in scripts/check-migration.sh.
+bash scripts/record-migration.sh
+
+echo ""
 fdev network publish \
   --code published-contract/web_container_contract.wasm \
   --parameters published-contract/webapp.parameters \
@@ -98,11 +154,11 @@ fdev network publish \
 echo ""
 echo "Published to: http://127.0.0.1:7509/v1/contract/web/${CONTRACT_ID}/"
 
-# After publishing, record the deployed hash as the new baseline so
-# the next delegate change can migrate from it without anyone having
-# to remember to run `add-migration` first.
+# Read the record back off the remote once more, now that the delegate is
+# actually live. Cheap, and it catches the one case the pre-publish run cannot:
+# the branch being rewritten in between.
 echo ""
-bash scripts/record-migration.sh
+bash scripts/record-migration.sh --verify-only
 '''
 
 # --- Development tasks ---
@@ -124,6 +180,10 @@ cwd = "./ui"
 
 [tasks.test]
 description = "Run all tests"
+# Includes the shell tests: `cargo test` cannot see scripts/, and the migration
+# machinery is the part of this repo where a silent failure costs users their
+# ghost keys.
+dependencies = ["test-scripts"]
 command = "cargo"
 args = ["test", "--workspace"]
 

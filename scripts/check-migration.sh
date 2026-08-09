@@ -3,10 +3,13 @@
 #
 # What actually protects users is that the delegate key they are running RIGHT
 # NOW is still listed in legacy_delegates.toml, because that table is what the
-# vault's migration sweep probes. The key users are running is the last entry
-# recorded on the base branch -- `record-migration` appends every published
-# hash immediately after `publish-ghostkeys`, so the tail of that file is the
-# deployed delegate.
+# vault's migration sweep probes. The key users are running is normally the
+# last entry recorded on the base branch -- `record-migration` puts every hash
+# on main as part of `publish-ghostkeys`. Note it records just BEFORE the
+# publish goes out, so strictly the tail is the last hash recorded at publish
+# time; if that publish then failed, it names a delegate never deployed. Only
+# informational output below depends on the distinction, never a safety
+# decision.
 #
 # So the invariant checked here is: *this change drops no previously-recorded
 # entry*. It deliberately does NOT require the newly-built hash to be recorded.
@@ -18,8 +21,9 @@
 # computes. The result was a guard that failed exactly when you followed its
 # own documented order, and that people would have learned to route around.
 #
-# The successor's hash is recorded post-publish by `record-migration`, which is
-# the only moment it is knowable and the only moment it matters.
+# The successor's hash is recorded by `record-migration` at publish time, from
+# the WASM that is about to ship -- the only moment it is knowable and the only
+# moment it matters.
 #
 # Usage:
 #   scripts/check-migration.sh [BASE_LEGACY_TOML]
@@ -107,14 +111,18 @@ echo "OK: all ${#ALL_HASHES[@]} recorded entries are internally consistent."
 
 # --- A previous publish's record must not still be uncommitted ------------
 #
-# `record-migration` appends the published hash to the working tree and prints
-# a reminder to commit it. A reminder is not a guard: on 2026-08-03 exactly
-# that append sat uncommitted while the delegate it named was live, so the
-# next build would have shipped a migration table missing the delegate every
-# user was actually running -- silently unreachable ghostkeys, which is the
-# failure this whole table exists to prevent.
+# On 2026-08-03 a published delegate's record sat uncommitted in a working
+# tree while the delegate it named was live, so the next build would have
+# shipped a migration table missing the delegate every user was actually
+# running -- silently unreachable ghostkeys, which is the failure this whole
+# table exists to prevent. Publishing again on top of an uncommitted record
+# would bake the omission in, so refuse.
 #
-# Publishing again on top of that would bake the omission in, so refuse.
+# `record-migration` no longer writes to the working tree at all, so it can no
+# longer be the cause. What reaches this guard now is a hand-edit, or an
+# `add-migration` append (the documented pre-change step) that has not been
+# committed yet -- which is the ordinary way a human meets it, and the message
+# below covers both.
 #
 # Scope, stated plainly because it is easy to mistake this for more than it is:
 # this is a LOCAL, publish-time guard. It looks for a dirty working tree, and a
@@ -123,19 +131,31 @@ echo "OK: all ${#ALL_HASHES[@]} recorded entries are internally consistent."
 # CI only because refusing to gate it costs nothing; it protects the publisher,
 # not the pull request.
 #
-# The window it was written for is NARROWED at the source, not closed:
-# `record-migration.sh` now commits the record itself, so it no longer sits
-# only in a working tree. What replaces it as the most likely residual is
-# committed-but-never-pushed -- and note this guard used to catch that state's
-# predecessor and no longer does, because a committed record leaves a clean
-# tree. Other ways past it: publishing with `fdev network publish` directly,
-# which never runs the script at all, and a non-git checkout, where the record
-# cannot be committed.
+# The window it was written for is now CLOSED at the source, in two steps:
+# `record-migration.sh` first learned to commit the record (#28), and then to
+# create it on origin/main directly and read it back off the remote before the
+# publish proceeds (ghostkeys#29). There is no longer an interval in which a
+# published delegate's record exists only on the publisher's machine.
+#
+# What is left: publishing with `fdev network publish` directly, which runs
+# none of this.
+#
+# One consequence of that no-drop rule is worth writing down, because it only
+# ever accumulates. An abandoned publish (the record lands, then `fdev network
+# publish` fails) leaves an entry for a delegate nobody ever ran, and this
+# check then makes it permanent: no PR may remove it. Each such entry costs
+# every user one bounded background probe (LEGACY_PROBE_TIMEOUT_SECS = 3s,
+# ui/src/migration.rs) on every vault load, forever. That is the right trade --
+# the alternative is losing ghost keys -- but it compounds, so a deliberate
+# procedure for removing entries that can be PROVEN never to have been
+# published (checked against the network, not against git) may eventually be
+# needed. Removing one by hand today would simply fail this check, which is
+# the correct default.
 #
 # A check that a pull request's recorded tail matches the delegate actually
-# DEPLOYED would be the real gate. It needs to read the published pointer from
-# a node, which no CI job here can do, so it belongs in the publish/verify
-# path. It does not exist yet.
+# DEPLOYED would be a stronger gate still. It needs to read the published
+# pointer from a node, which no CI job here can do, so it belongs in the
+# publish/verify path. It does not exist yet.
 if git rev-parse --git-dir >/dev/null 2>&1; then
     # `git diff HEAD`, not plain `git diff`: the latter compares against the
     # index, so `git add`-ing the record and stopping there would slip past
@@ -144,12 +164,13 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
     if ! git diff HEAD --quiet -- "$LEGACY" 2>/dev/null; then
         echo "ERROR: $LEGACY has uncommitted changes." >&2
         echo "" >&2
-        echo "That usually means a previous publish recorded its delegate hash and the" >&2
-        echo "change was never committed. Publishing again would ship a migration table" >&2
-        echo "missing a delegate that users are running, and their ghostkeys would go" >&2
-        echo "quietly unreachable." >&2
+        echo "Usually that is an 'add-migration' append you have not committed yet, or" >&2
+        echo "a hand-edit. Either way, an entry that exists only in this working tree" >&2
+        echo "protects nobody: publishing would ship a migration table missing a" >&2
+        echo "delegate that users are running, and their ghostkeys would go quietly" >&2
+        echo "unreachable." >&2
         echo "" >&2
-        echo "Commit $LEGACY, then re-run." >&2
+        echo "Commit $LEGACY (in a PR, if it is an add-migration entry), then re-run." >&2
         git --no-pager diff --stat -- "$LEGACY" >&2
         exit 1
     fi
@@ -223,5 +244,5 @@ fi
 
 echo "OK: delegate re-keys in this change."
 echo "    Migration will run from $BASE_LAST to the published hash."
-echo "    Remember: 'cargo make publish-ghostkeys' records the published hash"
-echo "    automatically -- commit the resulting $LEGACY change."
+echo "    'cargo make publish-ghostkeys' records the published hash on"
+echo "    origin/main itself, and refuses to publish if it cannot."

@@ -6,8 +6,12 @@
 # it is right now, so running it after a change records the successor instead of
 # the predecessor -- which is the entry that protects nobody.
 #
-# Normally a no-op: `record-migration` already appended this hash right after it
-# was published. Worth running if a publish bypassed the task graph.
+# Normally a no-op: `record-migration` already put this hash on main when it was
+# published. Worth running if a publish bypassed the task graph.
+#
+# Unlike `record-migration`, this one writes to your working tree and stops
+# there: it records a PRE-change hash, which belongs in the PR that makes the
+# change. Commit it with that PR.
 #
 # Note this is NOT what makes `check-migration` pass. That check verifies no
 # recorded entry was dropped; it does not ask for the new hash, which cannot be

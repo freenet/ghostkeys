@@ -60,6 +60,39 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # scripts/record-migration.sh is the mechanism that puts a published
+  # delegate's hash on main, and legacy_delegates.toml is the only thing that
+  # carries users' ghost keys across a re-key. It is shell, so `cargo test`
+  # cannot see it, and it runs by hand at publish time, so a mistake in it
+  # surfaces at the worst possible moment. These tests drive it against
+  # throwaway local repositories -- no network, no GitHub -- and cover the
+  # failure paths (rejected push, unreachable remote, dirty tree, concurrent
+  # push) rather than only the happy one.
+  scripts:
+    runs-on: ubuntu-latest
+    # The suite runs in about two seconds. A limit this loose only ever fires
+    # on a hang, which is a real possibility for code whose job is retry loops
+    # and network waits -- without it, a hung run burns the job's default
+    # allowance instead of failing.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The script under test exists to `git push` to main, and on a
+          # push-to-main run this job's token can write. It only ever touches
+          # throwaway repositories under /tmp, so this changes nothing today;
+          # it removes the possibility that a future edit makes it matter.
+          persist-credentials: false
+
+      # binstall rather than `cargo install b3sum`, which spends a minute
+      # compiling a hashing tool this job only shells out to.
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install b3sum
+        run: cargo binstall -y --force b3sum
+
+      - name: Migration-record tests
+        run: bash tests/record-migration.test.sh
+
   # The vault ships as a WASM bundle, so none of the Rust tests above can see
   # whether a user can actually read or click anything: rendering a component
   # tree in a native test does not exercise the compiled bundle, its event

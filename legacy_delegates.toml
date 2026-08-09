@@ -51,8 +51,8 @@ delegate_key = "830219b9fda7a16a74cf23c61bd753fe2b68130b43d71406ee2efa01ebad9727
 
 # CI runner build (ubuntu-latest, dtolnay/rust-toolchain@stable resolves
 # to 1.95.0 same as the pin). Recorded so check-migration passes; both
-# entries are pre-publish ephemera, the canonical post-publish hash
-# will be appended by record-migration after `cargo make publish-ghostkeys`.
+# entries are pre-publish ephemera. The canonical hash is recorded on
+# origin/main by record-migration during `cargo make publish-ghostkeys`.
 [[entry]]
 code_hash = "338da2354c37c51ef68c817e946bbdd94979eda722a7c1f6c221968c72fdafd6"
 delegate_key = "66dafd5841e3701892927c044f9dc8799e4052e791457e3e8f0b1614e9b62bf9"
