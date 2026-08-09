@@ -70,8 +70,19 @@ jobs:
   # push) rather than only the happy one.
   scripts:
     runs-on: ubuntu-latest
+    # The suite runs in about two seconds. A limit this loose only ever fires
+    # on a hang, which is a real possibility for code whose job is retry loops
+    # and network waits -- without it, a hung run burns the job's default
+    # allowance instead of failing.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The script under test exists to `git push` to main, and on a
+          # push-to-main run this job's token can write. It only ever touches
+          # throwaway repositories under /tmp, so this changes nothing today;
+          # it removes the possibility that a future edit makes it matter.
+          persist-credentials: false
 
       # binstall rather than `cargo install b3sum`, which spends a minute
       # compiling a hashing tool this job only shells out to.

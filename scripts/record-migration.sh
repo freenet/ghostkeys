@@ -406,12 +406,9 @@ while :; do
     # working tree can ride along.
     NEW_FILE="$WORK/new"
     cp "$BASE_FILE" "$NEW_FILE"
-    # A file not ending in a newline would otherwise get the comment glued onto
-    # its last line.
-    if [ -s "$NEW_FILE" ] && [ -n "$(tail -c1 "$NEW_FILE")" ]; then
-        echo "" >>"$NEW_FILE"
-    fi
     {
+        # This leading blank line also terminates a last line that lacked a
+        # newline, so the comment below cannot end up glued onto it.
         echo ""
         echo "# Added $(date +%Y-%m-%d) (recorded at publish)"
         echo "[[entry]]"

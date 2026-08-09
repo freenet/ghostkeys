@@ -10,9 +10,11 @@
 # operator's checkout can be in.
 #
 # Everything runs against throwaway bare repositories on local disk -- no
-# network, no GitHub -- via GHOSTKEYS_RECORD_REMOTE / _BRANCH. Concurrency and
-# rejection are simulated with pre-receive hooks, which is what the server
-# would actually use to reject a push.
+# network, no GitHub -- via GHOSTKEYS_RECORD_REMOTE / _BRANCH. A rejecting
+# push is simulated with a server-side `pre-receive` hook, which is what a
+# server would really use; a concurrent push needs a `git` shim on PATH, for
+# reasons the case itself explains at length (the obvious hook-based versions
+# both produce a rejection that hides whether `--force` would clobber).
 #
 # Run: bash tests/record-migration.test.sh   (or: cargo make test-scripts)
 set -uo pipefail
@@ -20,6 +22,16 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 UNDER_TEST="$REPO_ROOT/scripts/record-migration.sh"
+REAL_GIT="$(command -v git)"
+
+# Ambient git config must not reach these fixtures. A global `core.hooksPath`
+# -- husky, pre-commit, plenty of dotfiles -- overrides `.git/hooks` in every
+# repo including bare ones, which silently disables the hooks two cases here
+# install and turns the suite red (47/54) on the developer's machine and green
+# on CI. A test that depends on the reviewer's laptop config is not a test.
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_TERMINAL_PROMPT=0
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -48,13 +60,25 @@ check() { # check <description> <condition-exit-code-already-evaluated>
     if [ "$2" -eq 0 ]; then ok "$1"; else bad "$1"; fi
 }
 
-SEED_LEGACY='# Legacy delegate entries for migration.
+for tool in b3sum xxd git awk; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "ERROR: '$tool' is required to run these tests." >&2
+        exit 1
+    fi
+done
+
+# A REAL pair: delegate_key is BLAKE3 over the raw bytes of code_hash. An
+# invented pair would make the fixture something check-migration rejects, and
+# the round-trip case below could then never run against it.
+SEED_HASH="1111111111111111111111111111111111111111111111111111111111111111"
+SEED_KEY=$(printf '%s' "$SEED_HASH" | xxd -r -p | b3sum --no-names)
+SEED_LEGACY="# Legacy delegate entries for migration.
 
 # Added 2026-01-01
 [[entry]]
-code_hash = "1111111111111111111111111111111111111111111111111111111111111111"
-delegate_key = "2222222222222222222222222222222222222222222222222222222222222222"
-'
+code_hash = \"$SEED_HASH\"
+delegate_key = \"$SEED_KEY\"
+"
 
 # Build a fixture: a bare "remote" seeded with legacy_delegates.toml on main,
 # plus a clone containing the script under test and a fake delegate WASM.
@@ -86,6 +110,7 @@ fixture() { # fixture <name> [wasm-bytes]
         git config user.name Test
         mkdir -p scripts target/wasm32-unknown-unknown/release
         cp "$UNDER_TEST" scripts/record-migration.sh
+        cp "$REPO_ROOT/scripts/check-migration.sh" scripts/check-migration.sh
         printf '%s' "$wasm" >target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm
     ) || return 1
 
@@ -115,13 +140,6 @@ remote_file() { # remote_file <base>
 remote_sha() { # remote_sha <base>
     git -C "$1/remote.git" rev-parse main
 }
-
-for tool in b3sum xxd git; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "ERROR: '$tool' is required to run these tests." >&2
-        exit 1
-    fi
-done
 
 # --- 1. Happy path --------------------------------------------------------
 
@@ -174,12 +192,16 @@ run_record "$B/work"
 check "exits 0" "$STATUS"
 [ "$(git -C "$B/remote.git" diff --name-only "$BEFORE" main)" = "legacy_delegates.toml" ]
 check "pushed commit touches only legacy_delegates.toml" $?
-git -C "$B/remote.git" show main:README.md | grep -q "UNRELATED EDIT"
-[ $? -ne 0 ]
-check "the unrelated worktree edit did not reach the remote" $?
-git -C "$B/remote.git" show main:other.txt | grep -q "STAGED EDIT"
-[ $? -ne 0 ]
-check "the STAGED unrelated edit did not reach the remote either" $?
+# Read the blobs into variables first and assert on their CONTENT. A bare
+# `show | grep -q needle; [ $? -ne 0 ]` reports "ok" just as happily when the
+# file is absent and the read failed, so it would keep passing if a fixture
+# stopped seeding these files -- a vacuous assertion that looks green.
+README_ON_MAIN=$(git -C "$B/remote.git" show main:README.md 2>/dev/null)
+OTHER_ON_MAIN=$(git -C "$B/remote.git" show main:other.txt 2>/dev/null)
+[ "$README_ON_MAIN" = "readme" ]
+check "README.md on the remote is still exactly the seeded content" $?
+[ "$OTHER_ON_MAIN" = "other" ]
+check "other.txt on the remote is still exactly the seeded content" $?
 git -C "$B/work" diff --quiet -- README.md
 [ $? -ne 0 ]
 check "the operator's dirty README is still dirty (nothing was committed for them)" $?
@@ -233,22 +255,36 @@ git clone --quiet "$B/remote.git" "$B/other"
     git add rival.txt
     git commit --quiet -m "rival commit"
 )
-# A client-side pre-push hook is the only honest way to land it in the window
-# between our fetch and our push: a server-side pre-receive hook cannot move a
-# ref at all ("ref updates forbidden inside quarantine environment"), so a
-# simulation built on one would prove nothing. This lands the rival commit and
-# then lets our push go through to the server, which rejects it as a genuine
-# non-fast-forward -- the real thing, not a stand-in for it.
-cat >"$B/work/.git/hooks/pre-push" <<EOF
+# The rival has to land BEFORE git connects, and getting that wrong makes this
+# test worthless in a way that looks fine. Two simulations that do NOT work:
+#
+#   - a server-side `pre-receive` hook cannot move a ref at all
+#     ("ref updates forbidden inside quarantine environment");
+#   - a client-side `pre-push` hook runs AFTER git has taken the remote's ref
+#     advertisement, so the rival arrives too late and the server rejects with
+#     a compare-and-swap failure ("cannot lock ref ... is at X but expected
+#     Y") -- which `--force` does not bypass either. Measured: with a pre-push
+#     hook, adding `--force` to the push under test still passed every
+#     assertion here, including the two about clobbering. The guarantee was
+#     unpinned while appearing pinned.
+#
+# So intercept `git` itself on PATH and land the rival before the real push
+# starts. Now the rejection is a genuine non-fast-forward, and `--force` really
+# does clobber the rival -- which is what makes the assertions below mean
+# something.
+mkdir -p "$B/bin"
+cat >"$B/bin/git" <<EOF
 #!/bin/bash
-if [ ! -f "$B/raced-once" ]; then
+if [ "\${1:-}" = push ] && [ ! -f "$B/raced-once" ]; then
     touch "$B/raced-once"
-    git -C "$B/other" push --quiet origin main
+    "$REAL_GIT" -C "$B/other" push --quiet origin main
 fi
-exit 0
+exec "$REAL_GIT" "\$@"
 EOF
-chmod +x "$B/work/.git/hooks/pre-push"
-run_record "$B/work"
+chmod +x "$B/bin/git"
+OUT="$(cd "$B/work" && PATH="$B/bin:$PATH" GHOSTKEYS_RECORD_REMOTE=origin \
+    GHOSTKEYS_RECORD_BRANCH=main timeout 60 bash scripts/record-migration.sh 2>&1)"
+STATUS=$?
 RIVAL=$(git -C "$B/other" rev-parse HEAD)
 check "exits 0 after retrying" "$STATUS"
 echo "$OUT" | grep -q "Push rejected (attempt 1/3)"
@@ -259,6 +295,10 @@ git -C "$B/remote.git" show main:rival.txt | grep -q "someone else's work"
 check "the concurrent commit survived (no force, no clobber)" $?
 [ "$(git -C "$B/remote.git" rev-parse main^)" = "$RIVAL" ]
 check "our commit was rebuilt on top of the new tip" $?
+# Belt on top of the behavioural test above: the no-clobber guarantee is stated
+# in the script's own header, and one word would quietly retire it.
+! grep -n 'git push' "$UNDER_TEST" | grep -q -- '--force'
+check "no 'git push' line in the script carries --force" $?
 
 # --- 7. Push permanently rejected ----------------------------------------
 
@@ -520,6 +560,87 @@ check "the record is written BEFORE the publish (nothing goes live unrecorded)" 
 check "the re-verify runs AFTER the publish" $?
 grep -q 'preflight-migration' "$MK"
 check "sign-webapp still depends on preflight-migration" $?
+
+# --- 17. Same code_hash on main, WRONG delegate_key -----------------------
+#
+# The other half of "one predicate": an entry whose key does not match its hash
+# points the sweep at a delegate that never existed. Reachable from a hand-edit
+# or a botched conflict resolution. It must not be mistaken for a valid record.
+
+case_start "code_hash present with a wrong delegate_key: not treated as recorded"
+B=$(fixture wrongkey)
+H=$(wasm_hash "$B/work")
+K=$(wasm_key "$B/work")
+BOGUS="0000000000000000000000000000000000000000000000000000000000000000"
+git clone --quiet "$B/remote.git" "$B/hand"
+(
+    cd "$B/hand" || exit 1
+    git config user.email t@example.com
+    git config user.name Test
+    printf '\n[[entry]]\ncode_hash = "%s"\ndelegate_key = "%s"\n' "$H" "$BOGUS" \
+        >>legacy_delegates.toml
+    git commit --quiet -am "entry with a wrong key"
+    git push --quiet origin main
+)
+BEFORE=$(remote_sha "$B")
+git -C "$B/work" pull --quiet --ff-only
+run_record "$B/work"
+check "exits 0 (it heals rather than wedging)" "$STATUS"
+[ "$(remote_sha "$B")" != "$BEFORE" ]
+check "did NOT accept the bad entry as already-recorded" $?
+remote_file "$B" | grep -A1 -E "^code_hash *= *\"$H\"" | grep -qE "^delegate_key *= *\"$K\""
+check "a correct pair is now on the remote" $?
+run_record "$B/work" --verify-only
+check "--verify-only agrees" "$STATUS"
+
+# --- 18. What the post-publish --verify-only is actually for --------------
+#
+# Its whole job is the window the pre-publish run cannot see: the branch being
+# rewritten between recording and publishing. Test 11 only covers verify-only
+# either side of a successful record, which never exercises that.
+
+case_start "branch rewritten after the record: --verify-only catches it"
+B=$(fixture rewritten)
+BEFORE=$(remote_sha "$B")
+run_record "$B/work"
+check "record exits 0" "$STATUS"
+run_record "$B/work" --verify-only
+check "verify passes immediately after" "$STATUS"
+git -C "$B/remote.git" update-ref refs/heads/main "$BEFORE" # someone rewrites main
+run_record "$B/work" --verify-only
+[ "$STATUS" -ne 0 ]
+check "verify now FAILS, rather than trusting the earlier success" $?
+echo "$OUT" | grep -q "LIVE AND UNRECORDED"
+check "and says the delegate may already be live and unrecorded" $?
+
+case_start "unknown argument is rejected"
+B=$(fixture badarg)
+BEFORE=$(remote_sha "$B")
+run_record "$B/work" --wat
+[ "$STATUS" -eq 2 ]
+check "exits 2 with a usage message" $?
+[ "$(remote_sha "$B")" = "$BEFORE" ]
+check "did nothing to the remote" $?
+
+# --- 19. Round-trip: check-migration must accept what we wrote ------------
+#
+# The record only has value if the checker can parse it. These two scripts pair
+# the code_hash and delegate_key lines by different means (one scans forward,
+# the other positionally), so a format drift in either would be invisible until
+# a PR failed for reasons nobody could explain.
+
+case_start "check-migration accepts the file record-migration produced"
+B=$(fixture roundtrip)
+run_record "$B/work"
+check "record exits 0" "$STATUS"
+CHECK_OUT="$(cd "$B/work" && timeout 60 bash scripts/check-migration.sh 2>&1)"
+CHECK_STATUS=$?
+check "check-migration exits 0 against the produced file" "$CHECK_STATUS"
+echo "$CHECK_OUT" | grep -q "recorded entries are internally consistent"
+check "it confirms every entry is internally consistent" $?
+echo "$CHECK_OUT" | grep -qi "uncommitted"
+[ $? -ne 0 ]
+check "and its uncommitted-record guard does not fire (nothing was left dirty)" $?
 
 # --- Summary --------------------------------------------------------------
 

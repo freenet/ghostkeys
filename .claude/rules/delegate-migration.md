@@ -71,10 +71,15 @@ cargo make add-migration
 ```
 
 This records the *current* (pre-change) delegate key. It is normally a no-op,
-because `record-migration` already recorded that hash right after it was
+because `record-migration` already recorded that hash on `main` when it was
 published. It is worth running if you are hand-publishing via `fdev` or
 debugging the migration flow — anything that bypassed the task graph and so
 may have skipped the automatic recording.
+
+Unlike `record-migration`, this one writes to your **working tree** and stops
+there. Commit it with the PR that makes the change; until you do,
+`check-migration` will refuse to publish, because an entry that exists only in
+your checkout protects nobody.
 
 ## Publishing changes
 
@@ -82,13 +87,31 @@ may have skipped the automatic recording.
 cargo make publish-ghostkeys
 ```
 
-This builds the delegate, runs `check-migration`, builds the UI, compresses
-and signs the webapp, records the hash on `origin/main` via
-`record-migration`, publishes to Freenet, and then re-reads the record off
-the remote to confirm it is still there.
+This builds the delegate, runs `preflight-migration`, builds the UI,
+compresses and signs the webapp, runs `check-migration`, records the hash on
+`origin/main` via `record-migration`, publishes to Freenet, and then re-reads
+the record off the remote to confirm it is still there.
 
-**There is no follow-up step.** The record reaches `origin/main` before
-anything is published, or the publish does not happen.
+**There is no follow-up step for the record.** It reaches `origin/main` before
+anything is published, or the publish does not happen. (Your *checkout* may
+still need a `git pull` afterwards, and if you published from a branch you
+will want to merge or rebase onto `main` before opening a PR from it.)
+
+### Publish from an up-to-date checkout
+
+`preflight-migration` refuses to publish when your `legacy_delegates.toml` is
+missing entries that `origin/main` already has, and it runs before the UI is
+built so you find out early.
+
+That is not bookkeeping. `ui/build.rs` compiles `legacy_delegates.toml` **from
+your working tree** into the webapp bundle, so the sweep table users actually
+get is the one in your checkout — not the one on `main`. A checkout that is
+merely *behind* would otherwise ship a table missing entries `main` has, and
+orphan everyone running those delegates. `check-migration` cannot catch it: it
+compares against the merge base, where those entries do not exist yet.
+
+If it fires: `git pull --ff-only` on `main` (or merge `main` into your branch),
+then re-run the publish so the bundle is rebuilt from the complete table.
 
 Verify the WASM hash changed:
 ```bash
