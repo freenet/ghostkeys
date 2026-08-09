@@ -11,6 +11,10 @@ mod api;
 mod auto_import;
 mod components;
 mod migration;
+/// Differential test only: ghostkeys' shipped sweep vs `freenet-migrate` 0.4.0.
+/// Not compiled into the vault.
+#[cfg(test)]
+mod migration_differential;
 
 use dioxus::prelude::*;
 
