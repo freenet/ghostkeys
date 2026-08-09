@@ -28,8 +28,25 @@ args = ["scripts/browser-test.sh"]
 
 [tasks.record-migration]
 description = "Record the built delegate hash in legacy_delegates.toml on origin/main"
+# Depends on build-delegate for the same reason check-migration does: without
+# it this hashes whatever stale WASM happens to be sitting in target/ and
+# pushes that hash to a shared branch.
+dependencies = ["build-delegate"]
 command = "bash"
 args = ["scripts/record-migration.sh"]
+
+[tasks.preflight-migration]
+description = "Refuse to publish from a checkout whose migration table is behind main"
+# Read-only, and a dependency of sign-webapp rather than a step in the publish
+# script, so it runs BEFORE the UI is built rather than after it is signed.
+#
+# What it checks is the direction the rest of this machinery does not:
+# ui/build.rs compiles legacy_delegates.toml from the WORKING TREE into the
+# bundle, so a checkout that is merely behind main ships a sweep table missing
+# entries main already has, and orphans everyone running those delegates.
+dependencies = ["build-delegate"]
+command = "bash"
+args = ["scripts/record-migration.sh", "--preflight"]
 
 [tasks.test-scripts]
 description = "Test the migration-record machinery (git only, no network)"
@@ -77,7 +94,15 @@ args = ["scripts/check-delegate-pointer.sh"]
 
 [tasks.sign-webapp]
 description = "Sign the webapp archive with the web-container-tool"
-dependencies = ["compress-webapp", "check-migration", "check-delegate-pointer"]
+# preflight-migration first, and deliberately ahead of compress-webapp: it is
+# the one check whose answer can make the whole build pointless, so paying for
+# a UI build before asking it wastes the operator's time for nothing.
+dependencies = [
+  "preflight-migration",
+  "compress-webapp",
+  "check-migration",
+  "check-delegate-pointer",
+]
 script = '''
 VERSION=$(( $(date +%s) / 60 ))
 echo "Signing with version: $VERSION"
@@ -107,10 +132,13 @@ set -e
 # nothing deployed.
 #
 # The failure this ordering can produce instead is a recorded hash that never
-# gets published, and that is harmless by design: a spare entry makes the
-# sweep probe a delegate nobody runs, finds nothing, and moves on. The file
-# already carries such entries from 2026-05-05 and says so. Under-recording
-# loses users' ghost keys; over-recording costs one wasted probe.
+# gets published: the sweep then probes a delegate nobody runs, finds nothing,
+# and moves on. The file already carries such entries from 2026-05-05 and says
+# so. That is the right trade -- under-recording loses users' ghost keys --
+# but it is not free: each unregistered entry costs every user a
+# LEGACY_PROBE_TIMEOUT_SECS wait (3s, ui/src/migration.rs) on every vault load,
+# forever. If a publish is abandoned after the record lands, remove the spare
+# entry in a PR.
 bash scripts/record-migration.sh
 
 echo ""
@@ -149,6 +177,10 @@ cwd = "./ui"
 
 [tasks.test]
 description = "Run all tests"
+# Includes the shell tests: `cargo test` cannot see scripts/, and the migration
+# machinery is the part of this repo where a silent failure costs users their
+# ghost keys.
+dependencies = ["test-scripts"]
 command = "cargo"
 args = ["test", "--workspace"]
 

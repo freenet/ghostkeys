@@ -73,25 +73,52 @@ WASM="target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm"
 REMOTE="${GHOSTKEYS_RECORD_REMOTE:-origin}"
 BRANCH="${GHOSTKEYS_RECORD_BRANCH:-main}"
 PUSH_ATTEMPTS="${GHOSTKEYS_RECORD_PUSH_ATTEMPTS:-3}"
+# Which GitHub repository the record must land in. Checked against the remote's
+# URL below, because $REMOTE alone is not evidence: pointed at a fork, every
+# check in this script passes about the fork while the real repository has
+# nothing. Non-GitHub URLs (the test harness uses local paths) are exempt.
+EXPECTED_SLUG="${GHOSTKEYS_RECORD_SLUG:-freenet/ghostkeys}"
 
-VERIFY_ONLY=0
-case "${1:-}" in
-    --verify-only) VERIFY_ONLY=1 ;;
-    "") ;;
-    *)
-        echo "usage: $(basename "$0") [--verify-only]" >&2
+case "$PUSH_ATTEMPTS" in
+    '' | *[!0-9]* | 0)
+        echo "ERROR: GHOSTKEYS_RECORD_PUSH_ATTEMPTS must be a positive integer" >&2
         exit 2
         ;;
 esac
+
+MODE=record
+case "${1:-}" in
+    --verify-only) MODE=verify ;;
+    # Read-only, and run early (before the UI is built) so a checkout that
+    # cannot safely publish says so before anything is compiled or signed.
+    --preflight) MODE=preflight ;;
+    "") ;;
+    *)
+        echo "usage: $(basename "$0") [--verify-only | --preflight]" >&2
+        exit 2
+        ;;
+esac
+
+# What to say after an error. Which sentence is true depends on where in the
+# publish we are, and telling an operator "do not publish" about a delegate
+# that is already live wastes the only minutes that matter.
+DIE_TAIL="The delegate's migration record is NOT on $REMOTE/$BRANCH.
+Do not publish until it is: users of the delegate this records would
+have no migration path at the next re-key, and would lose access to
+their ghost keys with no error shown."
+
+if [ "$MODE" = verify ]; then
+    DIE_TAIL="The delegate's migration record is NOT on $REMOTE/$BRANCH.
+This check runs AFTER 'fdev network publish', so if the publish completed,
+that delegate is LIVE AND UNRECORDED right now -- the 2026-08-03 state.
+Get the entry onto $BRANCH immediately; do not wait for the next publish."
+fi
 
 die() {
     echo "" >&2
     echo "ERROR: $*" >&2
     echo "" >&2
-    echo "The delegate's migration record is NOT on $REMOTE/$BRANCH." >&2
-    echo "Do not publish until it is: users of the delegate this records would" >&2
-    echo "have no migration path at the next re-key, and would lose access to" >&2
-    echo "their ghost keys with no error shown." >&2
+    echo "$DIE_TAIL" >&2
     exit 1
 }
 
@@ -117,6 +144,30 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
     die "not a git repository, so the record cannot be pushed anywhere."
 fi
 
+# --- Is this the right repository? ----------------------------------------
+#
+# Before anything touches the network. Everything downstream -- the push, the
+# read-back, even the GitHub cross-check's slug -- is derived from this one
+# URL, so a fork is self-consistent: it would report "Verified on main at
+# <fork>" while freenet/ghostkeys still has nothing. A URL that names a
+# GitHub repository is checkable, so check it rather than printing it and
+# hoping the operator reads carefully at the end of a publish.
+REMOTE_URL=$(git remote get-url "$REMOTE" 2>/dev/null || true)
+if [ -z "$REMOTE_URL" ]; then
+    die "no remote named '$REMOTE' in this checkout."
+fi
+case "$REMOTE_URL" in
+    *github.com*)
+        ACTUAL_SLUG=$(printf '%s' "$REMOTE_URL" | sed -E 's#^.*github\.com[:/]+##; s#\.git$##; s#/$##')
+        if [ "$ACTUAL_SLUG" != "$EXPECTED_SLUG" ]; then
+            die "remote '$REMOTE' points at '$ACTUAL_SLUG', not '$EXPECTED_SLUG'.
+       Recording there would protect nobody: the vault ships the table from
+       $EXPECTED_SLUG. Point '$REMOTE' at the right repository, or set
+       GHOSTKEYS_RECORD_SLUG deliberately if you really mean this one."
+        fi
+        ;;
+esac
+
 # --- Reading the remote ---------------------------------------------------
 
 # Fetch the branch and echo the sha it points at. Every read of "what is
@@ -139,20 +190,95 @@ remote_legacy() {
     fi
 }
 
-entry_recorded() {
-    grep -qE "^code_hash *= *\"$CODE_HASH\"" "$1"
-}
-
-# The pair, adjacent and in order, which is how check-migration reads the file
-# (positional pairing of code_hash and delegate_key lines). Verifying the two
-# separately would pass on a file where they belong to different entries.
+# Is CODE_HASH recorded in $1 together with its matching delegate_key?
+#
+# "Together" means the next delegate_key line after it, which is how both real
+# consumers read the file: ui/build.rs parses [[entry]] blocks, and
+# check-migration pairs the two line types positionally. Checking for the two
+# lines independently would accept a file where they belong to different
+# entries -- an entry pointing at a delegate that never existed, which is the
+# silent hole the table exists to prevent.
+#
+# ONE predicate, used both to decide "already recorded?" and to verify the
+# push. They must not disagree: a stricter verifier than recorder is an
+# unrecoverable publish block (the recorder short-circuits, the verifier then
+# rejects, and no re-run can clear it), and the reverse silently accepts a
+# record it never really made. So tolerate a comment or blank line between the
+# pair, as the format itself does.
+#
+# awk, not `grep -A1 | grep -q`: under `set -o pipefail` the downstream `grep
+# -q` exits at first match and can SIGPIPE the upstream one, turning a present
+# record into a spurious "NOT there" after a successful push.
 entry_pair_recorded() {
-    grep -A1 -E "^code_hash *= *\"$CODE_HASH\"" "$1" |
-        grep -qE "^delegate_key *= *\"$DELEGATE_KEY\""
+    awk -v want="$CODE_HASH" -v key="$DELEGATE_KEY" '
+        /^[[:space:]]*code_hash[[:space:]]*=/ {
+            pending = (index($0, want) > 0)
+            next
+        }
+        pending && /^[[:space:]]*delegate_key[[:space:]]*=/ {
+            if (index($0, key) > 0) { ok = 1; exit }
+            pending = 0
+        }
+        END { exit ok ? 0 : 1 }
+    ' "$1"
 }
 
 code_hashes_of() {
-    grep -oE '^code_hash *= *"[0-9a-f]{64}"' "$1" | grep -oE '[0-9a-f]{64}'
+    grep -oE '^[[:space:]]*code_hash[[:space:]]*=[[:space:]]*"[0-9a-f]{64}"' "$1" |
+        grep -oE '[0-9a-f]{64}'
+}
+
+# --- The direction that protects the ARTIFACT -----------------------------
+#
+# Everything else here is about getting the record onto the branch. This is the
+# opposite direction, and it is not symmetric bookkeeping -- it is what stops
+# this design from relocating the very bug it fixes.
+#
+# ui/build.rs compiles legacy_delegates.toml FROM THE WORKING TREE into the
+# webapp bundle (LEGACY_DELEGATES, read by ui/src/migration.rs). So the table
+# that actually sweeps a user's ghost keys is the one in THIS checkout at build
+# time, not the one on main. Push the record to main only, and a checkout that
+# is merely BEHIND main -- no feature branch needed -- builds and signs a
+# bundle whose table is missing entries main already has. Users running those
+# delegates are orphaned by the publish, silently.
+#
+# check-migration cannot catch it: it compares against `git merge-base HEAD
+# origin/main`, so entries added to main after the branch point are not in its
+# base and can never register as dropped. Correct for reviewing a PR, vacuous
+# as a publish gate.
+#
+# Fatal, not a warning. The bundle is already built by the time this runs; the
+# only safe move is to stop before it is published.
+assert_local_table_covers() { # $1 = the remote branch's copy
+    local missing="$WORK/missing"
+    : >"$missing"
+
+    if [ ! -f "$LEGACY" ]; then
+        DIE_TAIL="Nothing was published."
+        die "$LEGACY is missing from this checkout, but ui/build.rs compiles it
+       into the bundle. Restore it before publishing."
+    fi
+
+    while read -r h; do
+        [ -n "$h" ] || continue
+        grep -q "\"$h\"" "$LEGACY" || echo "  $h" >>"$missing"
+    done < <(code_hashes_of "$1")
+
+    if [ -s "$missing" ]; then
+        DIE_TAIL="Nothing has been published, and nothing was recorded."
+        die "this checkout's $LEGACY is missing $(wc -l <"$missing" | tr -d ' ') entry/entries
+       that $REMOTE/$BRANCH already has:
+
+$(cat "$missing")
+
+       The webapp bundle compiles this file in (ui/build.rs), so the sweep
+       table users get is the one in THIS checkout. Publishing it would leave
+       everyone running those delegates with no migration path.
+
+       Update and rebuild, then re-run:
+         git checkout $BRANCH && git pull --ff-only
+         cargo make publish-ghostkeys"
+    fi
 }
 
 # --- Verification: read it back out of the remote -------------------------
@@ -176,9 +302,9 @@ verify_on_remote() {
     fi
 
     # The URL, not just the remote's name. "Verified on origin/main" is exactly
-    # the sentence a fork or a mis-set remote would also produce, and believing
-    # it is the failure this script exists to prevent.
-    echo "Verified on $BRANCH at $(git remote get-url "$REMOTE" 2>/dev/null || echo "$REMOTE") ($sha):"
+    # the sentence a fork would also produce. The slug assertion above is what
+    # actually rules that out; this makes the answer legible.
+    echo "Verified on $BRANCH at $REMOTE_URL ($sha):"
     echo "  $LEGACY contains code_hash $CODE_HASH"
 
     # An independent second opinion over a different transport, when we can get
@@ -188,14 +314,17 @@ verify_on_remote() {
 }
 
 gh_crosscheck() {
-    local url slug body
+    local slug body
     command -v gh >/dev/null 2>&1 || return 0
-    url=$(git remote get-url "$REMOTE" 2>/dev/null || true)
-    case "$url" in
+    case "$REMOTE_URL" in
         *github.com*) ;;
         *) return 0 ;;
     esac
-    slug=$(printf '%s' "$url" | sed -E 's#^.*github\.com[:/]+##; s#\.git$##')
+    # EXPECTED_SLUG, not one re-derived from the remote: asking the same
+    # possibly-wrong URL a second way is not a second opinion. The two are
+    # already asserted equal above, so this only matters if someone bypasses
+    # that with GHOSTKEYS_RECORD_SLUG.
+    slug="$EXPECTED_SLUG"
     # Twice, a couple of seconds apart: the contents API is served from a cache
     # and can trail a push by a moment.
     local try
@@ -224,11 +353,30 @@ gh_crosscheck() {
 
 # --- --verify-only --------------------------------------------------------
 
-if [ "$VERIFY_ONLY" -eq 1 ]; then
+if [ "$MODE" = verify ]; then
     echo "Checking that the built delegate's record is on $REMOTE/$BRANCH..."
     echo "  code_hash    = $CODE_HASH"
     echo "  delegate_key = $DELEGATE_KEY"
     verify_on_remote
+    exit 0
+fi
+
+# --- Can this checkout safely publish at all? -----------------------------
+#
+# Both directions get checked, and this one comes first because it decides
+# whether the bundle is fit to ship, not merely whether the bookkeeping is
+# tidy. Running it before any push also means a checkout that fails here
+# leaves the branch untouched.
+PRE_SHA=$(fetch_tip)
+remote_legacy "$PRE_SHA" "$WORK/preflight"
+assert_local_table_covers "$WORK/preflight"
+
+if [ "$MODE" = preflight ]; then
+    echo "Preflight OK: this checkout's $LEGACY covers every entry on $REMOTE/$BRANCH"
+    echo "($PRE_SHA), so the bundle built from it will sweep them all."
+    echo "Delegate about to be recorded at publish:"
+    echo "  code_hash    = $CODE_HASH"
+    echo "  delegate_key = $DELEGATE_KEY"
     exit 0
 fi
 
@@ -242,7 +390,8 @@ while :; do
     BASE_FILE="$WORK/base"
     remote_legacy "$BASE_SHA" "$BASE_FILE"
 
-    if entry_recorded "$BASE_FILE"; then
+    # The same predicate the verification uses -- see entry_pair_recorded.
+    if entry_pair_recorded "$BASE_FILE"; then
         # Idempotent: nothing appended, no empty commit, no push. Reached on a
         # re-run, and also when a concurrent publish recorded the same hash
         # while we were retrying.
@@ -377,8 +526,10 @@ elif [ "$CUR_BRANCH" = "$BRANCH" ] &&
     fi
 else
     echo ""
-    echo "NOTE: your checkout does not have this entry yet (that is fine -- the"
-    echo "      record is on $REMOTE/$BRANCH, which is what protects users)."
+    echo "NOTE: your checkout does not have this entry yet. That is expected --"
+    echo "      it names the delegate this very bundle ships, so the bundle does"
+    echo "      not need to sweep it. (The entries the bundle DOES need were"
+    echo "      checked before recording; see the preflight above.)"
     echo "      To pick it up:  git checkout $BRANCH && git pull --ff-only"
     if [ -n "$CUR_BRANCH" ] && [ "$CUR_BRANCH" != "$BRANCH" ]; then
         echo ""

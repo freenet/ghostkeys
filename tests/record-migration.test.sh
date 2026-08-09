@@ -372,6 +372,155 @@ check "exits non-zero" $?
 echo "$OUT" | grep -q "delegate WASM not found"
 check "says what is missing" $?
 
+# --- 13. The direction that protects the published artifact ---------------
+#
+# ui/build.rs compiles legacy_delegates.toml from the WORKING TREE into the
+# bundle, so a checkout that is behind main ships a sweep table missing entries
+# main already has. Recording to main does nothing for those users -- this is
+# the mirror image of the bug this script exists to fix, and the reason the
+# check runs in both directions.
+
+case_start "checkout behind main: refuses to publish, records nothing"
+B=$(fixture behind)
+H=$(wasm_hash "$B/work")
+BEHIND_SHA=$(remote_sha "$B")
+# An entry lands on main that this checkout has never seen.
+git clone --quiet "$B/remote.git" "$B/ahead"
+LOST="cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+LOST_KEY=$(printf '%s' "$LOST" | xxd -r -p | b3sum --no-names)
+(
+    cd "$B/ahead" || exit 1
+    git config user.email t@example.com
+    git config user.name Test
+    {
+        echo ""
+        echo "[[entry]]"
+        echo "code_hash = \"$LOST\""
+        echo "delegate_key = \"$LOST_KEY\""
+    } >>legacy_delegates.toml
+    git commit --quiet -am "someone else's publish"
+    git push --quiet origin main
+)
+AHEAD_SHA=$(remote_sha "$B")
+run_record "$B/work"
+[ "$STATUS" -ne 0 ]
+check "exits non-zero, so the publish aborts before fdev runs" $?
+echo "$OUT" | grep -q "$LOST"
+check "names the entry the bundle would have shipped without" $?
+echo "$OUT" | grep -q "ui/build.rs"
+check "explains that the bundle compiles the local file in" $?
+[ "$(remote_sha "$B")" = "$AHEAD_SHA" ]
+check "recorded nothing on main (it stopped before pushing)" $?
+remote_file "$B" | grep -qE "code_hash *= *\"$H\""
+[ $? -ne 0 ]
+check "the new hash was NOT recorded" $?
+# And it clears once the checkout catches up.
+git -C "$B/work" pull --quiet --ff-only
+run_record "$B/work"
+check "after 'git pull', the same publish is allowed" "$STATUS"
+remote_file "$B" | grep -qE "code_hash *= *\"$H\""
+check "and the record lands" $?
+
+case_start "--preflight is read-only and catches the same state early"
+B=$(fixture preflight)
+BEFORE=$(remote_sha "$B")
+run_record "$B/work" --preflight
+check "passes on an up-to-date checkout" "$STATUS"
+[ "$(remote_sha "$B")" = "$BEFORE" ]
+check "pushed nothing (it is read-only)" $?
+echo "$OUT" | grep -q "Preflight OK"
+check "says so" $?
+# Now put an entry on main that the checkout lacks.
+git clone --quiet "$B/remote.git" "$B/ahead"
+(
+    cd "$B/ahead" || exit 1
+    git config user.email t@example.com
+    git config user.name Test
+    printf '\n[[entry]]\ncode_hash = "%s"\ndelegate_key = "%s"\n' "$LOST" "$LOST_KEY" \
+        >>legacy_delegates.toml
+    git commit --quiet -am "someone else's publish"
+    git push --quiet origin main
+)
+run_record "$B/work" --preflight
+[ "$STATUS" -ne 0 ]
+check "fails when the checkout is behind" $?
+
+# --- 14. A hand-edited entry must not deadlock publishing -----------------
+#
+# The "already recorded?" question and the "did it land?" question have to be
+# the same question. When they were not (code_hash-only vs adjacent-pair), an
+# entry with a comment between its two lines made every run exit 1 -- the fast
+# path skipped the append, the verifier then rejected -- and no re-run could
+# clear it.
+
+case_start "non-adjacent pair on main: no deadlock, no duplicate"
+B=$(fixture nonadjacent)
+H=$(wasm_hash "$B/work")
+K=$(wasm_key "$B/work")
+git clone --quiet "$B/remote.git" "$B/hand"
+(
+    cd "$B/hand" || exit 1
+    git config user.email t@example.com
+    git config user.name Test
+    printf '\n[[entry]]\ncode_hash = "%s"\n# hand-written note\ndelegate_key = "%s"\n' \
+        "$H" "$K" >>legacy_delegates.toml
+    git commit --quiet -am "hand-edited entry"
+    git push --quiet origin main
+)
+HAND_SHA=$(remote_sha "$B")
+git -C "$B/work" pull --quiet --ff-only
+run_record "$B/work"
+check "exits 0 rather than blocking every future publish" "$STATUS"
+[ "$(remote_sha "$B")" = "$HAND_SHA" ]
+check "treats it as already recorded (no duplicate entry appended)" $?
+[ "$(remote_file "$B" | grep -cE "code_hash *= *\"$H\"")" = "1" ]
+check "the entry still appears exactly once" $?
+run_record "$B/work" --verify-only
+check "and --verify-only agrees with it" "$STATUS"
+
+# --- 15. Wrong repository -------------------------------------------------
+
+case_start "remote points at a fork: refuses before touching the network"
+B=$(fixture fork)
+git -C "$B/work" remote set-url origin "https://github.com/notfreenet/ghostkeys.git"
+run_record "$B/work"
+[ "$STATUS" -ne 0 ]
+check "exits non-zero" $?
+echo "$OUT" | grep -q "notfreenet/ghostkeys"
+check "names the repository it was pointed at" $?
+echo "$OUT" | grep -q "freenet/ghostkeys"
+check "names the one it expected" $?
+echo "$OUT" | grep -q "Recording there would protect nobody"
+check "explains why that is not merely untidy" $?
+
+case_start "malformed retry count is rejected, not looped on"
+B=$(fixture badattempts)
+OUT="$(cd "$B/work" && GHOSTKEYS_RECORD_REMOTE=origin GHOSTKEYS_RECORD_BRANCH=main \
+    GHOSTKEYS_RECORD_PUSH_ATTEMPTS=abc timeout 20 bash scripts/record-migration.sh 2>&1)"
+STATUS=$?
+[ "$STATUS" -eq 2 ]
+check "exits 2 immediately (a non-numeric count used to spin forever)" $?
+
+# --- 16. The publish ordering is load-bearing; pin it ---------------------
+#
+# Recording after `fdev network publish` is the state this whole change moved
+# away from, and nothing else in this suite would notice it moving back: every
+# case above drives the script, not the task that sequences it.
+
+case_start "Makefile keeps record-then-publish-then-verify in that order"
+MK="$REPO_ROOT/Makefile.toml"
+REC_LINE=$(grep -n 'bash scripts/record-migration.sh$' "$MK" | head -1 | cut -d: -f1)
+PUB_LINE=$(grep -n 'fdev network publish' "$MK" | head -1 | cut -d: -f1)
+VER_LINE=$(grep -n 'bash scripts/record-migration.sh --verify-only' "$MK" | head -1 | cut -d: -f1)
+[ -n "$REC_LINE" ] && [ -n "$PUB_LINE" ] && [ -n "$VER_LINE" ]
+check "all three steps are present in publish-ghostkeys" $?
+[ "${REC_LINE:-0}" -lt "${PUB_LINE:-0}" ]
+check "the record is written BEFORE the publish (nothing goes live unrecorded)" $?
+[ "${PUB_LINE:-0}" -lt "${VER_LINE:-0}" ]
+check "the re-verify runs AFTER the publish" $?
+grep -q 'preflight-migration' "$MK"
+check "sign-webapp still depends on preflight-migration" $?
+
 # --- Summary --------------------------------------------------------------
 
 echo ""
