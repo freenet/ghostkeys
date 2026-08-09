@@ -33,6 +33,11 @@ export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_TERMINAL_PROMPT=0
 
+# Redirecting the record away from freenet/ghostkeys now requires saying so
+# twice, so that a stale GHOSTKEYS_RECORD_REMOTE export cannot quietly send a
+# real publish's record to a scratch repo. The suite is the legitimate case.
+export GHOSTKEYS_RECORD_TEST=1
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -423,7 +428,6 @@ check "says what is missing" $?
 case_start "checkout behind main: refuses to publish, records nothing"
 B=$(fixture behind)
 H=$(wasm_hash "$B/work")
-BEHIND_SHA=$(remote_sha "$B")
 # An entry lands on main that this checkout has never seen.
 git clone --quiet "$B/remote.git" "$B/ahead"
 LOST="cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
@@ -526,12 +530,56 @@ git -C "$B/work" remote set-url origin "https://github.com/notfreenet/ghostkeys.
 run_record "$B/work"
 [ "$STATUS" -ne 0 ]
 check "exits non-zero" $?
+# Match on the guard's own words, not merely on the URL appearing somewhere.
+# Without this the case passes when the run merely fails to reach github.com,
+# which would leave the guard itself untested on any machine without network.
+echo "$OUT" | grep -q "Recording there would protect nobody"
+check "fails on the identity guard, not on a network error" $?
 echo "$OUT" | grep -q "notfreenet/ghostkeys"
 check "names the repository it was pointed at" $?
 echo "$OUT" | grep -q "freenet/ghostkeys"
 check "names the one it expected" $?
-echo "$OUT" | grep -q "Recording there would protect nobody"
-check "explains why that is not merely untidy" $?
+echo "$OUT" | grep -qi "could not fetch"
+[ $? -ne 0 ]
+check "and never got as far as talking to the network" $?
+
+# --- 15b. The default path must not trust the name 'origin' ---------------
+#
+# The fork case above is the visible half. This is the half that made it worth
+# a mechanism rather than a printed URL: with no overrides at all, `origin`
+# pointing anywhere other than the canonical repository must stop the run --
+# including at a local path, which is what a stale debugging setup looks like.
+
+case_start "no overrides: origin must be the canonical repository"
+B=$(fixture canonical)
+BEFORE=$(remote_sha "$B")
+OUT="$(cd "$B/work" && env -u GHOSTKEYS_RECORD_REMOTE -u GHOSTKEYS_RECORD_BRANCH \
+    -u GHOSTKEYS_RECORD_SLUG -u GHOSTKEYS_RECORD_TEST \
+    timeout 60 bash scripts/record-migration.sh 2>&1)"
+STATUS=$?
+[ "$STATUS" -ne 0 ]
+check "refuses when origin is a local scratch repo" $?
+echo "$OUT" | grep -q "freenet/ghostkeys"
+check "names the repository it expected" $?
+[ "$(remote_sha "$B")" = "$BEFORE" ]
+check "recorded nothing" $?
+
+case_start "redirecting without saying so twice is refused"
+B=$(fixture staleexport)
+BEFORE=$(remote_sha "$B")
+OUT="$(cd "$B/work" && env -u GHOSTKEYS_RECORD_TEST GHOSTKEYS_RECORD_REMOTE=origin \
+    timeout 60 bash scripts/record-migration.sh 2>&1)"
+STATUS=$?
+[ "$STATUS" -ne 0 ]
+check "a lone GHOSTKEYS_RECORD_REMOTE (the stale-export case) is refused" $?
+echo "$OUT" | grep -q "GHOSTKEYS_RECORD_TEST=1"
+check "says what to set if the redirect is deliberate" $?
+[ "$(remote_sha "$B")" = "$BEFORE" ]
+check "recorded nothing" $?
+run_record "$B/work"
+check "and with GHOSTKEYS_RECORD_TEST=1 it proceeds" "$STATUS"
+echo "$OUT" | grep -q "REDIRECTED"
+check "announcing the redirect loudly" $?
 
 case_start "malformed retry count is rejected, not looped on"
 B=$(fixture badattempts)

@@ -56,6 +56,8 @@
 #
 # Usage:
 #   scripts/record-migration.sh                 record, push, verify
+#   scripts/record-migration.sh --preflight     assert this checkout is fit to
+#                                               publish; changes nothing
 #   scripts/record-migration.sh --verify-only   only assert the record is on
 #                                               the remote; changes nothing
 set -euo pipefail
@@ -66,17 +68,20 @@ cd "$REPO_ROOT"
 LEGACY="legacy_delegates.toml"
 WASM="target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm"
 
-# Overridable so the test harness can point at a throwaway bare repo. Defaults
-# are the real thing; there is deliberately no switch that turns the push off,
-# because an opt-out is how this ends up not running on the one publish that
-# mattered.
+# Overridable so the test harness can point at a throwaway bare repo. There is
+# deliberately no switch that turns the push OFF -- an opt-out is how this ends
+# up not running on the one publish that mattered -- but a switch that
+# REDIRECTS it is the same hazard in disguise: a stale
+# `export GHOSTKEYS_RECORD_REMOTE=/tmp/...` left from a debugging session would
+# send the record to a scratch repo and let the publish proceed, green. So
+# redirecting requires saying so on purpose, and announces itself.
 REMOTE="${GHOSTKEYS_RECORD_REMOTE:-origin}"
 BRANCH="${GHOSTKEYS_RECORD_BRANCH:-main}"
 PUSH_ATTEMPTS="${GHOSTKEYS_RECORD_PUSH_ATTEMPTS:-3}"
-# Which GitHub repository the record must land in. Checked against the remote's
-# URL below, because $REMOTE alone is not evidence: pointed at a fork, every
-# check in this script passes about the fork while the real repository has
-# nothing. Non-GitHub URLs (the test harness uses local paths) are exempt.
+# Which repository the record must land in. $REMOTE alone is not evidence:
+# `origin` is the FORK on the standard `gh repo fork` layout, and every check
+# here -- push, read-back, API cross-check -- derives from that one URL, so a
+# fork is entirely self-consistent while freenet/ghostkeys has nothing.
 EXPECTED_SLUG="${GHOSTKEYS_RECORD_SLUG:-freenet/ghostkeys}"
 
 case "$PUSH_ATTEMPTS" in
@@ -156,17 +161,64 @@ REMOTE_URL=$(git remote get-url "$REMOTE" 2>/dev/null || true)
 if [ -z "$REMOTE_URL" ]; then
     die "no remote named '$REMOTE' in this checkout."
 fi
-case "$REMOTE_URL" in
-    *github.com*)
-        ACTUAL_SLUG=$(printf '%s' "$REMOTE_URL" | sed -E 's#^.*github\.com[:/]+##; s#\.git$##; s#/$##')
-        if [ "$ACTUAL_SLUG" != "$EXPECTED_SLUG" ]; then
-            die "remote '$REMOTE' points at '$ACTUAL_SLUG', not '$EXPECTED_SLUG'.
+REDIRECTED=0
+if [ -n "${GHOSTKEYS_RECORD_REMOTE:-}" ] ||
+    [ -n "${GHOSTKEYS_RECORD_BRANCH:-}" ] ||
+    [ -n "${GHOSTKEYS_RECORD_SLUG:-}" ]; then
+    REDIRECTED=1
+fi
+
+if [ "$REDIRECTED" -eq 1 ]; then
+    # Deliberate redirection has to be deliberate twice, because the dangerous
+    # version of it is an environment variable nobody remembers exporting.
+    if [ "${GHOSTKEYS_RECORD_TEST:-}" != "1" ]; then
+        die "GHOSTKEYS_RECORD_REMOTE/_BRANCH/_SLUG is set, which sends the record
+       somewhere other than $EXPECTED_SLUG. If that is deliberate, set
+       GHOSTKEYS_RECORD_TEST=1 as well. If it is not -- a leftover export from
+       a debugging session is the usual cause -- unset it:
+         unset GHOSTKEYS_RECORD_REMOTE GHOSTKEYS_RECORD_BRANCH GHOSTKEYS_RECORD_SLUG"
+    fi
+    echo "############################################################"
+    echo "# REDIRECTED: this run does NOT record to $EXPECTED_SLUG."
+    echo "#   remote: $REMOTE ($REMOTE_URL)"
+    echo "#   branch: $BRANCH"
+    echo "# Nothing published from this run is protected on the real"
+    echo "# repository. This is for testing only."
+    echo "############################################################"
+
+    # Redirection is for throwaway local repositories. A redirect that still
+    # points at a GitHub repository is a fork, not a fixture, and recording a
+    # real delegate there is the fork hazard with the guard switched off.
+    case "$REMOTE_URL" in
+        *github.com*)
+            ACTUAL_SLUG=$(printf '%s' "$REMOTE_URL" |
+                sed -E 's#^.*github\.com[:/]+##; s#\.git$##; s#/$##')
+            if [ "$ACTUAL_SLUG" != "$EXPECTED_SLUG" ]; then
+                die "redirected to '$ACTUAL_SLUG' on GitHub, which is not $EXPECTED_SLUG.
        Recording there would protect nobody: the vault ships the table from
-       $EXPECTED_SLUG. Point '$REMOTE' at the right repository, or set
-       GHOSTKEYS_RECORD_SLUG deliberately if you really mean this one."
-        fi
-        ;;
-esac
+       $EXPECTED_SLUG, and a fork's copy is invisible to every user.
+       If you really mean that repository, name it in GHOSTKEYS_RECORD_SLUG."
+            fi
+            ;;
+    esac
+else
+    # The default path, and the one that matters. Printing the URL and trusting
+    # the operator to notice is what this script's own header calls a reminder
+    # rather than a mechanism, so assert it instead.
+    case "$REMOTE_URL" in
+        *github.com[:/]"$EXPECTED_SLUG" | *github.com[:/]"$EXPECTED_SLUG".git | \
+            *github.com[:/]"$EXPECTED_SLUG"/) ;;
+        *)
+            die "remote '$REMOTE' is '$REMOTE_URL', which is not $EXPECTED_SLUG.
+       Recording there would protect nobody: the vault ships the table from
+       $EXPECTED_SLUG, and a fork's copy is invisible to every user.
+       Point '$REMOTE' at git@github.com:$EXPECTED_SLUG.git (a fork's clone
+       usually calls the canonical repository 'upstream'), or set
+       GHOSTKEYS_RECORD_REMOTE plus GHOSTKEYS_RECORD_TEST=1 if you really mean
+       somewhere else."
+            ;;
+    esac
+fi
 
 # --- Reading the remote ---------------------------------------------------
 
@@ -296,7 +348,7 @@ verify_on_remote() {
     if ! entry_pair_recorded "$after"; then
         die "read $LEGACY back from $REMOTE/$BRANCH ($sha) and the entry is NOT there.
        Something rewrote the branch, or the push went somewhere else.
-       Record it by hand before publishing:
+       Record it by hand:
          code_hash    = $CODE_HASH
          delegate_key = $DELEGATE_KEY"
     fi

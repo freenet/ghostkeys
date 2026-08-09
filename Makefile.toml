@@ -135,10 +135,13 @@ set -e
 # gets published: the sweep then probes a delegate nobody runs, finds nothing,
 # and moves on. The file already carries such entries from 2026-05-05 and says
 # so. That is the right trade -- under-recording loses users' ghost keys --
-# but it is not free: each unregistered entry costs every user a
-# LEGACY_PROBE_TIMEOUT_SECS wait (3s, ui/src/migration.rs) on every vault load,
-# forever. If a publish is abandoned after the record lands, remove the spare
-# entry in a PR.
+# but it is not free, and the cost is worse than "one wasted probe": every
+# user pays a bounded 3s background probe (LEGACY_PROBE_TIMEOUT_SECS,
+# ui/src/migration.rs) for that entry on EVERY vault load, permanently, and it
+# compounds with each one. check-migration's no-drop rule then makes it
+# unremovable by ordinary means. So if a publish is abandoned after the record
+# lands, treat the spare entry as a small debt worth clearing deliberately --
+# see the note in scripts/check-migration.sh.
 bash scripts/record-migration.sh
 
 echo ""

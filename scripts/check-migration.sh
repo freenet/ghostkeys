@@ -140,6 +140,18 @@ echo "OK: all ${#ALL_HASHES[@]} recorded entries are internally consistent."
 # What is left: publishing with `fdev network publish` directly, which runs
 # none of this.
 #
+# One consequence of that no-drop rule is worth writing down, because it only
+# ever accumulates. An abandoned publish (the record lands, then `fdev network
+# publish` fails) leaves an entry for a delegate nobody ever ran, and this
+# check then makes it permanent: no PR may remove it. Each such entry costs
+# every user one bounded background probe (LEGACY_PROBE_TIMEOUT_SECS = 3s,
+# ui/src/migration.rs) on every vault load, forever. That is the right trade --
+# the alternative is losing ghost keys -- but it compounds, so a deliberate
+# procedure for removing entries that can be PROVEN never to have been
+# published (checked against the network, not against git) may eventually be
+# needed. Removing one by hand today would simply fail this check, which is
+# the correct default.
+#
 # A check that a pull request's recorded tail matches the delegate actually
 # DEPLOYED would be a stronger gate still. It needs to read the published
 # pointer from a node, which no CI job here can do, so it belongs in the
