@@ -4,9 +4,9 @@
 # What actually protects users is that the delegate key they are running RIGHT
 # NOW is still listed in legacy_delegates.toml, because that table is what the
 # vault's migration sweep probes. The key users are running is the last entry
-# recorded on the base branch -- `record-migration` appends every published
-# hash immediately after `publish-ghostkeys`, so the tail of that file is the
-# deployed delegate.
+# recorded on the base branch -- `record-migration` puts every hash on main as
+# part of `publish-ghostkeys`, before the publish goes out, so the tail of that
+# file is the deployed delegate.
 #
 # So the invariant checked here is: *this change drops no previously-recorded
 # entry*. It deliberately does NOT require the newly-built hash to be recorded.
@@ -18,8 +18,9 @@
 # computes. The result was a guard that failed exactly when you followed its
 # own documented order, and that people would have learned to route around.
 #
-# The successor's hash is recorded post-publish by `record-migration`, which is
-# the only moment it is knowable and the only moment it matters.
+# The successor's hash is recorded by `record-migration` at publish time, from
+# the WASM that is about to ship -- the only moment it is knowable and the only
+# moment it matters.
 #
 # Usage:
 #   scripts/check-migration.sh [BASE_LEGACY_TOML]
@@ -123,19 +124,20 @@ echo "OK: all ${#ALL_HASHES[@]} recorded entries are internally consistent."
 # CI only because refusing to gate it costs nothing; it protects the publisher,
 # not the pull request.
 #
-# The window it was written for is NARROWED at the source, not closed:
-# `record-migration.sh` now commits the record itself, so it no longer sits
-# only in a working tree. What replaces it as the most likely residual is
-# committed-but-never-pushed -- and note this guard used to catch that state's
-# predecessor and no longer does, because a committed record leaves a clean
-# tree. Other ways past it: publishing with `fdev network publish` directly,
-# which never runs the script at all, and a non-git checkout, where the record
-# cannot be committed.
+# The window it was written for is now CLOSED at the source, in two steps:
+# `record-migration.sh` first learned to commit the record (#28), and then to
+# create it on origin/main directly and read it back off the remote before the
+# publish proceeds (ghostkeys#29). There is no longer an interval in which a
+# published delegate's record exists only on the publisher's machine, so this
+# guard's job has shrunk to catching a hand-edit of this file.
+#
+# What is left: publishing with `fdev network publish` directly, which runs
+# none of this.
 #
 # A check that a pull request's recorded tail matches the delegate actually
-# DEPLOYED would be the real gate. It needs to read the published pointer from
-# a node, which no CI job here can do, so it belongs in the publish/verify
-# path. It does not exist yet.
+# DEPLOYED would be a stronger gate still. It needs to read the published
+# pointer from a node, which no CI job here can do, so it belongs in the
+# publish/verify path. It does not exist yet.
 if git rev-parse --git-dir >/dev/null 2>&1; then
     # `git diff HEAD`, not plain `git diff`: the latter compares against the
     # index, so `git add`-ing the record and stopping there would slip past
@@ -223,5 +225,5 @@ fi
 
 echo "OK: delegate re-keys in this change."
 echo "    Migration will run from $BASE_LAST to the published hash."
-echo "    Remember: 'cargo make publish-ghostkeys' records the published hash"
-echo "    automatically -- commit the resulting $LEGACY change."
+echo "    'cargo make publish-ghostkeys' records the published hash on"
+echo "    origin/main itself, and refuses to publish if it cannot."

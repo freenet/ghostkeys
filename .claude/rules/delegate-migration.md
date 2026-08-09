@@ -27,9 +27,28 @@ data:
      `legacy_delegates.toml`, so removing the entry a user is running makes
      their ghostkeys unreachable with no error shown.
 
-2. **`cargo make record-migration`** runs automatically after a successful
-   publish. It appends the just-deployed hash as the new baseline, so the
-   *next* delegate change is covered even if nobody runs `add-migration`.
+2. **`cargo make record-migration`** runs automatically as part of
+   `publish-ghostkeys`, *before* the publish itself. It records the hash about
+   to be deployed as the new baseline, so the *next* delegate change is
+   covered even if nobody runs `add-migration`.
+
+   It writes to **`origin/main`, not to your checkout**: it builds the commit
+   on top of the fetched tip of main and pushes it there, then re-reads the
+   file off the remote to confirm it landed. Your branch, HEAD, index and
+   working tree are not touched (beyond a fast-forward of a clean local
+   `main`, as a convenience).
+
+   That is deliberate. Recording into the local checkout leaves the record one
+   forgotten `git push` — or one abandoned PR — away from not existing, which
+   is exactly the 2026-08-03 failure (ghostkeys#29, and see the `Historical
+   gotcha` below). No CI check can catch that state, because a record that
+   never left a laptop produces no event for CI to inspect.
+
+   **If it cannot land the record, it fails and the publish aborts** with
+   nothing deployed. Fix whatever it reports (usually connectivity, or main
+   having moved) and re-run; it is idempotent, so an already-recorded hash is
+   a no-op. If `main` is ever branch-protected, it prints the exact entry to
+   put in a PR, and the publish will sail past that step once the PR merges.
 
 ### What the check deliberately does NOT require
 
@@ -64,11 +83,12 @@ cargo make publish-ghostkeys
 ```
 
 This builds the delegate, runs `check-migration`, builds the UI, compresses
-and signs the webapp, publishes to Freenet, and then runs `record-migration`
-to append the deployed hash to `legacy_delegates.toml`.
+and signs the webapp, records the hash on `origin/main` via
+`record-migration`, publishes to Freenet, and then re-reads the record off
+the remote to confirm it is still there.
 
-**After the publish completes, commit and push `legacy_delegates.toml`**
-so other machines / future sessions see the updated baseline.
+**There is no follow-up step.** The record reaches `origin/main` before
+anything is published, or the publish does not happen.
 
 Verify the WASM hash changed:
 ```bash

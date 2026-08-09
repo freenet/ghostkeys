@@ -27,9 +27,14 @@ command = "bash"
 args = ["scripts/browser-test.sh"]
 
 [tasks.record-migration]
-description = "Append just-published delegate hash to legacy_delegates.toml"
+description = "Record the built delegate hash in legacy_delegates.toml on origin/main"
 command = "bash"
 args = ["scripts/record-migration.sh"]
+
+[tasks.test-scripts]
+description = "Test the migration-record machinery (git only, no network)"
+command = "bash"
+args = ["tests/record-migration.test.sh"]
 
 [tasks.build-delegate]
 description = "Build the ghostkey delegate WASM reproducibly"
@@ -89,6 +94,26 @@ description = "Publish the ghostkey UI to the Freenet network"
 dependencies = ["sign-webapp"]
 script = '''
 set -e
+
+# Record BEFORE publishing, which is the opposite of the order this used to
+# run in, on purpose.
+#
+# The hash is knowable either way -- it comes from the WASM that sign-webapp
+# already built and bundled, not from anything the publish returns -- so the
+# only thing the old ordering bought was a window. If recording failed after a
+# successful publish, the delegate was already live and unrecorded, which is
+# precisely the 2026-08-03 incident; all the script could do was shout about a
+# state that already existed. Recording first turns that into an abort with
+# nothing deployed.
+#
+# The failure this ordering can produce instead is a recorded hash that never
+# gets published, and that is harmless by design: a spare entry makes the
+# sweep probe a delegate nobody runs, finds nothing, and moves on. The file
+# already carries such entries from 2026-05-05 and says so. Under-recording
+# loses users' ghost keys; over-recording costs one wasted probe.
+bash scripts/record-migration.sh
+
+echo ""
 fdev network publish \
   --code published-contract/web_container_contract.wasm \
   --parameters published-contract/webapp.parameters \
@@ -98,11 +123,11 @@ fdev network publish \
 echo ""
 echo "Published to: http://127.0.0.1:7509/v1/contract/web/${CONTRACT_ID}/"
 
-# After publishing, record the deployed hash as the new baseline so
-# the next delegate change can migrate from it without anyone having
-# to remember to run `add-migration` first.
+# Read the record back off the remote once more, now that the delegate is
+# actually live. Cheap, and it catches the one case the pre-publish run cannot:
+# the branch being rewritten in between.
 echo ""
-bash scripts/record-migration.sh
+bash scripts/record-migration.sh --verify-only
 '''
 
 # --- Development tasks ---
