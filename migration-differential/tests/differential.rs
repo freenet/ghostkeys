@@ -63,13 +63,20 @@ struct RecordedScenario {
     what_it_shows: String,
     agreement: Agreement,
     initial_store: Vec<(String, String)>,
+    /// Secret keys the successor's storage refuses to write. `set_secret`
+    /// returns false for exactly these, which is how the crate learns about a
+    /// storage failure.
+    failing_secret_keys: Vec<String>,
     predecessors: Vec<RecordedPredecessor>,
     #[allow(dead_code)]
     ghostkeys_store: Vec<(String, String)>,
     ghostkeys_visible: Vec<String>,
+    #[allow(dead_code)]
+    ghostkeys_indexed: Vec<String>,
     ghostkeys_complete_pairs: Vec<String>,
     #[allow(dead_code)]
     ghostkeys_recovered: usize,
+    ghostkeys_failed_imports: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,32 +122,61 @@ fn cert_key(fp: &str) -> Vec<u8> {
 fn sk_key(fp: &str) -> Vec<u8> {
     format!("gk:sk:{fp}").into_bytes()
 }
+fn perm_key(fp: &str) -> Vec<u8> {
+    format!("gk:perms:{fp}").into_bytes()
+}
 const INDEX_KEY: &[u8] = b"gk:index";
 
 #[derive(Debug, Clone, Default)]
 struct Namespace {
     secrets: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Secret keys this store refuses to write, from the recorded fixture.
+    failing: BTreeSet<Vec<u8>>,
 }
 
 impl Namespace {
-    fn from_recorded(pairs: &[(String, String)]) -> Self {
+    fn from_recorded(scenario: &RecordedScenario) -> Self {
         Self {
-            secrets: pairs.iter().map(|(k, v)| (unhex(k), unhex(v))).collect(),
+            secrets: scenario
+                .initial_store
+                .iter()
+                .map(|(k, v)| (unhex(k), unhex(v)))
+                .collect(),
+            failing: scenario
+                .failing_secret_keys
+                .iter()
+                .map(|k| unhex(k))
+                .collect(),
         }
     }
 
-    /// What `ListGhostKeys` would report: the `gk:index` CBOR list, which is
-    /// what the user actually sees in the vault.
+    /// Raw `gk:index` membership.
     ///
     /// Decoded without `ghostkey_common` (which this crate cannot link): the
     /// index is a CBOR array of text strings, so the bytes are read directly.
-    fn visible(&self) -> BTreeSet<String> {
+    fn indexed(&self) -> BTreeSet<String> {
         let Some(bytes) = self.secrets.get(INDEX_KEY) else {
             return BTreeSet::new();
         };
         decode_cbor_string_array(bytes)
             .unwrap_or_else(|| panic!("gk:index is not a CBOR string array: {bytes:?}"))
             .into_iter()
+            .collect()
+    }
+
+    /// What `ListGhostKeys` actually reports: indexed AND carrying a permission
+    /// grant, because `handle_list` skips every fingerprint the requestor lacks
+    /// `ReadPublic` on (`handlers.rs:411`).
+    ///
+    /// Presence of `gk:perms:<fp>` is a sufficient proxy here: ghostkeys writes
+    /// a full-scope grant on every import (so presence implies `ReadPublic`,
+    /// which the ghostkeys side asserts by decoding the real blob), and the
+    /// crate writes no grant at all, because permissions are not among the
+    /// exported pairs and no adapter could supply them.
+    fn visible(&self) -> BTreeSet<String> {
+        self.indexed()
+            .into_iter()
+            .filter(|fp| self.secrets.contains_key(&perm_key(fp)))
             .collect()
     }
 
@@ -240,6 +276,9 @@ impl SecretStore for Namespace {
         self.secrets.contains_key(key)
     }
     fn set_secret(&mut self, key: &[u8], value: &[u8]) -> bool {
+        if self.failing.contains(key) {
+            return false;
+        }
         self.secrets.insert(key.to_vec(), value.to_vec());
         true
     }
@@ -325,7 +364,7 @@ struct CrateResult {
 fn run(scenario: &RecordedScenario, policy: SecretSelectionPolicy) -> CrateResult {
     run_over(
         &scenario.predecessors,
-        Namespace::from_recorded(&scenario.initial_store),
+        Namespace::from_recorded(scenario),
         policy,
     )
 }
@@ -439,15 +478,35 @@ fn check_against_ghostkeys(s: &RecordedScenario, r: &CrateResult) {
 #[test]
 fn predecessor_holds_keys_and_exports_them() {
     let s = scenario("predecessor_holds_keys_and_exports_them");
-    assert_eq!(s.agreement, Agreement::Agree);
     assert_eq!(s.predecessors[0].ghostkeys_bucket, "Exported(2)");
+    assert_eq!(
+        set(&s.ghostkeys_visible),
+        BTreeSet::from(["fpA".to_string(), "fpB".to_string()]),
+        "the sweep's imports are listable"
+    );
 
     let r = run(&s, SecretSelectionPolicy::NewestSnapshotWins);
     assert_eq!(r.classifications, vec!["Imported"]);
+    // The bytes land, and the index even names them...
     assert_eq!(
-        r.store.visible(),
+        r.store.complete_pairs(),
         BTreeSet::from(["fpA".to_string(), "fpB".to_string()])
     );
+    assert_eq!(
+        r.store.indexed(),
+        BTreeSet::from(["fpA".to_string(), "fpB".to_string()])
+    );
+    // ...but no grant was recorded for either, so `handle_list` shows neither.
+    assert!(
+        r.store.visible().is_empty(),
+        "a raw-pair import grants nothing, so every recovered key is a dead entry"
+    );
+    for fp in ["fpA", "fpB"] {
+        assert!(
+            !r.store.secrets.contains_key(&perm_key(fp)),
+            "permissions are not among the exported pairs, so no adapter can supply them"
+        );
+    }
     check_against_ghostkeys(&s, &r);
 }
 
@@ -543,18 +602,23 @@ fn newest_snapshot_wins_halts_on_the_first_silence() {
         "the older, data-bearing generation is never probed"
     );
     assert!(
-        r.store.visible().is_empty(),
-        "the crate's default policy recovers nothing here"
+        r.store.complete_pairs().is_empty(),
+        "the crate's default policy recovers nothing here -- not even the bytes"
     );
     check_against_ghostkeys(&s, &r);
 
-    // Union does not terminate on Unresponsive, and does recover the key.
+    // Union does not terminate on Unresponsive, so it does recover the bytes.
+    // They are still not listable, for the separate permission reason.
     let u = run(&s, union());
     assert_eq!(
         u.classifications,
         vec!["Unresponsive(no-reply)", "Imported"]
     );
-    assert_eq!(u.store.visible(), set(&s.ghostkeys_visible));
+    assert_eq!(u.store.complete_pairs(), set(&s.ghostkeys_complete_pairs));
+    assert!(
+        u.store.visible().is_empty(),
+        "recovered, indexed, and still invisible: no grant was carried"
+    );
 }
 
 /// **Expected before running:** keys created under two different generations.
@@ -580,7 +644,7 @@ fn newest_snapshot_wins_strands_an_older_generation() {
         "newest-first, stopping at the first data-bearing generation"
     );
     assert_eq!(
-        r.store.visible(),
+        r.store.complete_pairs(),
         BTreeSet::from(["fpNew".to_string()]),
         "fpOld is stranded"
     );
@@ -594,9 +658,13 @@ fn newest_snapshot_wins_strands_an_older_generation() {
         "Union does fix the SELECTION divergence"
     );
     assert_eq!(
-        u.store.visible(),
+        u.store.indexed(),
         BTreeSet::from(["fpNew".to_string()]),
-        "but the older generation's index write is clobber-skipped, so fpOld stays invisible"
+        "but the older generation's index write is clobber-skipped, so fpOld is not listed"
+    );
+    assert!(
+        u.store.visible().is_empty(),
+        "and neither generation carries a grant, so nothing is listable regardless"
     );
 }
 
@@ -707,9 +775,14 @@ fn recovered_keys_are_invisible_when_the_successor_already_has_an_index() {
         "both halves of fpOld ARE written"
     );
     assert_eq!(
+        r.store.indexed(),
+        BTreeSet::from(["fpMine".to_string()]),
+        "but gk:index was skipped by never-clobber, so fpOld is not even listed"
+    );
+    assert_eq!(
         r.store.visible(),
         BTreeSet::from(["fpMine".to_string()]),
-        "but gk:index was skipped by never-clobber, so fpOld is invisible"
+        "only the user's own pre-existing key, which already had its grant, stays listable"
     );
     check_against_ghostkeys(&s, &r);
 }
@@ -720,13 +793,17 @@ fn recovered_keys_are_invisible_when_the_successor_already_has_an_index() {
 /// crate documents that markers must never be swept forward. It strips them, so
 /// the app-visible store matches the sweep's exactly.
 ///
-/// This is an **agreement**, and it is the one place the crate does something
-/// ghostkeys does not have to: ghostkeys never sees a marker at all, because it
-/// migrates through `ImportGhostKey` rather than copying raw pairs.
+/// This is the one place the crate does something ghostkeys does not have to:
+/// ghostkeys never sees a marker at all, because it migrates through
+/// `ImportGhostKey` rather than copying raw pairs. The strip is correct -- the
+/// scenario's overall outcome still diverges, because the recovered key carries
+/// no permission grant like every other recovering scenario.
 #[test]
 fn a_stale_migration_marker_is_not_swept_forward() {
     let s = scenario("predecessor_carries_a_stale_migration_marker");
-    assert_eq!(s.agreement, Agreement::Agree);
+    // The marker strip itself is correct; the scenario still diverges, for the
+    // permission reason every recovering scenario does.
+    assert!(matches!(s.agreement, Agreement::DivergeOutcome(_)));
 
     // The fixture's stale key really is in the crate's reserved namespace --
     // otherwise this would be testing an ordinary secret and the strip would
@@ -751,6 +828,150 @@ fn a_stale_migration_marker_is_not_swept_forward() {
     assert!(
         !r.store.secrets.contains_key(&stale[0]),
         "the predecessor's completion marker must not be swept into the successor"
+    );
+    check_against_ghostkeys(&s, &r);
+}
+
+/// **Expected before running:** one storage failure on the NEWEST predecessor.
+/// ghostkeys counts a failed import, warns, and carries on to recover the older
+/// generation. The crate returns `Incomplete` and sets `terminated = true`
+/// **unconditionally** (`delegate_migrate.rs:783`), so every older generation
+/// is `Superseded`.
+///
+/// **Divergence (outcome), and it survives the policy switch** -- the crate's
+/// own `incomplete_newer_halts_before_older_under_both_policies` pins the
+/// unconditional halt for Union too, so unlike D1 and D2 there is no policy
+/// that recovers from this.
+#[test]
+fn one_failed_write_supersedes_every_older_generation() {
+    let s = scenario("a_failed_write_on_the_newest_predecessor");
+    assert_eq!(
+        s.ghostkeys_failed_imports, 1,
+        "the sweep counts the failure"
+    );
+    assert_eq!(
+        set(&s.ghostkeys_visible),
+        BTreeSet::from(["fpGood".to_string()]),
+        "and still recovers the older generation"
+    );
+
+    for (label, policy) in [
+        (
+            "NewestSnapshotWins",
+            SecretSelectionPolicy::NewestSnapshotWins,
+        ),
+        ("UnionAllGenerations", union()),
+    ] {
+        let r = run(&s, policy);
+        assert_eq!(
+            r.classifications,
+            vec!["Incomplete", "Superseded"],
+            "under {label}: a partial write halts the walk"
+        );
+        assert!(
+            r.store.visible().is_empty(),
+            "under {label}: nothing is recovered, including the intact older generation"
+        );
+    }
+    check_against_ghostkeys(&s, &run(&s, SecretSelectionPolicy::NewestSnapshotWins));
+}
+
+/// **Expected before running:** the predecessor SAYS it holds identities and
+/// then exports none, because this vault lacks `Export` scope on them.
+/// ghostkeys files `present_but_unexportable` and warns; the crate cannot tell
+/// it from a genuinely empty predecessor, records `NoData`, and writes an empty
+/// completion marker that seals it forever.
+///
+/// **Divergence (classification), and the worst instance of the marker bug:**
+/// keys known to exist and be unreachable are recorded as "nothing here" and
+/// then never asked for again.
+#[test]
+fn keys_known_to_exist_are_recorded_as_no_data_and_sealed() {
+    let s = scenario("predecessor_holds_keys_but_exports_nothing");
+    assert_eq!(
+        s.predecessors[0].ghostkeys_bucket, "present_but_unexportable",
+        "the sweep knows the keys are there and unreachable"
+    );
+
+    let r = run(&s, SecretSelectionPolicy::NewestSnapshotWins);
+    assert_eq!(
+        r.classifications,
+        vec!["NoData"],
+        "the crate cannot distinguish this from an empty predecessor"
+    );
+
+    // Indistinguishable from the genuinely-empty case, which is the point.
+    let empty = scenario("predecessor_registered_but_holds_nothing");
+    let r_empty = run(&empty, SecretSelectionPolicy::NewestSnapshotWins);
+    assert_eq!(r.classifications, r_empty.classifications);
+    assert_ne!(
+        s.predecessors[0].ghostkeys_bucket, empty.predecessors[0].ghostkeys_bucket,
+        "ghostkeys tells them apart, and warns about one of them"
+    );
+
+    // And the marker is now written, so a later pass will not re-ask.
+    let again = run_over(
+        &s.predecessors,
+        r.store.clone(),
+        SecretSelectionPolicy::NewestSnapshotWins,
+    );
+    assert_eq!(again.classifications, vec!["AlreadyMigrated"]);
+    assert_eq!(again.probed, 0);
+
+    check_against_ghostkeys(&s, &r);
+}
+
+/// **Expected before running:** it announced keys and then went quiet -- the
+/// shape of a missed confirmation dialog, which ghostkeys files as
+/// `present_but_silent` and tells the user to reload and allow. The crate
+/// reports the same `Unresponsive(no-reply)` it reports for the eleven entries
+/// the node simply does not have.
+#[test]
+fn a_predecessor_that_announced_keys_then_went_quiet_is_bucketed_with_absence() {
+    let s = scenario("predecessor_holds_keys_then_goes_silent");
+    assert_eq!(s.predecessors[0].ghostkeys_bucket, "present_but_silent");
+
+    // It answered the preflight, so the fetch is what times out -- reported as
+    // `Unresponsive(error)`, exactly like a delegate that answered with a
+    // failure, and unlike ghostkeys' `present_but_silent`, which has its own
+    // user-facing message ("reload the vault and allow the prompt").
+    let r = run(&s, SecretSelectionPolicy::NewestSnapshotWins);
+    assert_eq!(r.classifications, vec!["Unresponsive(error)"]);
+
+    let failed = scenario("predecessor_answers_with_an_error");
+    let r_failed = run(&failed, SecretSelectionPolicy::NewestSnapshotWins);
+    assert_eq!(
+        r.classifications, r_failed.classifications,
+        "indistinguishable from a delegate-level failure, though the remedy differs"
+    );
+    check_against_ghostkeys(&s, &r);
+}
+
+/// **Expected before running:** a local transport failure means nothing was
+/// asked, so nothing was learned. ghostkeys deliberately files it with silence
+/// -- warning here would put a red toast in front of a user whose websocket
+/// dropped, while the connection banner already says so. The crate attaches the
+/// error string, so it reads as evidence that something answered.
+#[test]
+fn a_local_transport_failure_reads_as_an_answer() {
+    let s = scenario("the_request_never_left_the_browser");
+    assert_eq!(
+        s.predecessors[0].ghostkeys_bucket, "undetermined",
+        "ghostkeys files it with silence, on purpose"
+    );
+
+    let r = run(&s, SecretSelectionPolicy::NewestSnapshotWins);
+    assert_eq!(
+        r.classifications,
+        vec!["Unresponsive(error)"],
+        "the crate marks it as having errored, like a delegate that answered badly"
+    );
+
+    let failed = scenario("predecessor_answers_with_an_error");
+    let r_failed = run(&failed, SecretSelectionPolicy::NewestSnapshotWins);
+    assert_eq!(
+        r.classifications, r_failed.classifications,
+        "indistinguishable from a genuine delegate-level failure"
     );
     check_against_ghostkeys(&s, &r);
 }

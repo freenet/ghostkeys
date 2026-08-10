@@ -60,7 +60,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ghostkey_common::{ExportedGhostKey, GhostkeyResponse};
+use ghostkey_common::{ExportedGhostKey, GhostkeyResponse, GhostkeyScope, SignatureRequestor};
 use serde::{Deserialize, Serialize};
 
 use crate::api::delegate::DelegateCallError;
@@ -206,6 +206,16 @@ enum PredecessorState {
     /// what the second re-key after adopting the crate looks like, and the
     /// crate documents that such markers must never be swept forward.
     HoldsKeysAndAStaleMigrationMarker(Vec<Key>),
+    /// Said it holds identities, then never answered the export -- typically a
+    /// confirmation dialog the user missed.
+    HoldsThenSilent,
+    /// Said it holds identities, then exported nothing. Positive evidence of
+    /// keys this vault cannot reach: `ExportAllGhostKeys` silently skips every
+    /// key the caller lacks `Export` scope on.
+    HoldsThenExportsNothing,
+    /// The request never left the browser -- a dead socket, a serialize
+    /// failure. Locally produced, so it is not an answer from anything.
+    TransportFailure(&'static str),
 }
 
 impl PredecessorState {
@@ -222,9 +232,16 @@ impl PredecessorState {
                 usable: 0,
                 unusable: 0,
             }),
+            Self::HoldsThenSilent | Self::HoldsThenExportsNothing => {
+                Ok(GhostkeyResponse::IdentityPresence {
+                    usable: 1,
+                    unusable: 0,
+                })
+            }
             Self::NotRegistered => Err(DelegateCallError::NotRegistered),
             Self::Silent => Err(DelegateCallError::TimedOut),
             Self::AnswersWithError(m) => Err(DelegateCallError::Failed((*m).to_string())),
+            Self::TransportFailure(m) => Err(DelegateCallError::Transport((*m).to_string())),
             Self::TooOldButExports(_) => Ok(GhostkeyResponse::Error {
                 message: "Unsupported request variant for this delegate version".into(),
             }),
@@ -241,10 +258,13 @@ impl PredecessorState {
                     keys: keys.iter().map(Key::exported).collect(),
                 })
             }
-            Self::RegisteredButEmpty => Ok(GhostkeyResponse::ExportAllResult { keys: Vec::new() }),
-            Self::Silent => Err(DelegateCallError::TimedOut),
+            Self::RegisteredButEmpty | Self::HoldsThenExportsNothing => {
+                Ok(GhostkeyResponse::ExportAllResult { keys: Vec::new() })
+            }
+            Self::Silent | Self::HoldsThenSilent => Err(DelegateCallError::TimedOut),
             Self::NotRegistered => Err(DelegateCallError::NotRegistered),
             Self::AnswersWithError(m) => Err(DelegateCallError::Failed((*m).to_string())),
+            Self::TransportFailure(m) => Err(DelegateCallError::Transport((*m).to_string())),
         }
     }
 }
@@ -294,13 +314,53 @@ fn sk_key(fp: &str) -> Vec<u8> {
 fn label_key(fp: &str) -> Vec<u8> {
     format!("gk:label:{fp}").into_bytes()
 }
+fn perm_key(fp: &str) -> Vec<u8> {
+    format!("gk:perms:{fp}").into_bytes()
+}
 const INDEX_KEY: &[u8] = b"gk:index";
+
+/// One app's grants on one ghostkey. Mirrors the delegate's own
+/// `permissions.rs::GrantEntry` (which lives in the delegate crate and is not
+/// importable here) field-for-field, so the modelled `gk:perms:` blob has the
+/// real shape rather than an invented one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct GrantEntry {
+    requestor: SignatureRequestor,
+    scopes: std::collections::BTreeSet<GhostkeyScope>,
+}
+
+/// The vault's own identity, as the delegate sees it. `handle_import` grants
+/// the importing requestor the full scope set; the vault is that requestor.
+fn vault_requestor() -> SignatureRequestor {
+    SignatureRequestor::WebApp(freenet_stdlib::prelude::ContractInstanceId::new([7u8; 32]))
+}
+
+/// The scope set `handle_import` grants the importer
+/// (`permissions.rs::full_scope_set`).
+fn full_scope_set() -> std::collections::BTreeSet<GhostkeyScope> {
+    [
+        GhostkeyScope::ReadPublic,
+        GhostkeyScope::Sign,
+        GhostkeyScope::Export,
+        GhostkeyScope::Delete,
+        GhostkeyScope::Admin,
+    ]
+    .into_iter()
+    .collect()
+}
 
 /// A model of the successor delegate's secret store, laid out exactly as
 /// `delegates/ghostkey-delegate/src/handlers.rs` lays it out.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Namespace {
     secrets: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Fingerprints whose secrets this successor's storage refuses to write.
+    ///
+    /// Models a node-side storage failure, which is a property of the STORE
+    /// rather than of either implementation -- each surfaces it through its own
+    /// interface, which is precisely the divergence being measured. See
+    /// [`Namespace::apply_import`] for why the granularity is per-fingerprint.
+    failing: BTreeSet<String>,
 }
 
 impl Namespace {
@@ -308,7 +368,7 @@ impl Namespace {
     fn with_keys(keys: &[Key]) -> Self {
         let mut ns = Self::default();
         for k in keys {
-            ns.apply_import(k);
+            assert!(ns.apply_import(k), "seeding must not fail");
         }
         ns
     }
@@ -319,6 +379,16 @@ impl Namespace {
         let mut ns = Self::default();
         ns.secrets.insert(cert_key(fp), b"STALE-CERT".to_vec());
         ns.set_index(&[fp.to_string()]);
+        // The grant survived too -- it lives in the same store -- which is
+        // exactly why the vault LISTS this key and then cannot sign with it.
+        ns.secrets.insert(
+            perm_key(fp),
+            ghostkey_common::to_cbor(&vec![GrantEntry {
+                requestor: vault_requestor(),
+                scopes: full_scope_set(),
+            }])
+            .expect("cbor"),
+        );
         ns
     }
 
@@ -336,9 +406,26 @@ impl Namespace {
         );
     }
 
-    /// The writes `handle_import` performs on a successful import
-    /// (`handlers.rs::handle_import`): certificate, signing key, label, index.
-    fn apply_import(&mut self, k: &Key) {
+    /// The writes `handle_import` performs (`handlers.rs::handle_import`):
+    /// certificate, signing key, label, index, and -- the step a raw-pair copy
+    /// has no equivalent of -- `permissions::grant_full` for the importing
+    /// requestor.
+    ///
+    /// Returns whether the delegate would have answered `ImportResult`. Only
+    /// the GRANT write is checked by the real handler: it ignores the results
+    /// of the certificate and signing-key writes (`handlers.rs` lines 211/214)
+    /// and returns an explicit `Error` only when `grant_full` fails
+    /// (`handlers.rs:227`). That asymmetry is why storage failure is modelled
+    /// per-fingerprint rather than per-secret: a store that rejects one of a
+    /// key's secrets rejects them all, and each implementation then surfaces it
+    /// through the write IT actually checks.
+    fn apply_import(&mut self, k: &Key) -> bool {
+        if self.failing.contains(&k.fp) {
+            // `grant_full` fails, so the handler reports an error rather than
+            // `ImportResult`. Key material may be half-written; the vault is
+            // told the import did not take.
+            return false;
+        }
         self.secrets
             .insert(cert_key(&k.fp), k.cert.as_bytes().to_vec());
         self.secrets.insert(sk_key(&k.fp), k.sk.as_bytes().to_vec());
@@ -351,12 +438,46 @@ impl Namespace {
             index.push(k.fp.clone());
         }
         self.set_index(&index);
+        self.secrets.insert(
+            perm_key(&k.fp),
+            ghostkey_common::to_cbor(&vec![GrantEntry {
+                requestor: vault_requestor(),
+                scopes: full_scope_set(),
+            }])
+            .expect("cbor"),
+        );
+        true
     }
 
-    /// What `ListGhostKeys` would report: the index, which is what the user
-    /// actually sees in the vault.
-    fn visible(&self) -> BTreeSet<String> {
+    /// Raw `gk:index` membership. Necessary but NOT sufficient for the key to
+    /// appear in the vault -- see [`Namespace::visible`].
+    fn indexed(&self) -> BTreeSet<String> {
         self.index().into_iter().collect()
+    }
+
+    /// What `ListGhostKeys` actually reports: an indexed fingerprint the
+    /// requestor holds `ReadPublic` on. `handle_list` skips every other one
+    /// (`handlers.rs:411`), so a key with no grant is a dead entry for that
+    /// requestor no matter what the index says.
+    fn visible(&self) -> BTreeSet<String> {
+        self.indexed()
+            .into_iter()
+            .filter(|fp| self.grants_read_public(fp))
+            .collect()
+    }
+
+    /// Whether the vault holds `ReadPublic` on `fp`, decoded from the real
+    /// `gk:perms:` blob rather than assumed from the key's presence.
+    fn grants_read_public(&self, fp: &str) -> bool {
+        self.secrets
+            .get(&perm_key(fp))
+            .and_then(|b| ghostkey_common::from_cbor::<Vec<GrantEntry>>(b).ok())
+            .is_some_and(|grants| {
+                grants.iter().any(|g| {
+                    g.requestor == vault_requestor()
+                        && g.scopes.contains(&GhostkeyScope::ReadPublic)
+                })
+            })
     }
 
     /// Fingerprints with BOTH halves present, whatever the index says. A key
@@ -498,10 +619,17 @@ fn run_ghostkeys_sweep(preds: &[Predecessor], mut store: Namespace) -> GkResult 
                 sk: exported_key.signing_key_pem.clone(),
                 label: exported_key.label.clone(),
             };
-            store.apply_import(&k);
-            held.insert(k.fp.clone());
-            if !already_held {
-                outcome.record_import(true);
+            // `run_pass` reads the delegate's reply: an `ImportResult` is a
+            // recovery, anything else is a failed import that is counted and
+            // WARNED about -- and the sweep moves on to the next entry either
+            // way (migration.rs:678-697).
+            if store.apply_import(&k) {
+                held.insert(k.fp.clone());
+                if !already_held {
+                    outcome.record_import(true);
+                }
+            } else if !already_held {
+                outcome.record_import(false);
             }
         }
     }
@@ -631,12 +759,19 @@ struct RecordedScenario {
     agreement: Agreement,
     /// The successor's secret namespace before the sweep, hex-encoded.
     initial_store: Vec<(String, String)>,
+    /// Secret keys the successor's storage refuses to write, hex-encoded. The
+    /// crate side makes its own `set_secret` fail for exactly these.
+    failing_secret_keys: Vec<String>,
     predecessors: Vec<RecordedPredecessor>,
     /// What the shipped sweep produced.
     ghostkeys_store: Vec<(String, String)>,
+    /// Listable by the vault: indexed AND granted `ReadPublic`.
     ghostkeys_visible: Vec<String>,
+    /// Raw `gk:index` membership, which is only half of listability.
+    ghostkeys_indexed: Vec<String>,
     ghostkeys_complete_pairs: Vec<String>,
     ghostkeys_recovered: usize,
+    ghostkeys_failed_imports: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -655,15 +790,29 @@ struct Scenario {
     preds: Vec<Predecessor>,
 }
 
+/// A successor store whose storage refuses every secret belonging to `fp`.
+fn store_rejecting(fp: &str) -> Namespace {
+    Namespace {
+        failing: BTreeSet::from([fp.to_string()]),
+        ..Namespace::default()
+    }
+}
+
 /// Every scenario, defined once and consumed by both halves of the
 /// differential.
 fn scenarios() -> Vec<Scenario> {
     vec![
         Scenario {
             name: "predecessor_holds_keys_and_exports_them",
-            what_it_shows: "The case the convergent-design claim rests on: a live, exporting \
-                 predecessor migrates identically both ways.",
-            agreement: Agreement::Agree,
+            what_it_shows: "The case the convergent-design claim was thought to rest on. It \
+                 does NOT hold against the real delegate: handle_import ends with \
+                 permissions::grant_full (handlers.rs:227) and handle_list skips any \
+                 fingerprint the requestor lacks ReadPublic on (handlers.rs:411), while a \
+                 raw-pair import grants nothing -- and permissions are not in the exported \
+                 pairs at all, so no adapter could supply them.",
+            agreement: Agreement::DivergeOutcome(
+                "raw-pair import grants no permissions, so recovered keys are unlistable".into(),
+            ),
             initial: Namespace::default(),
             preds: predecessors(vec![PredecessorState::HoldsAndExports(vec![
                 key("fpA", Some("work")),
@@ -753,12 +902,77 @@ fn scenarios() -> Vec<Scenario> {
                  predecessor's namespace still holds the completion marker it wrote when it was \
                  the successor. The crate documents that markers must never be swept forward, \
                  and strips them on import; ghostkeys never sees them at all, because it \
-                 migrates through ImportGhostKey rather than copying raw pairs.",
-            agreement: Agreement::Agree,
+                 migrates through ImportGhostKey rather than copying raw pairs. The marker \
+                 strip itself is correct -- the outcome still diverges, for the permission \
+                 reason every recovering scenario does.",
+            agreement: Agreement::DivergeOutcome(
+                "raw-pair import grants no permissions, so recovered keys are unlistable".into(),
+            ),
             initial: Namespace::default(),
             preds: predecessors(vec![PredecessorState::HoldsKeysAndAStaleMigrationMarker(
                 vec![key("fpChained", None)],
             )]),
+        },
+        Scenario {
+            name: "a_failed_write_on_the_newest_predecessor",
+            what_it_shows: "A storage failure on one key of the NEWEST predecessor. ghostkeys \
+                 counts a failed import, warns, and carries on to recover the older \
+                 generation. The crate returns Incomplete and sets terminated = true \
+                 UNCONDITIONALLY (delegate_migrate.rs:783) -- pinned for Union too by the \
+                 crate's own incomplete_newer_halts_before_older_under_both_policies -- so \
+                 every older generation is Superseded and nothing is recovered. Switching \
+                 policy does not help.",
+            agreement: Agreement::DivergeOutcome(
+                "one failed write on the newest predecessor Supersedes every older one, \
+                 under BOTH policies"
+                    .into(),
+            ),
+            initial: store_rejecting("fpBad"),
+            preds: predecessors(vec![
+                PredecessorState::HoldsAndExports(vec![key("fpGood", None)]),
+                PredecessorState::HoldsAndExports(vec![key("fpBad", None)]),
+            ]),
+        },
+        Scenario {
+            name: "predecessor_holds_keys_but_exports_nothing",
+            what_it_shows: "The sharpest instance of the marker bug. The predecessor SAYS it \
+                 holds identities and then exports none, because this vault has no Export \
+                 scope on them. ghostkeys files present_but_unexportable, warns the user, and \
+                 re-asks on every startup. The crate cannot tell this from a genuinely empty \
+                 predecessor: it records NoData, writes an empty completion marker, and never \
+                 asks again even once the scope is granted.",
+            agreement: Agreement::DivergeClassification(
+                "keys known to exist and be unreachable are recorded as NoData, then sealed".into(),
+            ),
+            initial: Namespace::default(),
+            preds: predecessors(vec![PredecessorState::HoldsThenExportsNothing]),
+        },
+        Scenario {
+            name: "predecessor_holds_keys_then_goes_silent",
+            what_it_shows: "It said it holds identities and then did not hand them over -- the \
+                 shape of a missed confirmation dialog. ghostkeys files present_but_silent and \
+                 tells the user to reload and allow the prompt. The crate reports the same \
+                 Unresponsive it reports for the eleven entries the node simply does not have.",
+            agreement: Agreement::DivergeClassification(
+                "a predecessor that announced keys and then went quiet is bucketed with \
+                 routine absence"
+                    .into(),
+            ),
+            initial: Namespace::default(),
+            preds: predecessors(vec![PredecessorState::HoldsThenSilent]),
+        },
+        Scenario {
+            name: "the_request_never_left_the_browser",
+            what_it_shows: "A local transport failure: nothing was asked, so nothing was \
+                 learned. ghostkeys files it with silence deliberately -- warning here would \
+                 put a red toast in front of a user whose websocket dropped, on a node that \
+                 may hold no legacy delegates at all, while the connection banner already says \
+                 so. The crate attaches the error string, so it reads as evidence.",
+            agreement: Agreement::DivergeClassification(
+                "a local transport failure is reported as though the predecessor answered".into(),
+            ),
+            initial: Namespace::default(),
+            preds: predecessors(vec![PredecessorState::TransportFailure("socket closed")]),
         },
         Scenario {
             name: "successor_holds_a_half_broken_key",
@@ -805,6 +1019,15 @@ fn record(scenario: &Scenario) -> RecordedScenario {
         what_it_shows: scenario.what_it_shows.to_string(),
         agreement: scenario.agreement.clone(),
         initial_store: scenario.initial.to_wire(),
+        // Every secret a failing fingerprint owns. The crate writes cert / sk /
+        // label / index pairs; ghostkeys additionally writes the grant.
+        failing_secret_keys: scenario
+            .initial
+            .failing
+            .iter()
+            .flat_map(|fp| [cert_key(fp), sk_key(fp), label_key(fp), perm_key(fp)])
+            .map(|k| hex(&k))
+            .collect(),
         predecessors: scenario
             .preds
             .iter()
@@ -827,8 +1050,10 @@ fn record(scenario: &Scenario) -> RecordedScenario {
             .collect(),
         ghostkeys_store: gk.store.to_wire(),
         ghostkeys_visible: gk.store.visible().into_iter().collect(),
+        ghostkeys_indexed: gk.store.indexed().into_iter().collect(),
         ghostkeys_complete_pairs: gk.store.complete_pairs().into_iter().collect(),
         ghostkeys_recovered: gk.outcome.recovered,
+        ghostkeys_failed_imports: gk.outcome.failed_imports,
     }
 }
 
@@ -1015,6 +1240,53 @@ fn the_harness_mirrors_the_shipped_sweep() {
         !body.contains("break"),
         "the sweep must not stop early; a `break` in the loop would strand every later entry"
     );
+}
+
+/// Every `PredecessorState` variant must be constructed by some scenario.
+///
+/// A variant with a reply mapping but no scenario is a fixture that looks like
+/// coverage and is not: its verdict row would be derived by reading the code
+/// rather than by running it. Three variants were in exactly that state when
+/// this test was added.
+#[test]
+fn every_predecessor_state_is_exercised_by_a_scenario() {
+    let src = include_str!("migration_differential.rs");
+
+    let enum_body = src
+        .split("enum PredecessorState {")
+        .nth(1)
+        .expect("the PredecessorState enum")
+        .split("\n}")
+        .next()
+        .expect("the enum's closing brace");
+    let variants: Vec<&str> = enum_body
+        .lines()
+        .map(str::trim)
+        .filter(|l| {
+            l.starts_with(|c: char| c.is_ascii_uppercase())
+                && (l.ends_with(',') || l.ends_with(')'))
+        })
+        .map(|l| l.split(['(', ',']).next().expect("variant name"))
+        .collect();
+    assert!(
+        variants.len() >= 9,
+        "expected every variant to be scraped, found {variants:?}"
+    );
+
+    let scenarios_body = src
+        .split("fn scenarios() -> Vec<Scenario> {")
+        .nth(1)
+        .expect("the scenarios function")
+        .split("\nfn record(")
+        .next()
+        .expect("the end of scenarios()");
+    for variant in variants {
+        assert!(
+            scenarios_body.contains(&format!("PredecessorState::{variant}")),
+            "`PredecessorState::{variant}` is defined but no scenario constructs it, so its \
+             verdict row is analytically derived rather than tested"
+        );
+    }
 }
 
 /// The registry the vault ships has no generation column, and the crate's
