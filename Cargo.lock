@@ -1387,6 +1387,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "freenet-migrate"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55f09b0f8aff58a61ae687d264128300d916ec386205bf2c5ca0190108b80054"
+dependencies = [
+ "blake3",
+ "bs58",
+ "ciborium",
+ "ed25519-dalek",
+ "freenet-scaffold",
+ "freenet-stdlib 0.8.5",
+ "serde",
+ "serde_with",
+]
+
+[[package]]
+name = "freenet-scaffold"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff8840a95aa4b4499cf8532d9c74814339647d39c4b537a55b540445a439b56f"
+dependencies = [
+ "freenet-scaffold-macro",
+ "serde",
+]
+
+[[package]]
+name = "freenet-scaffold-macro"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99c6d26e7ce019d8eba883b307ee55dd1d10c85ccc9bec72b069bdf07c50a87d"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "freenet-stdlib"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1414,6 +1450,30 @@ dependencies = [
  "tracing-subscriber",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "freenet-stdlib"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b62aeba7634d1ae5c2d02f78db33ee40442511858275be5be2099d24a13b2559"
+dependencies = [
+ "bincode",
+ "blake3",
+ "bs58",
+ "byteorder",
+ "bytes",
+ "chrono",
+ "flatbuffers",
+ "freenet-macros",
+ "futures",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 2.0.19",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1571,7 +1631,7 @@ dependencies = [
  "bs58",
  "ciborium",
  "ed25519-dalek",
- "freenet-stdlib",
+ "freenet-stdlib 0.6.1",
  "serde",
  "serde_json",
 ]
@@ -1584,7 +1644,7 @@ dependencies = [
  "bs58",
  "ciborium",
  "ed25519-dalek",
- "freenet-stdlib",
+ "freenet-stdlib 0.6.1",
  "getrandom 0.2.17",
  "ghostkey-common",
  "ghostkey_lib",
@@ -1600,7 +1660,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "dioxus",
- "freenet-stdlib",
+ "freenet-stdlib 0.6.1",
  "futures",
  "getrandom 0.2.17",
  "ghostkey-common",
@@ -2301,6 +2361,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "migration-differential"
+version = "0.3.0"
+dependencies = [
+ "freenet-migrate",
+ "freenet-stdlib 0.8.5",
+ "futures",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

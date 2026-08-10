@@ -29,3 +29,4 @@ getrandom = { version = "0.2", features = ["js", "wasm-bindgen", "js-sys"], defa
 
 [build-dependencies]
 chrono = { workspace = true }
+

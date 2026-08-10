@@ -1,0 +1,871 @@
+{
+  "generated_by": "ui/src/migration_differential.rs (regenerate with GK_REGENERATE_OBSERVATIONS=1 cargo test -p ghostkey-ui)",
+  "scenarios": [
+    {
+      "name": "predecessor_holds_keys_and_exports_them",
+      "what_it_shows": "The case the convergent-design claim was thought to rest on. It does NOT hold against the real delegate: handle_import ends with permissions::grant_full (handlers.rs:227) and handle_list skips any fingerprint the requestor lacks ReadPublic on (handlers.rs:411), while a raw-pair import grants nothing -- and permissions are not in the exported pairs at all, so no adapter could supply them.",
+      "agreement": {
+        "DivergeOutcome": "raw-pair import grants no permissions, so recovered keys are unlistable"
+      },
+      "initial_store": [],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": [
+              [
+                "676b3a636572743a667041",
+                "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d667041"
+              ],
+              [
+                "676b3a736b3a667041",
+                "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d667041"
+              ],
+              [
+                "676b3a6c6162656c3a667041",
+                "776f726b"
+              ],
+              [
+                "676b3a636572743a667042",
+                "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d667042"
+              ],
+              [
+                "676b3a736b3a667042",
+                "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d667042"
+              ],
+              [
+                "676b3a696e646578",
+                "826366704163667042"
+              ]
+            ]
+          },
+          "ghostkeys_bucket": "Exported(2)"
+        }
+      ],
+      "ghostkeys_store": [
+        [
+          "676b3a636572743a667041",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d667041"
+        ],
+        [
+          "676b3a636572743a667042",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d667042"
+        ],
+        [
+          "676b3a696e646578",
+          "826366704163667042"
+        ],
+        [
+          "676b3a6c6162656c3a667041",
+          "776f726b"
+        ],
+        [
+          "676b3a7065726d733a667041",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a7065726d733a667042",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a736b3a667041",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d667041"
+        ],
+        [
+          "676b3a736b3a667042",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d667042"
+        ]
+      ],
+      "ghostkeys_visible": [
+        "fpA",
+        "fpB"
+      ],
+      "ghostkeys_indexed": [
+        "fpA",
+        "fpB"
+      ],
+      "ghostkeys_complete_pairs": [
+        "fpA",
+        "fpB"
+      ],
+      "ghostkeys_recovered": 2,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "predecessor_registered_but_holds_nothing",
+      "what_it_shows": "Nothing is imported either way. Different mechanics -- ghostkeys skips before asking for keys, so no private-key dialog fires, while the crate probes AND fetches -- but the same observable outcome.",
+      "agreement": "Agree",
+      "initial_store": [],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": []
+          },
+          "ghostkeys_bucket": "SkippedEmpty"
+        }
+      ],
+      "ghostkeys_store": [],
+      "ghostkeys_visible": [],
+      "ghostkeys_indexed": [],
+      "ghostkeys_complete_pairs": [],
+      "ghostkeys_recovered": 0,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "predecessor_not_registered",
+      "what_it_shows": "ghostkeys keeps `not_registered` apart from silence because nothing ever re-registers legacy code, so keys under it are unreachable permanently. `probe_executable` is a bool, so the crate cannot.",
+      "agreement": {
+        "DivergeClassification": "not-registered and silence collapse into one Unresponsive"
+      },
+      "initial_store": [],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": false
+          },
+          "fetch": {
+            "Err": "delegate is not registered on this node"
+          },
+          "ghostkeys_bucket": "not_registered"
+        }
+      ],
+      "ghostkeys_store": [],
+      "ghostkeys_visible": [],
+      "ghostkeys_indexed": [],
+      "ghostkeys_complete_pairs": [],
+      "ghostkeys_recovered": 0,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "predecessor_times_out",
+      "what_it_shows": "Silence is the ORDINARY case -- nine legacy entries, nine timeouts on a real node. ghostkeys walks past it. Under NewestSnapshotWins the crate halts the whole walk, so the data-bearing older generation is never probed.",
+      "agreement": {
+        "DivergeOutcome": "NewestSnapshotWins halts the whole walk on the first silence"
+      },
+      "initial_store": [],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": [
+              [
+                "676b3a636572743a66704f6c64",
+                "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704f6c64"
+              ],
+              [
+                "676b3a736b3a66704f6c64",
+                "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704f6c64"
+              ],
+              [
+                "676b3a696e646578",
+                "816566704f6c64"
+              ]
+            ]
+          },
+          "ghostkeys_bucket": "Exported(1)"
+        },
+        {
+          "delegate_key": "d3f152bcecaf31021cf8b1b5541bd6acf890b31256750ddfd6b3c8d4bafb726c",
+          "code_hash": "63c2ccddcab61c1983dc7b6eccf68e9aaca6e1d1e31e79539ecd4eada3195650",
+          "generation": 1,
+          "probe": {
+            "Ok": false
+          },
+          "fetch": {
+            "Err": "timed out waiting for the delegate"
+          },
+          "ghostkeys_bucket": "undetermined"
+        }
+      ],
+      "ghostkeys_store": [
+        [
+          "676b3a636572743a66704f6c64",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704f6c64"
+        ],
+        [
+          "676b3a696e646578",
+          "816566704f6c64"
+        ],
+        [
+          "676b3a7065726d733a66704f6c64",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a736b3a66704f6c64",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704f6c64"
+        ]
+      ],
+      "ghostkeys_visible": [
+        "fpOld"
+      ],
+      "ghostkeys_indexed": [
+        "fpOld"
+      ],
+      "ghostkeys_complete_pairs": [
+        "fpOld"
+      ],
+      "ghostkeys_recovered": 1,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "predecessor_answers_with_an_error",
+      "what_it_shows": "An answered failure is positive evidence and reaches the user; silence must stay quiet. The crate reports both in the same variant.",
+      "agreement": {
+        "DivergeClassification": "an answered failure is reported as Unresponsive, the silence bucket"
+      },
+      "initial_store": [],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Err": "delegate error: missing secret gk:sk:abc"
+          },
+          "ghostkeys_bucket": "answered_with_error"
+        }
+      ],
+      "ghostkeys_store": [],
+      "ghostkeys_visible": [],
+      "ghostkeys_indexed": [],
+      "ghostkeys_complete_pairs": [],
+      "ghostkeys_recovered": 0,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "multiple_generations_newest_already_has_the_data",
+      "what_it_shows": "Keys created under two different generations. ghostkeys recovers both. NewestSnapshotWins stops at the newest data-bearing generation and strands the older key; Union recovers its bytes but still cannot make it visible.",
+      "agreement": {
+        "DivergeOutcome": "NewestSnapshotWins strands keys unique to an older generation"
+      },
+      "initial_store": [],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": [
+              [
+                "676b3a636572743a66704f6c64",
+                "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704f6c64"
+              ],
+              [
+                "676b3a736b3a66704f6c64",
+                "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704f6c64"
+              ],
+              [
+                "676b3a696e646578",
+                "816566704f6c64"
+              ]
+            ]
+          },
+          "ghostkeys_bucket": "Exported(1)"
+        },
+        {
+          "delegate_key": "d3f152bcecaf31021cf8b1b5541bd6acf890b31256750ddfd6b3c8d4bafb726c",
+          "code_hash": "63c2ccddcab61c1983dc7b6eccf68e9aaca6e1d1e31e79539ecd4eada3195650",
+          "generation": 1,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": []
+          },
+          "ghostkeys_bucket": "SkippedEmpty"
+        },
+        {
+          "delegate_key": "30575b376393ebf859ec3a8dc0da96ccb1590e9d4f000304789b19acbfb1a519",
+          "code_hash": "709f94b8d49264011840785a094fe7509d27ea326a1b72e69d7f25a0ba50cd22",
+          "generation": 2,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": [
+              [
+                "676b3a636572743a66704e6577",
+                "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704e6577"
+              ],
+              [
+                "676b3a736b3a66704e6577",
+                "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704e6577"
+              ],
+              [
+                "676b3a696e646578",
+                "816566704e6577"
+              ]
+            ]
+          },
+          "ghostkeys_bucket": "Exported(1)"
+        }
+      ],
+      "ghostkeys_store": [
+        [
+          "676b3a636572743a66704e6577",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704e6577"
+        ],
+        [
+          "676b3a636572743a66704f6c64",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704f6c64"
+        ],
+        [
+          "676b3a696e646578",
+          "826566704f6c646566704e6577"
+        ],
+        [
+          "676b3a7065726d733a66704e6577",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a7065726d733a66704f6c64",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a736b3a66704e6577",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704e6577"
+        ],
+        [
+          "676b3a736b3a66704f6c64",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704f6c64"
+        ]
+      ],
+      "ghostkeys_visible": [
+        "fpNew",
+        "fpOld"
+      ],
+      "ghostkeys_indexed": [
+        "fpNew",
+        "fpOld"
+      ],
+      "ghostkeys_complete_pairs": [
+        "fpNew",
+        "fpOld"
+      ],
+      "ghostkeys_recovered": 2,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "predecessor_gains_data_after_an_empty_answer",
+      "what_it_shows": "An empty export is not proof of absence -- ExportAllGhostKeys silently skips keys the caller lacks Export scope on, and the reply carries no count. ghostkeys therefore re-sweeps every startup; the crate's completion marker seals the predecessor as done. The crate-side test runs an empty pass first, then this one.",
+      "agreement": {
+        "DivergeOutcome": "the crate seals an empty predecessor with a marker; the sweep re-probes"
+      },
+      "initial_store": [],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": [
+              [
+                "676b3a636572743a66704c617465",
+                "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704c617465"
+              ],
+              [
+                "676b3a736b3a66704c617465",
+                "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704c617465"
+              ],
+              [
+                "676b3a696e646578",
+                "816666704c617465"
+              ]
+            ]
+          },
+          "ghostkeys_bucket": "Exported(1)"
+        }
+      ],
+      "ghostkeys_store": [
+        [
+          "676b3a636572743a66704c617465",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704c617465"
+        ],
+        [
+          "676b3a696e646578",
+          "816666704c617465"
+        ],
+        [
+          "676b3a7065726d733a66704c617465",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a736b3a66704c617465",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704c617465"
+        ]
+      ],
+      "ghostkeys_visible": [
+        "fpLate"
+      ],
+      "ghostkeys_indexed": [
+        "fpLate"
+      ],
+      "ghostkeys_complete_pairs": [
+        "fpLate"
+      ],
+      "ghostkeys_recovered": 1,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "predecessor_carries_a_stale_migration_marker",
+      "what_it_shows": "What the SECOND re-key after adopting the crate looks like: the predecessor's namespace still holds the completion marker it wrote when it was the successor. The crate documents that markers must never be swept forward, and strips them on import; ghostkeys never sees them at all, because it migrates through ImportGhostKey rather than copying raw pairs. The marker strip itself is correct -- the outcome still diverges, for the permission reason every recovering scenario does.",
+      "agreement": {
+        "DivergeOutcome": "raw-pair import grants no permissions, so recovered keys are unlistable"
+      },
+      "initial_store": [],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": [
+              [
+                "676b3a636572743a6670436861696e6564",
+                "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d6670436861696e6564"
+              ],
+              [
+                "676b3a736b3a6670436861696e6564",
+                "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d6670436861696e6564"
+              ],
+              [
+                "676b3a696e646578",
+                "81696670436861696e6564"
+              ],
+              [
+                "00667265656e65742d6d6967726174652f76312f707265642d646f6e653a1111111111111111111111111111111111111111111111111111111111111111",
+                "31"
+              ]
+            ]
+          },
+          "ghostkeys_bucket": "Exported(1)"
+        }
+      ],
+      "ghostkeys_store": [
+        [
+          "676b3a636572743a6670436861696e6564",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d6670436861696e6564"
+        ],
+        [
+          "676b3a696e646578",
+          "81696670436861696e6564"
+        ],
+        [
+          "676b3a7065726d733a6670436861696e6564",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a736b3a6670436861696e6564",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d6670436861696e6564"
+        ]
+      ],
+      "ghostkeys_visible": [
+        "fpChained"
+      ],
+      "ghostkeys_indexed": [
+        "fpChained"
+      ],
+      "ghostkeys_complete_pairs": [
+        "fpChained"
+      ],
+      "ghostkeys_recovered": 1,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "a_failed_write_on_the_newest_predecessor",
+      "what_it_shows": "A storage failure on one key of the NEWEST predecessor. ghostkeys counts a failed import, warns, and carries on to recover the older generation. The crate returns Incomplete and sets terminated = true UNCONDITIONALLY (delegate_migrate.rs:783) -- pinned for Union too by the crate's own incomplete_newer_halts_before_older_under_both_policies -- so every older generation is Superseded and nothing is recovered. Switching policy does not help.",
+      "agreement": {
+        "DivergeOutcome": "one failed write on the newest predecessor Supersedes every older one, under BOTH policies"
+      },
+      "initial_store": [],
+      "failing_secret_keys": [
+        "676b3a636572743a6670426164",
+        "676b3a736b3a6670426164",
+        "676b3a6c6162656c3a6670426164",
+        "676b3a7065726d733a6670426164"
+      ],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": [
+              [
+                "676b3a636572743a6670476f6f64",
+                "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d6670476f6f64"
+              ],
+              [
+                "676b3a736b3a6670476f6f64",
+                "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d6670476f6f64"
+              ],
+              [
+                "676b3a696e646578",
+                "81666670476f6f64"
+              ]
+            ]
+          },
+          "ghostkeys_bucket": "Exported(1)"
+        },
+        {
+          "delegate_key": "d3f152bcecaf31021cf8b1b5541bd6acf890b31256750ddfd6b3c8d4bafb726c",
+          "code_hash": "63c2ccddcab61c1983dc7b6eccf68e9aaca6e1d1e31e79539ecd4eada3195650",
+          "generation": 1,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": [
+              [
+                "676b3a636572743a6670426164",
+                "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d6670426164"
+              ],
+              [
+                "676b3a736b3a6670426164",
+                "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d6670426164"
+              ],
+              [
+                "676b3a696e646578",
+                "81656670426164"
+              ]
+            ]
+          },
+          "ghostkeys_bucket": "Exported(1)"
+        }
+      ],
+      "ghostkeys_store": [
+        [
+          "676b3a636572743a6670476f6f64",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d6670476f6f64"
+        ],
+        [
+          "676b3a696e646578",
+          "81666670476f6f64"
+        ],
+        [
+          "676b3a7065726d733a6670476f6f64",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a736b3a6670476f6f64",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d6670476f6f64"
+        ]
+      ],
+      "ghostkeys_visible": [
+        "fpGood"
+      ],
+      "ghostkeys_indexed": [
+        "fpGood"
+      ],
+      "ghostkeys_complete_pairs": [
+        "fpGood"
+      ],
+      "ghostkeys_recovered": 1,
+      "ghostkeys_failed_imports": 1
+    },
+    {
+      "name": "predecessor_holds_keys_but_exports_nothing",
+      "what_it_shows": "The sharpest instance of the marker bug. The predecessor SAYS it holds identities and then exports none, because this vault has no Export scope on them. ghostkeys files present_but_unexportable, warns the user, and re-asks on every startup. The crate cannot tell this from a genuinely empty predecessor: it records NoData, writes an empty completion marker, and never asks again even once the scope is granted.",
+      "agreement": {
+        "DivergeClassification": "keys known to exist and be unreachable are recorded as NoData, then sealed"
+      },
+      "initial_store": [],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": []
+          },
+          "ghostkeys_bucket": "present_but_unexportable"
+        }
+      ],
+      "ghostkeys_store": [],
+      "ghostkeys_visible": [],
+      "ghostkeys_indexed": [],
+      "ghostkeys_complete_pairs": [],
+      "ghostkeys_recovered": 0,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "predecessor_holds_keys_then_goes_silent",
+      "what_it_shows": "It said it holds identities and then did not hand them over -- the shape of a missed confirmation dialog. ghostkeys files present_but_silent and tells the user to reload and allow the prompt. The crate reports the same Unresponsive it reports for the eleven entries the node simply does not have.",
+      "agreement": {
+        "DivergeClassification": "a predecessor that announced keys and then went quiet is bucketed with routine absence"
+      },
+      "initial_store": [],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Err": "timed out waiting for the delegate"
+          },
+          "ghostkeys_bucket": "present_but_silent"
+        }
+      ],
+      "ghostkeys_store": [],
+      "ghostkeys_visible": [],
+      "ghostkeys_indexed": [],
+      "ghostkeys_complete_pairs": [],
+      "ghostkeys_recovered": 0,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "the_request_never_left_the_browser",
+      "what_it_shows": "A local transport failure: nothing was asked, so nothing was learned. ghostkeys files it with silence deliberately -- warning here would put a red toast in front of a user whose websocket dropped, on a node that may hold no legacy delegates at all, while the connection banner already says so. The crate attaches the error string, so it reads as evidence.",
+      "agreement": {
+        "DivergeClassification": "a local transport failure is reported as though the predecessor answered"
+      },
+      "initial_store": [],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Err": "transport: socket closed"
+          },
+          "fetch": {
+            "Err": "could not reach the node: socket closed"
+          },
+          "ghostkeys_bucket": "undetermined"
+        }
+      ],
+      "ghostkeys_store": [],
+      "ghostkeys_visible": [],
+      "ghostkeys_indexed": [],
+      "ghostkeys_complete_pairs": [],
+      "ghostkeys_recovered": 0,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "successor_holds_a_half_broken_key",
+      "what_it_shows": "ListGhostKeys reports a key whenever its CERTIFICATE loads and never checks the signing key, so a cert-only key looks present and cannot sign. ghostkeys overwrites both halves to heal it; never-clobber keeps the stale certificate.",
+      "agreement": {
+        "DivergeOutcome": "never-clobber leaves the successor's stale certificate in place"
+      },
+      "initial_store": [
+        [
+          "676b3a636572743a667041",
+          "5354414c452d43455254"
+        ],
+        [
+          "676b3a696e646578",
+          "8163667041"
+        ],
+        [
+          "676b3a7065726d733a667041",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ]
+      ],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": [
+              [
+                "676b3a636572743a667041",
+                "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d667041"
+              ],
+              [
+                "676b3a736b3a667041",
+                "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d667041"
+              ],
+              [
+                "676b3a696e646578",
+                "8163667041"
+              ]
+            ]
+          },
+          "ghostkeys_bucket": "Exported(1)"
+        }
+      ],
+      "ghostkeys_store": [
+        [
+          "676b3a636572743a667041",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d667041"
+        ],
+        [
+          "676b3a696e646578",
+          "8163667041"
+        ],
+        [
+          "676b3a7065726d733a667041",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a736b3a667041",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d667041"
+        ]
+      ],
+      "ghostkeys_visible": [
+        "fpA"
+      ],
+      "ghostkeys_indexed": [
+        "fpA"
+      ],
+      "ghostkeys_complete_pairs": [
+        "fpA"
+      ],
+      "ghostkeys_recovered": 0,
+      "ghostkeys_failed_imports": 0
+    },
+    {
+      "name": "imported_keys_are_visible_to_the_user",
+      "what_it_shows": "gk:index is a single CBOR secret and ListGhostKeys reads it. The successor already has one (the user made a key on the new version), so never-clobber skips the predecessor's index and the recovered key is stored but invisible.",
+      "agreement": {
+        "DivergeOutcome": "never-clobber skips gk:index, so imported keys stay invisible"
+      },
+      "initial_store": [
+        [
+          "676b3a636572743a66704d696e65",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704d696e65"
+        ],
+        [
+          "676b3a696e646578",
+          "816666704d696e65"
+        ],
+        [
+          "676b3a7065726d733a66704d696e65",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a736b3a66704d696e65",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704d696e65"
+        ]
+      ],
+      "failing_secret_keys": [],
+      "predecessors": [
+        {
+          "delegate_key": "08fe3e79a9f3b8e4aa93d6a84dda80a826420c4376f178eaee27fc75555742b5",
+          "code_hash": "e2ec6b1bc367558b2a3ff246b956016d566327803a71ca3f94980c6b822f4e7f",
+          "generation": 0,
+          "probe": {
+            "Ok": true
+          },
+          "fetch": {
+            "Ok": [
+              [
+                "676b3a636572743a66704f6c64",
+                "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704f6c64"
+              ],
+              [
+                "676b3a736b3a66704f6c64",
+                "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704f6c64"
+              ],
+              [
+                "676b3a696e646578",
+                "816566704f6c64"
+              ]
+            ]
+          },
+          "ghostkeys_bucket": "Exported(1)"
+        }
+      ],
+      "ghostkeys_store": [
+        [
+          "676b3a636572743a66704d696e65",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704d696e65"
+        ],
+        [
+          "676b3a636572743a66704f6c64",
+          "2d2d2d2d2d424547494e2047484f53544b45595f43455254494649434154452d2d2d2d2d66704f6c64"
+        ],
+        [
+          "676b3a696e646578",
+          "826666704d696e656566704f6c64"
+        ],
+        [
+          "676b3a7065726d733a66704d696e65",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a7065726d733a66704f6c64",
+          "81a269726571756573746f72a166576562417070982007070707070707070707070707070707070707070707070707070707070707076673636f706573856a526561645075626c6963645369676e664578706f72746644656c6574656541646d696e"
+        ],
+        [
+          "676b3a736b3a66704d696e65",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704d696e65"
+        ],
+        [
+          "676b3a736b3a66704f6c64",
+          "2d2d2d2d2d424547494e20454432353531395f5349474e494e475f4b45595f56312d2d2d2d2d66704f6c64"
+        ]
+      ],
+      "ghostkeys_visible": [
+        "fpMine",
+        "fpOld"
+      ],
+      "ghostkeys_indexed": [
+        "fpMine",
+        "fpOld"
+      ],
+      "ghostkeys_complete_pairs": [
+        "fpMine",
+        "fpOld"
+      ],
+      "ghostkeys_recovered": 1,
+      "ghostkeys_failed_imports": 0
+    }
+  ]
+}

@@ -3,6 +3,9 @@ members = [
     "common",
     "delegates/ghostkey-delegate",
     "ui",
+    # Test-only. Isolated in its own crate because it links freenet-stdlib
+    # 0.8 (via freenet-migrate) which cannot coexist with ghostkeys' 0.6.
+    "migration-differential",
 ]
 resolver = "2"
 
