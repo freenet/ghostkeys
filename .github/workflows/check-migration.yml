@@ -47,8 +47,13 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # Version-pinned and `--locked`: an unpinned `cargo install` re-resolves
+      # the dependency tree fresh on every run, so a transitive dependency
+      # published with an MSRV above the 1.95.0 this repo pins breaks CI with
+      # no change in the repo (see the same guard in test.yml). `--locked`
+      # builds from b3sum's published Cargo.lock instead.
       - name: Install b3sum
-        run: cargo install b3sum
+        run: cargo install --locked b3sum@1.8.6
 
       # Through the script, so the hash CI computes is the hash a developer
       # gets locally. A bare `cargo build` embeds this runner's $CARGO_HOME

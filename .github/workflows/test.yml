@@ -86,9 +86,16 @@ jobs:
 
       # binstall rather than `cargo install b3sum`, which spends a minute
       # compiling a hashing tool this job only shells out to.
+      #
+      # Version-pinned and `--locked` for the same reason as the dioxus-cli
+      # install below: when binstall falls back to compiling from source, an
+      # unpinned, freshly-resolved dependency tree breaks the moment any
+      # transitive dependency starts requiring a rustc newer than the 1.95.0
+      # this repo pins. `--locked` makes the fallback build from the crate's
+      # published Cargo.lock instead.
       - uses: cargo-bins/cargo-binstall@main
       - name: Install b3sum
-        run: cargo binstall -y --force b3sum
+        run: cargo binstall -y --force --locked b3sum@1.8.6
 
       - name: Migration-record tests
         run: bash tests/record-migration.test.sh
@@ -125,9 +132,19 @@ jobs:
       # `~/.cargo/bin`, so on a cache hit binstall reports "already installed"
       # and skips -- leaving no `dx` on PATH and a failure two steps later that
       # points at the wrong thing entirely.
+      #
+      # `--locked` is load-bearing too. When no prebuilt binary can be
+      # fetched, binstall falls back to `cargo install`, which by default
+      # re-resolves the dependency tree fresh -- so a transitive dependency
+      # published yesterday can require a rustc newer than the 1.95.0 this
+      # repo pins and break every CI run with no change in the repo (this
+      # actually happened: kstring 2.0.4 raised its MSRV to 1.96.0 and took
+      # out CI repo-wide). `--locked` passes through to that fallback and
+      # builds from the Cargo.lock published with the crate, which is the
+      # tree the release was actually built against.
       - uses: cargo-bins/cargo-binstall@main
       - name: Install dioxus-cli
-        run: cargo binstall -y --force dioxus-cli@0.7.9
+        run: cargo binstall -y --force --locked dioxus-cli@0.7.9
 
       - name: Install browser test deps
         working-directory: ui/tests/browser
