@@ -124,7 +124,7 @@ fn validated_return_to(raw: &str) -> Option<String> {
         }
     };
 
-    // Parsing alone is not enough: `from_bytes` accepts a base58 string
+    // Parsing alone is not enough: `from_base58` accepts a base58 string
     // shorter than 32 bytes and pads it, so a truncated value decodes to a
     // *different, valid-looking* contract id rather than failing. A clipped
     // link would then send the user confidently to somewhere they have never
