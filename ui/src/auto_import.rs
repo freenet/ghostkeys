@@ -116,7 +116,7 @@ fn parse_fragment(hash: &str) -> Option<PendingImport> {
 /// can only ever produce `/v1/contract/web/<valid key>/`, a same-origin path.
 /// There is no shape of input that turns it into an off-site redirect.
 fn validated_return_to(raw: &str) -> Option<String> {
-    let id = match ContractInstanceId::from_bytes(raw) {
+    let id = match ContractInstanceId::from_base58(raw) {
         Ok(id) => id,
         Err(e) => {
             warn!("Ignoring malformed return_to in import link: {e}");
@@ -124,7 +124,7 @@ fn validated_return_to(raw: &str) -> Option<String> {
         }
     };
 
-    // Parsing alone is not enough: `from_bytes` accepts a base58 string
+    // Parsing alone is not enough: `from_base58` accepts a base58 string
     // shorter than 32 bytes and pads it, so a truncated value decodes to a
     // *different, valid-looking* contract id rather than failing. A clipped
     // link would then send the user confidently to somewhere they have never
@@ -558,7 +558,7 @@ mod tests {
             // smuggle a path separator past the base58 check either.
             "..%2F..%2Fv1%2Fdelegate",
             "0OIl", // characters outside the base58 alphabet
-            // Right alphabet, too short. `ContractInstanceId::from_bytes`
+            // Right alphabet, too short. `ContractInstanceId::from_base58`
             // accepts this and pads it into a different, entirely valid id --
             // so a clipped link would otherwise send the user confidently to
             // somewhere they have never been.

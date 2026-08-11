@@ -1369,7 +1369,7 @@ mod tests {
 
     fn webapp(seed: u8) -> SignatureRequestor {
         let bytes = [seed; 32];
-        let id = ContractInstanceId::from_bytes(bs58::encode(&bytes).into_string()).unwrap();
+        let id = ContractInstanceId::from_base58(bs58::encode(&bytes).into_string()).unwrap();
         SignatureRequestor::WebApp(id)
     }
 

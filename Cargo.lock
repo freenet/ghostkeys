@@ -1397,7 +1397,7 @@ dependencies = [
  "ciborium",
  "ed25519-dalek",
  "freenet-scaffold",
- "freenet-stdlib 0.8.5",
+ "freenet-stdlib",
  "serde",
  "serde_with",
 ]
@@ -1424,9 +1424,9 @@ dependencies = [
 
 [[package]]
 name = "freenet-stdlib"
-version = "0.6.1"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4aa02deacddb55332a7dcb6ef3b3afef6e633d4fcbc3730df4f1e34cd7ce84d2"
+checksum = "b62aeba7634d1ae5c2d02f78db33ee40442511858275be5be2099d24a13b2559"
 dependencies = [
  "bincode",
  "blake3",
@@ -1450,30 +1450,6 @@ dependencies = [
  "tracing-subscriber",
  "wasm-bindgen",
  "web-sys",
-]
-
-[[package]]
-name = "freenet-stdlib"
-version = "0.8.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b62aeba7634d1ae5c2d02f78db33ee40442511858275be5be2099d24a13b2559"
-dependencies = [
- "bincode",
- "blake3",
- "bs58",
- "byteorder",
- "bytes",
- "chrono",
- "flatbuffers",
- "freenet-macros",
- "futures",
- "semver",
- "serde",
- "serde_json",
- "serde_with",
- "thiserror 2.0.19",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1631,7 +1607,7 @@ dependencies = [
  "bs58",
  "ciborium",
  "ed25519-dalek",
- "freenet-stdlib 0.6.1",
+ "freenet-stdlib",
  "serde",
  "serde_json",
 ]
@@ -1644,7 +1620,7 @@ dependencies = [
  "bs58",
  "ciborium",
  "ed25519-dalek",
- "freenet-stdlib 0.6.1",
+ "freenet-stdlib",
  "getrandom 0.2.17",
  "ghostkey-common",
  "ghostkey_lib",
@@ -1660,7 +1636,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "dioxus",
- "freenet-stdlib 0.6.1",
+ "freenet-stdlib",
  "futures",
  "getrandom 0.2.17",
  "ghostkey-common",
@@ -2368,7 +2344,7 @@ name = "migration-differential"
 version = "0.3.0"
 dependencies = [
  "freenet-migrate",
- "freenet-stdlib 0.8.5",
+ "freenet-stdlib",
  "futures",
  "serde",
  "serde_json",

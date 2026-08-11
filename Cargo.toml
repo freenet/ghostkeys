@@ -3,8 +3,11 @@ members = [
     "common",
     "delegates/ghostkey-delegate",
     "ui",
-    # Test-only. Isolated in its own crate because it links freenet-stdlib
-    # 0.8 (via freenet-migrate) which cannot coexist with ghostkeys' 0.6.
+    # Test-only. Originally isolated in its own crate because it links
+    # freenet-stdlib 0.8 (via freenet-migrate), which could not coexist with
+    # the 0.6 the rest of the workspace was on. The workspace is on 0.8 now,
+    # so the isolation is historical; folding it in is the crate-adoption
+    # PR's concern.
     "migration-differential",
 ]
 resolver = "2"
@@ -18,7 +21,7 @@ repository = "https://github.com/freenet/ghostkeys"
 [workspace.dependencies]
 ghostkey-common = { path = "common" }
 ghostkey_lib = "0.2"
-freenet-stdlib = "0.6"
+freenet-stdlib = "0.8"
 ed25519-dalek = { version = "2.1", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 ciborium = "0.2"
