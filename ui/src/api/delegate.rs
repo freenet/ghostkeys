@@ -365,10 +365,19 @@ mod real {
             let mut web_api = WEB_API.write();
             if let Some(api) = web_api.as_mut() {
                 info!("Registering ghostkey delegate");
+                // The cipher/nonce values here are NOT load-bearing and must
+                // not be persisted. Since freenet-core #4140 the node IGNORES
+                // client-supplied cipher/nonce on RegisterDelegate: per-delegate
+                // DEKs are derived from the node's own KEK via HKDF (see
+                // crates/core/src/wasm_runtime/secrets_store/store.rs,
+                // `register_delegate`, which says exactly this). The wire fields
+                // survive only for backwards compatibility; stdlib 0.8 dropped
+                // the old DEFAULT_CIPHER/DEFAULT_NONCE constants, so we send
+                // zeroes.
                 api.send(DelegateOp(DelegateRequest::RegisterDelegate {
                     delegate: container,
-                    cipher: DelegateRequest::DEFAULT_CIPHER,
-                    nonce: DelegateRequest::DEFAULT_NONCE,
+                    cipher: [0u8; 32],
+                    nonce: [0u8; 24],
                 }))
                 .await
             } else {

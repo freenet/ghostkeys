@@ -57,7 +57,7 @@ fn test_import_verify_sign_flow() {
     let dummy_id_bytes = [42u8; 32];
     let dummy_id_b58 = bs58::encode(&dummy_id_bytes).into_string();
     let dummy_contract_id =
-        freenet_stdlib::prelude::ContractInstanceId::from_bytes(dummy_id_b58).unwrap();
+        freenet_stdlib::prelude::ContractInstanceId::from_base58(dummy_id_b58).unwrap();
 
     let scoped = ScopedPayload {
         requestor: SignatureRequestor::WebApp(dummy_contract_id),
@@ -120,7 +120,7 @@ fn test_request_response_serialization() {
     let dummy_id_bytes = [42u8; 32];
     let dummy_id_b58 = bs58::encode(&dummy_id_bytes).into_string();
     let dummy_contract_id =
-        freenet_stdlib::prelude::ContractInstanceId::from_bytes(dummy_id_b58).unwrap();
+        freenet_stdlib::prelude::ContractInstanceId::from_base58(dummy_id_b58).unwrap();
     let webapp_requestor = SignatureRequestor::WebApp(dummy_contract_id);
 
     let responses = vec![
