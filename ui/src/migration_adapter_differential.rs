@@ -82,6 +82,9 @@ struct MockNode {
     labels_set: RefCell<Vec<(String, String)>>,
     /// `SetDefaultKey` calls the adapter made, in order.
     defaults_set: RefCell<Vec<String>>,
+    /// Fingerprints whose `ImportGhostKey` round-trip fails at TRANSPORT
+    /// level (timeout / dead socket) rather than with a delegate answer.
+    import_transport_fail: BTreeSet<String>,
 }
 
 impl MockNode {
@@ -100,6 +103,7 @@ impl MockNode {
             import_sends: RefCell::new(0),
             labels_set: RefCell::new(Vec::new()),
             defaults_set: RefCell::new(Vec::new()),
+            import_transport_fail: BTreeSet::new(),
         }
     }
 
@@ -117,16 +121,24 @@ impl MockNode {
     /// `Namespace::apply_import` model the oracle uses), echo the derived
     /// fingerprint. The request carries no label; labelling is `SetLabel`'s
     /// job, exactly as in the real delegate.
-    fn handle_import(&self, certificate_pem: String, signing_key_pem: String) -> GhostkeyResponse {
+    fn handle_import(
+        &self,
+        certificate_pem: String,
+        signing_key_pem: String,
+    ) -> Result<GhostkeyResponse, DelegateCallError> {
         *self.import_sends.borrow_mut() += 1;
         let Some(derived) = certificate_pem
             .strip_prefix(CERT_PREFIX)
             .map(str::to_string)
         else {
-            return GhostkeyResponse::Error {
+            return Ok(GhostkeyResponse::Error {
                 message: "invalid certificate PEM: unrecognized armor".to_string(),
-            };
+            });
         };
+        if self.import_transport_fail.contains(&derived) {
+            // The reply never arrives; the vault's call times out.
+            return Err(DelegateCallError::TimedOut);
+        }
         let mut ns = self.ns.borrow_mut();
         let imported = ns.apply_import(&Key {
             fp: derived.clone(),
@@ -137,14 +149,14 @@ impl MockNode {
         if !imported {
             // The real handler checks only the grant write and answers an
             // explicit error when it fails.
-            return GhostkeyResponse::Error {
+            return Ok(GhostkeyResponse::Error {
                 message: "imported the ghostkey but could not record ownership of it".into(),
-            };
+            });
         }
-        GhostkeyResponse::ImportResult {
+        Ok(GhostkeyResponse::ImportResult {
             fingerprint: derived,
             notary_info: "Freenet Notary".to_string(),
-        }
+        })
     }
 }
 
@@ -160,7 +172,7 @@ impl GkDelegateChannel for MockNode {
                 GhostkeyRequest::ImportGhostKey {
                     certificate_pem,
                     signing_key_pem,
-                } => Ok(self.handle_import(certificate_pem, signing_key_pem)),
+                } => self.handle_import(certificate_pem, signing_key_pem),
                 GhostkeyRequest::SetLabel { fingerprint, label } => {
                     self.ns
                         .borrow_mut()
@@ -800,5 +812,81 @@ fn the_default_identity_is_carried_with_containment() {
     assert!(
         node2.defaults_set.borrow().is_empty(),
         "a default naming an unrecovered key must be ignored"
+    );
+}
+
+/// The adapter's probe mapping, pinned per reply kind. `probe_executable`
+/// and `fetch_secrets` are LAYERED defences (the crate never fetches after a
+/// false probe, and the fetch re-derives the decision from the cached
+/// verdict), so a mutation to either alone is absorbed by the other — this
+/// pins the probe half directly, and the export-send tests above pin the
+/// end-to-end property.
+#[test]
+fn the_probe_answers_false_for_every_no_answer_verdict() {
+    use crate::migration_adapter::GkPredecessorIo;
+    use freenet_migrate::PredecessorSecretsIo;
+
+    let cases = [
+        (PredecessorState::Silent, false),
+        (PredecessorState::NotRegistered, false),
+        (PredecessorState::TransportFailure("socket closed"), false),
+        (PredecessorState::RegisteredButEmpty, true),
+        (
+            PredecessorState::HoldsAndExports(vec![key("fpA", None)]),
+            true,
+        ),
+        // Too old to know the question, answers with an error: executable.
+        (
+            PredecessorState::TooOldButExports(vec![key("fpA", None)]),
+            true,
+        ),
+        // A delegate-level failure IS an answer.
+        (PredecessorState::AnswersWithError("missing secret"), true),
+    ];
+    for (state, expected) in cases {
+        let preds = predecessors(vec![state.clone()]);
+        let node = MockNode::new(&preds, Namespace::default());
+        let mut reader = GkPredecessorIo::new(&node);
+        let target = DelegateKey::new(
+            preds[0].entry.delegate_key,
+            CodeHash::new(preds[0].entry.code_hash),
+        );
+        let got = block_on(reader.probe_executable(&target)).expect("probe never aborts");
+        assert_eq!(
+            got, expected,
+            "probe_executable({state:?}) must answer {expected}"
+        );
+    }
+}
+
+/// A TRANSPORT-level import failure (the round-trip to the current delegate
+/// times out) is a retryable failure, never a clean skip: the predecessor
+/// must classify `Incomplete` with the item counted failed, so a retry
+/// re-offers the key. Mapping this arm onto `AlreadyAuthoritative` is the
+/// same one-token mistake as the answered-error arm, one line lower.
+#[test]
+fn a_transport_failed_import_is_incomplete_not_clean() {
+    let entries = legacy_entries();
+    let preds = vec![Predecessor {
+        entry: entries[0],
+        generation: 0,
+        state: PredecessorState::HoldsAndExports(vec![key("fpLost", None)]),
+    }];
+    let mut node = MockNode::new(&preds, Namespace::default());
+    node.import_transport_fail.insert("fpLost".into());
+    let run = run_adapter(&node, &preds, Some(vec![]));
+
+    match &run.report.predecessors[0] {
+        PredecessorMigration::Incomplete { tally, .. } => {
+            assert_eq!(tally.failed, 1, "the lost import is counted failed");
+            assert_eq!(tally.written, 0);
+            assert_eq!(tally.skipped, 0, "and NOT counted as a clean skip");
+        }
+        other => panic!("expected Incomplete, got {other:?}"),
+    }
+    assert_eq!(run.outcome.failed_imports, 1);
+    assert!(
+        node.ns.borrow().visible().is_empty(),
+        "nothing landed, and the report must say so"
     );
 }
