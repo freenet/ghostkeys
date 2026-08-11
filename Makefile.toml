@@ -183,7 +183,13 @@ description = "Run all tests"
 # Includes the shell tests: `cargo test` cannot see scripts/, and the migration
 # machinery is the part of this repo where a silent failure costs users their
 # ghost keys.
-dependencies = ["test-scripts"]
+#
+# build-delegate first: the delegate-WASM baseline pin
+# (ui/src/migration_registry_pin.rs) hashes the built artifact and FAILS when
+# it is missing or was built without the path remap — a guard that silently
+# skipped would be a guard that cannot fail. CI's test job builds it the same
+# way before `cargo test`.
+dependencies = ["build-delegate", "test-scripts"]
 command = "cargo"
 args = ["test", "--workspace"]
 

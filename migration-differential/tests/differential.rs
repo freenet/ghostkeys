@@ -25,9 +25,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use freenet_migrate::{
-    migrate_delegate_secrets, DelegateLineageEntry, MigrationAuthorization, PredecessorMigration,
-    PredecessorSecretsIo, SecretPair, SecretSelectionPolicy, SecretStore, UnionAck,
-    PRED_DONE_MARKER_KEY_PREFIX,
+    migrate_delegate_secrets, DelegateLineageEntry, MigrationAuthorization,
+    NoCrossEntryInvariantsAck, PredecessorMigration, PredecessorSecretsIo, SecretPair,
+    SecretSelectionPolicy, SecretStore, SecretStoreIo, UnionAck, PRED_DONE_MARKER_KEY_PREFIX,
 };
 use freenet_stdlib::prelude::{CodeHash, DelegateKey};
 use serde::Deserialize;
@@ -377,8 +377,16 @@ fn run_over(
     let mut store = store;
     let mut io = RecordedIo::new(preds);
     let entries = lineage(preds);
-    let report = futures::executor::block_on(migrate_delegate_secrets(
+    // 0.5.0 port: `SecretStoreIo` is the raw-pair writer pinned byte-for-byte to
+    // the pre-0.5.0 behaviour, so these tests keep measuring what PR #32
+    // measured -- the 0.4.0 raw key/value copy. The seam writer the adoption
+    // would actually use is measured separately in `mod seam` below.
+    let mut writer = SecretStoreIo::new(
         &mut store,
+        NoCrossEntryInvariantsAck::i_certify_these_secrets_have_no_cross_entry_invariants(),
+    );
+    let report = futures::executor::block_on(migrate_delegate_secrets(
+        &mut writer,
         &mut io,
         &entries,
         MigrationAuthorization::app_author_ack(),
@@ -405,6 +413,7 @@ fn run_over(
                 }
                 PredecessorMigration::Incomplete { .. } => "Incomplete".to_string(),
                 PredecessorMigration::Superseded { .. } => "Superseded".to_string(),
+                PredecessorMigration::WriterUnavailable { .. } => "WriterUnavailable".to_string(),
             })
             .collect(),
         store,
@@ -855,25 +864,39 @@ fn one_failed_write_supersedes_every_older_generation() {
         "and still recovers the older generation"
     );
 
-    for (label, policy) in [
-        (
-            "NewestSnapshotWins",
-            SecretSelectionPolicy::NewestSnapshotWins,
-        ),
-        ("UnionAllGenerations", union()),
-    ] {
-        let r = run(&s, policy);
-        assert_eq!(
-            r.classifications,
-            vec!["Incomplete", "Superseded"],
-            "under {label}: a partial write halts the walk"
-        );
-        assert!(
-            r.store.visible().is_empty(),
-            "under {label}: nothing is recovered, including the intact older generation"
-        );
-    }
-    check_against_ghostkeys(&s, &run(&s, SecretSelectionPolicy::NewestSnapshotWins));
+    // 0.5.0 CHANGED THIS, and the change is the D8 fix this differential asked
+    // for: termination now derives from the policy, so a data-bearing
+    // `Incomplete` halts `NewestSnapshotWins` (unchanged) but the Union walk
+    // CONTINUES to the intact older generation. The 0.4.0 behaviour -- one
+    // storage failure on one key of the newest predecessor superseding every
+    // older generation under BOTH policies -- is gone.
+    let nsw = run(&s, SecretSelectionPolicy::NewestSnapshotWins);
+    assert_eq!(
+        nsw.classifications,
+        vec!["Incomplete", "Superseded"],
+        "NewestSnapshotWins still halts on a data-bearing partial write"
+    );
+    assert!(nsw.store.visible().is_empty());
+
+    let u = run(&s, union());
+    assert_eq!(
+        u.classifications,
+        vec!["Incomplete", "Imported"],
+        "0.5.0 Union walks on past the partial write to the older generation"
+    );
+    // The older generation's key IS recovered now -- but through the raw-pair
+    // writer it lands without grants, so it is still invisible: the D9 half of
+    // the finding stands for a raw copy, and only the seam writer clears it.
+    assert!(
+        u.store.visible().is_empty(),
+        "raw pairs recover the bytes but grant nothing"
+    );
+    assert_eq!(
+        u.store.complete_pairs(),
+        BTreeSet::from(["fpGood".to_string()]),
+        "both halves of the older generation's key are in the store"
+    );
+    check_against_ghostkeys(&s, &nsw);
 }
 
 /// **Expected before running:** the predecessor SAYS it holds identities and
@@ -1053,3 +1076,20 @@ fn recorded_registry_rows_round_trip_to_delegate_keys() {
     );
     assert_eq!(key.bytes(), unhex32(&p.delegate_key));
 }
+
+// ===========================================================================
+// Where the 0.5.0 writer-seam measurement lives now
+// ===========================================================================
+//
+// The 2026-08-11 re-measurement first ran here as a MODEL of the adapter a
+// ghostkeys adopter would write (`mod seam`, preserved on the experiment
+// branch `gk-05-remeasure-experiment`): all 14 recorded scenarios matched the
+// shipped sweep through a `SuccessorSecretsIo` writer routing imports through
+// the app's own import path. The adoption PR replaced that model with the
+// REAL adapter, and the measurement moved with it:
+// `ui/src/migration_adapter_differential.rs` drives the actual shipped
+// `GkPredecessorIo`/`GkSuccessorIo` over the same fixtures and asserts
+// agreement with the same committed record. Keeping a second, modelled copy
+// here would drift from the real adapter; this crate's remaining job is the
+// raw-pair HALF of the differential above — the documented reason a raw
+// `(key, value)` copy was rejected for ghostkeys.
