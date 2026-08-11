@@ -470,9 +470,20 @@ impl<C: GkDelegateChannel, F: FnMut(GhostKeyInfo)> SuccessorSecretsIo for GkSucc
             .and_then(|s| s.strip_prefix(CRED_KEY_PREFIX))
             .map(str::to_string)
         else {
-            // Not one of this adapter's credential units. Nothing else is
-            // ours to write — the successor's state stands.
-            return ItemWrite::already_authoritative();
+            // Unreachable today — `fetch_secrets` only emits `gkm:v1:` pairs —
+            // but if a future fetch encoding ever adds a second pair kind, a
+            // real user's key could ride in it. Sealing an unknown item as
+            // "already authoritative" would silently drop that key with a
+            // clean report (the ghostkeys#32 D3/D9 shape, through the writer
+            // instead of the copier), so an unrecognized key is a PERMANENT
+            // failure that names the mismatch: it will not become
+            // recognizable on a retry, and it must surface loudly instead of
+            // accumulating retries. Pinned by
+            // `an_unrecognized_pair_key_is_a_permanent_failure_not_a_clean_skip`.
+            return ItemWrite::permanent(format!(
+                "unrecognized pair key (adapter/fetch encoding mismatch): {:?}",
+                String::from_utf8_lossy(item.key)
+            ));
         };
         let key: ghostkey_common::ExportedGhostKey = match ghostkey_common::from_cbor(item.value) {
             Ok(k) => k,

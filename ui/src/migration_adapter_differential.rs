@@ -890,3 +890,81 @@ fn a_transport_failed_import_is_incomplete_not_clean() {
         "nothing landed, and the report must say so"
     );
 }
+
+/// NIT-1 pin: a pair key the writer does not recognize must be a PERMANENT
+/// failure, never a clean "already yours" skip. The arm is unreachable today
+/// (`fetch_secrets` only emits `gkm:v1:` keys), which is exactly why it needs
+/// a pin: an unknown-item -> sealed-clean arm is the one-token silent-loss
+/// shape the rest of the adapter exists to prevent, and if a future fetch
+/// encoding ever adds a second pair kind, a real user's key could ride in a
+/// pair the writer seals as authoritative without importing it — a paid key
+/// gone with a clean report (the ghostkeys#32 D3/D9 shape, arriving through
+/// the writer instead of the copier). Permanent rather than retryable: an
+/// unrecognized key shape does not become recognizable on a retry, and a real
+/// encoding mismatch should surface loudly in the report.
+#[test]
+fn an_unrecognized_pair_key_is_a_permanent_failure_not_a_clean_skip() {
+    use crate::migration_adapter::GkSuccessorIo;
+    use freenet_migrate::{
+        migrate_delegate_secrets, MigrationAuthorization, PredecessorSecretsIo, SecretPair,
+    };
+
+    /// A reader that answers the probe and then hands over a pair whose key
+    /// is NOT in the adapter's `gkm:v1:` encoding — the shape a fetch/writer
+    /// encoding mismatch would produce.
+    struct RawPairIo(Vec<SecretPair>);
+    impl PredecessorSecretsIo for RawPairIo {
+        type Error = String;
+        async fn probe_executable(&mut self, _p: &DelegateKey) -> Result<bool, String> {
+            Ok(true)
+        }
+        async fn fetch_secrets(&mut self, _p: &DelegateKey) -> Result<Vec<SecretPair>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    let entries = legacy_entries();
+    let preds = predecessors(vec![PredecessorState::HoldsAndExports(vec![key(
+        "fpRaw", None,
+    )])]);
+    let table = MockNode::table(&preds);
+    let lineage = crate::migration_adapter::lineage_from_table(&table, &current_key());
+    let _ = entries;
+
+    let node = MockNode::new(&preds, Namespace::default());
+    let mut writer = GkSuccessorIo::new(&node, current_key(), Some(vec![]), |_| {});
+    let mut reader = RawPairIo(vec![(b"gk:cert:fpRaw".to_vec(), b"RAW-BYTES".to_vec())]);
+    let report = block_on(migrate_delegate_secrets(
+        &mut writer,
+        &mut reader,
+        &lineage,
+        MigrationAuthorization::app_author_ack(),
+        crate::migration_adapter::gk_secret_policy(),
+    ));
+
+    match &report.predecessors[0] {
+        PredecessorMigration::Incomplete { tally, failure, .. } => {
+            assert_eq!(
+                tally.rejected, 1,
+                "the unrecognized pair is permanently rejected"
+            );
+            assert_eq!(tally.skipped, 0, "and NOT sealed as already-authoritative");
+            assert_eq!(tally.written, 0);
+            let msg = failure
+                .as_ref()
+                .map(|f| f.error.clone())
+                .unwrap_or_default();
+            assert!(
+                msg.contains("unrecognized pair key"),
+                "the failure names the encoding mismatch, got: {msg}"
+            );
+        }
+        other => panic!("an unknown pair key must leave the predecessor Incomplete, got {other:?}"),
+    }
+    assert_eq!(
+        *node.import_sends.borrow(),
+        0,
+        "nothing was sent to the delegate"
+    );
+    assert!(node.ns.borrow().secrets.is_empty(), "nothing was written");
+}
