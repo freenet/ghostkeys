@@ -43,6 +43,28 @@ if [ ! -f "$WASM" ]; then
     exit 1
 fi
 
+# --- The artifact must come from the canonical (path-remapped) build ------
+#
+# This script hashes a WASM it does not build. A bare `cargo build` writes to
+# the exact same path WITHOUT the registry path remap, and its hash is
+# machine-specific — a value the publish path never produces (ghostkeys#34:
+# same source, same toolchain, two different "delegate hashes", and PR #32
+# recorded the wrong one). The two states are unambiguous, measured: the
+# remapped build embeds `/cargo-registry` (and no absolute $CARGO_HOME paths,
+# which build-delegate.sh separately refuses); a bare build is the exact
+# inverse.
+#
+# `grep -a` rather than `strings`, for the same reason build-delegate.sh uses
+# it: gating a guard on a binutils tool means it silently does not run on the
+# one machine that lacks it.
+if ! grep -a -q -F '/cargo-registry' "$WASM"; then
+    echo "ERROR: $WASM was built WITHOUT the path remap." >&2
+    echo "Its hash is machine-specific and is NOT what gets published, so every" >&2
+    echo "number this script would print about it is wrong. Rebuild it the one" >&2
+    echo "canonical way:  cargo make build-delegate   (see ghostkeys#34)" >&2
+    exit 1
+fi
+
 if [ ! -f "$LEGACY" ]; then
     echo "ERROR: $LEGACY not found" >&2
     exit 1

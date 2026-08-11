@@ -11,10 +11,20 @@ mod api;
 mod auto_import;
 mod components;
 mod migration;
-/// Differential test only: ghostkeys' shipped sweep vs `freenet-migrate` 0.4.0.
-/// Not compiled into the vault.
+mod migration_adapter;
+/// Differential test of the REAL `freenet-migrate` adapter against the
+/// oracle's recorded observations. Not compiled into the vault.
+#[cfg(test)]
+mod migration_adapter_differential;
+/// Differential harness: the frozen transcription of the outgoing hand-rolled
+/// sweep (the oracle) and its recorded observations. Not compiled into the
+/// vault.
 #[cfg(test)]
 mod migration_differential;
+/// Pins for the build-time legacy-delegate registry and the delegate WASM
+/// baseline. Not compiled into the vault.
+#[cfg(test)]
+mod migration_registry_pin;
 
 use dioxus::prelude::*;
 

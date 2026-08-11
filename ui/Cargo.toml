@@ -13,6 +13,11 @@ no-sync = []
 [dependencies]
 ghostkey-common = { workspace = true }
 freenet-stdlib = { workspace = true, features = ["net"] }
+# The shared registry-and-probe crate; owns the migration WALK while the
+# app-specific judgements stay in ui/src/migration.rs. UI-side only: nothing
+# in delegates/ may depend on this (a delegate dependency change re-keys the
+# WASM, which is the event being migrated across).
+freenet-migrate = { version = "0.5.0", default-features = false, features = ["ui"] }
 dioxus = { workspace = true }
 serde = { workspace = true }
 ciborium = { workspace = true }
@@ -29,4 +34,12 @@ getrandom = { version = "0.2", features = ["js", "wasm-bindgen", "js-sys"], defa
 
 [build-dependencies]
 chrono = { workspace = true }
+# Build-time validation of legacy_delegates.toml: every entry's delegate_key
+# must equal BLAKE3 over the raw bytes of its code_hash, or the build fails.
+blake3 = { workspace = true }
+
+[dev-dependencies]
+# The delegate-WASM baseline pin (migration_registry_pin.rs) hashes the built
+# artifact.
+blake3 = { workspace = true }
 

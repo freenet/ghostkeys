@@ -87,8 +87,14 @@ delegate_key = \"$SEED_KEY\"
 
 # Build a fixture: a bare "remote" seeded with legacy_delegates.toml on main,
 # plus a clone containing the script under test and a fake delegate WASM.
+#
+# The fake WASM carries the `/cargo-registry` marker the canonical
+# path-remapped build embeds, because both scripts now REFUSE an artifact
+# without it (ghostkeys#34) — a bare `cargo build` produces a
+# machine-specific hash the publish path never ships. The refusal itself is
+# exercised by the dedicated bare-build case below.
 fixture() { # fixture <name> [wasm-bytes]
-    local name="$1" wasm="${2:-delegate-bytes-v1}"
+    local name="$1" wasm="${2:-delegate-bytes-v1 /cargo-registry/some-crate-1.0.0/src/lib.rs}"
     local base="$TMP/$name"
     mkdir -p "$base"
 
@@ -416,6 +422,31 @@ run_record "$B/work"
 check "exits non-zero" $?
 echo "$OUT" | grep -q "delegate WASM not found"
 check "says what is missing" $?
+
+# --- 12b. A non-remapped (bare `cargo build`) artifact ---------------------
+#
+# Same source, same toolchain, two build paths, two different hashes
+# (ghostkeys#34). The scripts hash whatever file is at the path, so a bare
+# build's artifact — detectable by the ABSENCE of the `/cargo-registry`
+# remap marker — must be refused, or its machine-specific hash gets recorded
+# as a permanent registry entry for a delegate nobody will ever run.
+
+case_start "bare-build WASM (no path remap): both scripts refuse"
+B=$(fixture bare "delegate-bytes-built-bare-no-remap-marker")
+BEFORE=$(remote_sha "$B")
+run_record "$B/work"
+[ "$STATUS" -ne 0 ]
+check "record-migration exits non-zero" $?
+echo "$OUT" | grep -q "WITHOUT the path remap"
+check "and says why" $?
+[ "$(remote_sha "$B")" = "$BEFORE" ]
+check "nothing was recorded" $?
+CHECK_OUT="$(cd "$B/work" && timeout 60 bash scripts/check-migration.sh 2>&1)"
+CHECK_STATUS=$?
+[ "$CHECK_STATUS" -ne 0 ]
+check "check-migration exits non-zero" $?
+echo "$CHECK_OUT" | grep -q "WITHOUT the path remap"
+check "with the same explanation" $?
 
 # --- 13. The direction that protects the published artifact ---------------
 #

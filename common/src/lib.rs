@@ -361,6 +361,122 @@ pub enum GhostkeyResponse {
 mod tests {
     use super::*;
 
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    // --- Golden CBOR bytes -------------------------------------------------
+    //
+    // The delegate stores `gk:perms:` grants and signs `ScopedPayload`s as
+    // CBOR of types whose layout is only PARTLY this crate's: both embed
+    // freenet-stdlib types (`ContractInstanceId`, `DelegateKey`), so a stdlib
+    // bump can silently move the serde layout out from under every blob
+    // already sitting in users' delegates — stranding every pre-bump
+    // `gk:perms:` grant with no error anywhere. The 0.6→0.8 bump (ghostkeys
+    // #33) happened to keep the layout identical, but that was verified only
+    // EPHEMERALLY, by diffing two builds that both existed that day.
+    //
+    // These literals freeze the byte layout durably: the NEXT stdlib (or
+    // serde, or ciborium) bump that moves it turns these red instead of
+    // shipping a silent format break. If one of these fails, the fix is NOT
+    // to update the literal — it is to decide, consciously, how blobs in the
+    // OLD layout keep decoding (a fallback decode path, or a delegate-side
+    // migration), and only then re-freeze.
+
+    /// `SignatureRequestor::WebApp(ContractInstanceId::new([7u8; 32]))`.
+    const WEBAPP_REQUESTOR_CBOR: &str = concat!(
+        "a166576562417070982007070707070707070707070707070707070707070707",
+        "07070707070707070707",
+    );
+
+    /// `SignatureRequestor::Delegate(DelegateKey::new([0x11; 32], CodeHash::new([0x22; 32])))`.
+    const DELEGATE_REQUESTOR_CBOR: &str = concat!(
+        "a16844656c6567617465a2636b65799820111111111111111111111111111111",
+        "111111111111111111111111111111111169636f64655f686173689820182218",
+        "2218221822182218221822182218221822182218221822182218221822182218",
+        "2218221822182218221822182218221822182218221822182218221822",
+    );
+
+    /// `ScopedPayload { requestor: WebApp([7; 32]), payload: b"attest me" }`.
+    const SCOPED_PAYLOAD_CBOR: &str = concat!(
+        "a269726571756573746f72a16657656241707098200707070707070707070707",
+        "070707070707070707070707070707070707070707677061796c6f6164891861",
+        "187418741865187318741820186d1865",
+    );
+
+    fn webapp_requestor() -> SignatureRequestor {
+        SignatureRequestor::WebApp(ContractInstanceId::new([7u8; 32]))
+    }
+
+    fn delegate_requestor() -> SignatureRequestor {
+        SignatureRequestor::Delegate(DelegateKey::new([0x11u8; 32], CodeHash::new([0x22u8; 32])))
+    }
+
+    #[test]
+    fn signature_requestor_cbor_layout_is_frozen() {
+        assert_eq!(
+            hex(&to_cbor(&webapp_requestor()).unwrap()),
+            WEBAPP_REQUESTOR_CBOR.replace(char::is_whitespace, ""),
+            "SignatureRequestor::WebApp no longer encodes to its frozen CBOR layout. \
+             Every `gk:perms:` grant already stored in users' delegates is in the OLD \
+             layout; do not update this literal without a decode path for them."
+        );
+        assert_eq!(
+            hex(&to_cbor(&delegate_requestor()).unwrap()),
+            DELEGATE_REQUESTOR_CBOR.replace(char::is_whitespace, ""),
+            "SignatureRequestor::Delegate no longer encodes to its frozen CBOR layout \
+             (same consequence as the WebApp variant)."
+        );
+    }
+
+    #[test]
+    fn scoped_payload_cbor_layout_is_frozen() {
+        let scoped = ScopedPayload {
+            requestor: webapp_requestor(),
+            payload: b"attest me".to_vec(),
+        };
+        assert_eq!(
+            hex(&to_cbor(&scoped).unwrap()),
+            SCOPED_PAYLOAD_CBOR.replace(char::is_whitespace, ""),
+            "ScopedPayload no longer encodes to its frozen CBOR layout. Verifiers \
+             check signatures over these exact bytes; moving the layout breaks \
+             verification of everything signed before the change."
+        );
+    }
+
+    /// The frozen bytes must also DECODE to the same values — encoding
+    /// stability alone would not catch an asymmetric serde change, and
+    /// decoding the literal is exactly what the delegate does to every
+    /// pre-existing blob after an upgrade.
+    #[test]
+    fn frozen_cbor_bytes_still_decode() {
+        let webapp: SignatureRequestor = from_cbor(&unhex(
+            &WEBAPP_REQUESTOR_CBOR.replace(char::is_whitespace, ""),
+        ))
+        .expect("frozen WebApp requestor decodes");
+        assert_eq!(webapp, webapp_requestor());
+
+        let delegate: SignatureRequestor = from_cbor(&unhex(
+            &DELEGATE_REQUESTOR_CBOR.replace(char::is_whitespace, ""),
+        ))
+        .expect("frozen Delegate requestor decodes");
+        assert_eq!(delegate, delegate_requestor());
+
+        let scoped: ScopedPayload = from_cbor(&unhex(
+            &SCOPED_PAYLOAD_CBOR.replace(char::is_whitespace, ""),
+        ))
+        .expect("frozen ScopedPayload decodes");
+        assert_eq!(scoped.requestor, webapp_requestor());
+        assert_eq!(scoped.payload, b"attest me".to_vec());
+    }
+
     /// Regression: `ImportGhostKey` used to carry a `master_verifying_key_pem`
     /// override marked "for testing", which let the caller decide which
     /// authority the vault checked a stored identity against. The field is

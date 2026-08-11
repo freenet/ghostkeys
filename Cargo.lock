@@ -1388,9 +1388,9 @@ dependencies = [
 
 [[package]]
 name = "freenet-migrate"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55f09b0f8aff58a61ae687d264128300d916ec386205bf2c5ca0190108b80054"
+checksum = "866b434a07257c5bcda3b4e2a64c2c51e584ac7bc8664b91c0429352fb23e4fb"
 dependencies = [
  "blake3",
  "bs58",
@@ -1633,9 +1633,11 @@ dependencies = [
 name = "ghostkey-ui"
 version = "0.3.0"
 dependencies = [
+ "blake3",
  "chrono",
  "ciborium",
  "dioxus",
+ "freenet-migrate",
  "freenet-stdlib",
  "futures",
  "getrandom 0.2.17",

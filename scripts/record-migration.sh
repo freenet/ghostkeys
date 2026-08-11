@@ -138,6 +138,22 @@ if [ ! -f "$WASM" ]; then
     exit 1
 fi
 
+# The artifact must come from the canonical (path-remapped) build. A bare
+# `cargo build` writes to this exact path without the remap, and its hash is
+# machine-specific — recording it would append a permanent, unremovable entry
+# for a delegate nobody will ever run (the no-drop rule makes every entry
+# forever), costing every user a 3s probe per vault load. Detection is
+# unambiguous, measured (ghostkeys#34): the remapped build embeds
+# `/cargo-registry`; a bare build embeds absolute $CARGO_HOME paths instead.
+# `grep -a` rather than `strings`, as in build-delegate.sh: a guard gated on
+# a binutils tool silently does not run on the one machine that lacks it.
+if ! grep -a -q -F '/cargo-registry' "$WASM"; then
+    die "the delegate WASM at $WASM was built WITHOUT the path remap, so its hash \
+is machine-specific and is NOT what gets published. Recording it would add a \
+permanent registry entry for a delegate nobody runs. Rebuild it the one \
+canonical way:  cargo make build-delegate   (see ghostkeys#34)"
+fi
+
 CODE_HASH=$(b3sum --no-names "$WASM")
 # BLAKE3 over the RAW BYTES of the code hash, not over its hex text. Empty
 # parameters. check-migration re-derives this for every entry, so a mistake

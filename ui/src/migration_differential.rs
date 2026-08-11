@@ -26,25 +26,22 @@
 //! [`the_recorded_observations_match_the_shipped_sweep`], so it cannot rot into
 //! a stale copy of behaviour that has since changed.
 //!
-//! # The oracle is the SHIPPED sweep, not the crate
+//! # The oracle is the OUTGOING hand-rolled sweep, not the crate
 //!
 //! An equivalence test whose expected values come from the new code proves only
 //! that the new code agrees with itself. So every judgement here is made by the
 //! real, field-proven functions in [`crate::migration`] -- `classify_presence`,
 //! `sweep_step`, `classify`, `MigrationOutcome::record_probe`, `record_import`
-//! -- called exactly as `migration::real::run_pass` calls them. Even the
-//! per-predecessor bucket names are *derived from the shipped code's effect*
-//! (see [`gk_bucket`]) rather than restated, so a change to `record_probe`
-//! moves the oracle automatically instead of leaving a stale copy behind.
+//! -- called exactly as the hand-rolled `run_pass` called them through v0.3.0
+//! (commit f41fbf3). Even the per-predecessor bucket names are *derived from
+//! the shipped code's effect* (see [`gk_bucket`]) rather than restated.
 //!
-//! ## The one honest gap
-//!
-//! `run_pass` is `#[cfg(target_family = "wasm")]`, so its ~40 lines of loop
-//! wiring cannot be called from a native test. [`run_ghostkeys_sweep`] below
-//! re-expresses that wiring -- only the wiring; every decision inside it is the
-//! shipped function. [`the_harness_mirrors_the_shipped_sweep`] pins the two
-//! together by scraping `migration.rs`, in the style of that file's own
-//! `the_sweep_carries_the_default_identity_across`.
+//! Since the freenet-migrate adoption, `run_pass` itself is GONE -- the walk
+//! lives in `migration_adapter.rs` -- and [`run_ghostkeys_sweep`] below is the
+//! frozen transcription of the sweep users actually had, i.e. the baseline the
+//! adoption is differenced against (`migration_adapter_differential.rs`). The
+//! decision functions it calls are still the live, shipped ones; only the loop
+//! wiring is frozen here, pinned by [`the_harness_mirrors_the_outgoing_sweep`].
 //!
 //! # Fidelity of the fixtures
 //!
@@ -70,7 +67,7 @@ use crate::migration::{
 };
 
 /// Where the recorded observations live, relative to this crate.
-const OBSERVATIONS_PATH: &str = "../tests/migration-differential/observations.json";
+pub(crate) const OBSERVATIONS_PATH: &str = "../tests/migration-differential/observations.json";
 
 // ---------------------------------------------------------------------------
 // The legacy registry, read the way build.rs reads it
@@ -82,15 +79,15 @@ const LEGACY_DELEGATES_TOML: &str = include_str!("../../legacy_delegates.toml");
 /// One recorded predecessor: exactly the `(delegate_key, code_hash)` pair
 /// `ui/build.rs` emits into `LEGACY_DELEGATES`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LegacyEntry {
-    delegate_key: [u8; 32],
-    code_hash: [u8; 32],
+pub(crate) struct LegacyEntry {
+    pub(crate) delegate_key: [u8; 32],
+    pub(crate) code_hash: [u8; 32],
 }
 
 /// Parse `legacy_delegates.toml` with the same `[[entry]]` / `key = "hex"`
 /// reading `ui/build.rs` does, so the fixtures cannot drift from the table the
 /// vault actually ships.
-fn legacy_entries() -> Vec<LegacyEntry> {
+pub(crate) fn legacy_entries() -> Vec<LegacyEntry> {
     let mut entries = Vec::new();
     let mut delegate_key: Option<String> = None;
     let mut code_hash: Option<String> = None;
@@ -138,7 +135,7 @@ type Pair = (Vec<u8>, Vec<u8>);
 /// quietly turning the stale-marker fixture into an ordinary secret.
 const FREENET_MIGRATE_DONE_PREFIX: &[u8] = b"\0freenet-migrate/v1/pred-done:";
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -148,15 +145,15 @@ fn hex(bytes: &[u8]) -> String {
 
 /// One ghostkey as a predecessor would hand it over.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Key {
-    fp: String,
-    cert: String,
-    sk: String,
-    label: Option<String>,
+pub(crate) struct Key {
+    pub(crate) fp: String,
+    pub(crate) cert: String,
+    pub(crate) sk: String,
+    pub(crate) label: Option<String>,
 }
 
 impl Key {
-    fn exported(&self) -> ExportedGhostKey {
+    pub(crate) fn exported(&self) -> ExportedGhostKey {
         ExportedGhostKey {
             fingerprint: self.fp.clone(),
             certificate_pem: self.cert.clone(),
@@ -167,7 +164,7 @@ impl Key {
     }
 }
 
-fn key(fp: &str, label: Option<&str>) -> Key {
+pub(crate) fn key(fp: &str, label: Option<&str>) -> Key {
     Key {
         fp: fp.to_string(),
         // Real PEM would be armored certificate bytes; the differential never
@@ -186,7 +183,7 @@ fn key(fp: &str, label: Option<&str>) -> Key {
 /// / [`fetch_secrets_from`]) and recorded into the observations file. Neither
 /// side gets fixtures of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PredecessorState {
+pub(crate) enum PredecessorState {
     /// Registered, says it holds keys, hands them over.
     HoldsAndExports(Vec<Key>),
     /// Registered, answers `HasIdentity` with 0 usable / 0 unusable.
@@ -220,7 +217,7 @@ enum PredecessorState {
 
 impl PredecessorState {
     /// The reply to `GhostkeyRequest::HasIdentity`.
-    fn presence_reply(&self) -> Result<GhostkeyResponse, DelegateCallError> {
+    pub(crate) fn presence_reply(&self) -> Result<GhostkeyResponse, DelegateCallError> {
         match self {
             Self::HoldsAndExports(keys) | Self::HoldsKeysAndAStaleMigrationMarker(keys) => {
                 Ok(GhostkeyResponse::IdentityPresence {
@@ -249,7 +246,7 @@ impl PredecessorState {
     }
 
     /// The reply to `GhostkeyRequest::ExportAllGhostKeys`.
-    fn export_reply(&self) -> Result<GhostkeyResponse, DelegateCallError> {
+    pub(crate) fn export_reply(&self) -> Result<GhostkeyResponse, DelegateCallError> {
         match self {
             Self::HoldsAndExports(keys)
             | Self::TooOldButExports(keys)
@@ -271,18 +268,18 @@ impl PredecessorState {
 
 /// One predecessor in a scenario: a real registry row plus what it does.
 #[derive(Debug, Clone)]
-struct Predecessor {
-    entry: LegacyEntry,
+pub(crate) struct Predecessor {
+    pub(crate) entry: LegacyEntry,
     /// Position in `legacy_delegates.toml`, oldest first. The crate needs a
     /// `generation`; the registry has none, so this is the only ordering
     /// available -- see [`the_registry_has_no_generation_field`].
-    generation: u32,
-    state: PredecessorState,
+    pub(crate) generation: u32,
+    pub(crate) state: PredecessorState,
 }
 
 /// Build a scenario from states, giving each the identity of the real registry
 /// row at the same position (oldest first).
-fn predecessors(states: Vec<PredecessorState>) -> Vec<Predecessor> {
+pub(crate) fn predecessors(states: Vec<PredecessorState>) -> Vec<Predecessor> {
     let entries = legacy_entries();
     assert!(
         states.len() <= entries.len(),
@@ -305,19 +302,19 @@ fn predecessors(states: Vec<PredecessorState>) -> Vec<Predecessor> {
 // The successor delegate's secret namespace
 // ---------------------------------------------------------------------------
 
-fn cert_key(fp: &str) -> Vec<u8> {
+pub(crate) fn cert_key(fp: &str) -> Vec<u8> {
     format!("gk:cert:{fp}").into_bytes()
 }
-fn sk_key(fp: &str) -> Vec<u8> {
+pub(crate) fn sk_key(fp: &str) -> Vec<u8> {
     format!("gk:sk:{fp}").into_bytes()
 }
-fn label_key(fp: &str) -> Vec<u8> {
+pub(crate) fn label_key(fp: &str) -> Vec<u8> {
     format!("gk:label:{fp}").into_bytes()
 }
-fn perm_key(fp: &str) -> Vec<u8> {
+pub(crate) fn perm_key(fp: &str) -> Vec<u8> {
     format!("gk:perms:{fp}").into_bytes()
 }
-const INDEX_KEY: &[u8] = b"gk:index";
+pub(crate) const INDEX_KEY: &[u8] = b"gk:index";
 
 /// One app's grants on one ghostkey. Mirrors the delegate's own
 /// `permissions.rs::GrantEntry` (which lives in the delegate crate and is not
@@ -352,20 +349,20 @@ fn full_scope_set() -> std::collections::BTreeSet<GhostkeyScope> {
 /// A model of the successor delegate's secret store, laid out exactly as
 /// `delegates/ghostkey-delegate/src/handlers.rs` lays it out.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Namespace {
-    secrets: BTreeMap<Vec<u8>, Vec<u8>>,
+pub(crate) struct Namespace {
+    pub(crate) secrets: BTreeMap<Vec<u8>, Vec<u8>>,
     /// Fingerprints whose secrets this successor's storage refuses to write.
     ///
     /// Models a node-side storage failure, which is a property of the STORE
     /// rather than of either implementation -- each surfaces it through its own
     /// interface, which is precisely the divergence being measured. See
     /// [`Namespace::apply_import`] for why the granularity is per-fingerprint.
-    failing: BTreeSet<String>,
+    pub(crate) failing: BTreeSet<String>,
 }
 
 impl Namespace {
     /// Seed the store with keys the current delegate already holds.
-    fn with_keys(keys: &[Key]) -> Self {
+    pub(crate) fn with_keys(keys: &[Key]) -> Self {
         let mut ns = Self::default();
         for k in keys {
             assert!(ns.apply_import(k), "seeding must not fail");
@@ -375,7 +372,7 @@ impl Namespace {
 
     /// A successor holding a key whose certificate is stale and whose signing
     /// key is gone -- the half-broken state `migration.rs` re-imports to heal.
-    fn with_cert_only(fp: &str) -> Self {
+    pub(crate) fn with_cert_only(fp: &str) -> Self {
         let mut ns = Self::default();
         ns.secrets.insert(cert_key(fp), b"STALE-CERT".to_vec());
         ns.set_index(&[fp.to_string()]);
@@ -392,14 +389,14 @@ impl Namespace {
         ns
     }
 
-    fn index(&self) -> Vec<String> {
+    pub(crate) fn index(&self) -> Vec<String> {
         self.secrets
             .get(INDEX_KEY)
             .and_then(|b| ghostkey_common::from_cbor::<Vec<String>>(b).ok())
             .unwrap_or_default()
     }
 
-    fn set_index(&mut self, fps: &[String]) {
+    pub(crate) fn set_index(&mut self, fps: &[String]) {
         self.secrets.insert(
             INDEX_KEY.to_vec(),
             ghostkey_common::to_cbor(&fps.to_vec()).expect("cbor"),
@@ -419,7 +416,7 @@ impl Namespace {
     /// per-fingerprint rather than per-secret: a store that rejects one of a
     /// key's secrets rejects them all, and each implementation then surfaces it
     /// through the write IT actually checks.
-    fn apply_import(&mut self, k: &Key) -> bool {
+    pub(crate) fn apply_import(&mut self, k: &Key) -> bool {
         if self.failing.contains(&k.fp) {
             // `grant_full` fails, so the handler reports an error rather than
             // `ImportResult`. Key material may be half-written; the vault is
@@ -451,7 +448,7 @@ impl Namespace {
 
     /// Raw `gk:index` membership. Necessary but NOT sufficient for the key to
     /// appear in the vault -- see [`Namespace::visible`].
-    fn indexed(&self) -> BTreeSet<String> {
+    pub(crate) fn indexed(&self) -> BTreeSet<String> {
         self.index().into_iter().collect()
     }
 
@@ -459,7 +456,7 @@ impl Namespace {
     /// requestor holds `ReadPublic` on. `handle_list` skips every other one
     /// (`handlers.rs:411`), so a key with no grant is a dead entry for that
     /// requestor no matter what the index says.
-    fn visible(&self) -> BTreeSet<String> {
+    pub(crate) fn visible(&self) -> BTreeSet<String> {
         self.indexed()
             .into_iter()
             .filter(|fp| self.grants_read_public(fp))
@@ -482,7 +479,7 @@ impl Namespace {
 
     /// Fingerprints with BOTH halves present, whatever the index says. A key
     /// here but not in `visible()` is stored and unreachable.
-    fn complete_pairs(&self) -> BTreeSet<String> {
+    pub(crate) fn complete_pairs(&self) -> BTreeSet<String> {
         self.secrets
             .keys()
             .filter_map(|k| {
@@ -507,7 +504,7 @@ impl Namespace {
 /// (rather than restating its match) is what keeps this an oracle: change
 /// `record_probe` and this moves with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum GkBucket {
+pub(crate) enum GkBucket {
     /// Answered "I hold nothing"; `sweep_step` said Skip, so no export was even
     /// attempted and no counter moved.
     SkippedEmpty,
@@ -553,14 +550,14 @@ fn gk_bucket(verdict: &ProbeVerdict, had_presence: bool) -> GkBucket {
 }
 
 #[derive(Debug)]
-struct GkResult {
-    per_predecessor: Vec<GkBucket>,
-    outcome: MigrationOutcome,
-    store: Namespace,
+pub(crate) struct GkResult {
+    pub(crate) per_predecessor: Vec<GkBucket>,
+    pub(crate) outcome: MigrationOutcome,
+    pub(crate) store: Namespace,
 }
 
 impl GkResult {
-    fn names(&self) -> Vec<String> {
+    pub(crate) fn names(&self) -> Vec<String> {
         self.per_predecessor.iter().map(GkBucket::name).collect()
     }
 }
@@ -570,7 +567,7 @@ impl GkResult {
 /// The decisions are the shipped functions; only the loop wiring is
 /// re-expressed here, because `run_pass` is wasm-only. The order below is
 /// pinned against `migration.rs` by [`the_harness_mirrors_the_shipped_sweep`].
-fn run_ghostkeys_sweep(preds: &[Predecessor], mut store: Namespace) -> GkResult {
+pub(crate) fn run_ghostkeys_sweep(preds: &[Predecessor], mut store: Namespace) -> GkResult {
     // `run_pass` receives the current delegate's fingerprints and whether that
     // listing was trustworthy; the model's index is the listing.
     let mut held: BTreeSet<String> = store.visible();
@@ -730,7 +727,7 @@ fn fetch_secrets_from(
 /// not, what kind of divergence it is. Asserted mechanically on the crate side:
 /// the stores are equal if and only if this is not `DivergeOutcome`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum Agreement {
+pub(crate) enum Agreement {
     /// Same secrets stored, same secrets visible.
     Agree,
     /// The stores agree; the crate cannot express ghostkeys' classification.
@@ -740,54 +737,54 @@ enum Agreement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct RecordedPredecessor {
-    delegate_key: String,
-    code_hash: String,
-    generation: u32,
+pub(crate) struct RecordedPredecessor {
+    pub(crate) delegate_key: String,
+    pub(crate) code_hash: String,
+    pub(crate) generation: u32,
     /// What the adapter's `probe_executable` returns for this predecessor.
-    probe: Result<bool, String>,
+    pub(crate) probe: Result<bool, String>,
     /// What the adapter's `fetch_secrets` returns, hex-encoded pairs.
-    fetch: Result<Vec<(String, String)>, String>,
+    pub(crate) fetch: Result<Vec<(String, String)>, String>,
     /// The bucket the SHIPPED sweep filed this predecessor under.
-    ghostkeys_bucket: String,
+    pub(crate) ghostkeys_bucket: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct RecordedScenario {
-    name: String,
-    what_it_shows: String,
-    agreement: Agreement,
+pub(crate) struct RecordedScenario {
+    pub(crate) name: String,
+    pub(crate) what_it_shows: String,
+    pub(crate) agreement: Agreement,
     /// The successor's secret namespace before the sweep, hex-encoded.
-    initial_store: Vec<(String, String)>,
+    pub(crate) initial_store: Vec<(String, String)>,
     /// Secret keys the successor's storage refuses to write, hex-encoded. The
     /// crate side makes its own `set_secret` fail for exactly these.
-    failing_secret_keys: Vec<String>,
-    predecessors: Vec<RecordedPredecessor>,
+    pub(crate) failing_secret_keys: Vec<String>,
+    pub(crate) predecessors: Vec<RecordedPredecessor>,
     /// What the shipped sweep produced.
-    ghostkeys_store: Vec<(String, String)>,
+    pub(crate) ghostkeys_store: Vec<(String, String)>,
     /// Listable by the vault: indexed AND granted `ReadPublic`.
-    ghostkeys_visible: Vec<String>,
+    pub(crate) ghostkeys_visible: Vec<String>,
     /// Raw `gk:index` membership, which is only half of listability.
-    ghostkeys_indexed: Vec<String>,
-    ghostkeys_complete_pairs: Vec<String>,
-    ghostkeys_recovered: usize,
-    ghostkeys_failed_imports: usize,
+    pub(crate) ghostkeys_indexed: Vec<String>,
+    pub(crate) ghostkeys_complete_pairs: Vec<String>,
+    pub(crate) ghostkeys_recovered: usize,
+    pub(crate) ghostkeys_failed_imports: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct Observations {
+pub(crate) struct Observations {
     /// Read by `migration-differential`; regenerated by the ui-side test.
-    generated_by: String,
-    scenarios: Vec<RecordedScenario>,
+    pub(crate) generated_by: String,
+    pub(crate) scenarios: Vec<RecordedScenario>,
 }
 
 /// A scenario definition: the inputs, plus what it is there to show.
-struct Scenario {
-    name: &'static str,
-    what_it_shows: &'static str,
-    agreement: Agreement,
-    initial: Namespace,
-    preds: Vec<Predecessor>,
+pub(crate) struct Scenario {
+    pub(crate) name: &'static str,
+    pub(crate) what_it_shows: &'static str,
+    pub(crate) agreement: Agreement,
+    pub(crate) initial: Namespace,
+    pub(crate) preds: Vec<Predecessor>,
 }
 
 /// A successor store whose storage refuses every secret belonging to `fp`.
@@ -800,7 +797,7 @@ fn store_rejecting(fp: &str) -> Namespace {
 
 /// Every scenario, defined once and consumed by both halves of the
 /// differential.
-fn scenarios() -> Vec<Scenario> {
+pub(crate) fn scenarios() -> Vec<Scenario> {
     vec![
         Scenario {
             name: "predecessor_holds_keys_and_exports_them",
@@ -1191,54 +1188,47 @@ fn the_sweep_heals_a_half_broken_key() {
 
 /// The oracle's integrity check.
 ///
-/// [`run_ghostkeys_sweep`] re-expresses `run_pass`'s loop wiring because that
-/// function is wasm-only. This pins the two together: the shipped sweep must
-/// still call the same decisions in the same order, and must still walk the
-/// whole table without an early exit. If `run_pass` is restructured, this fails
-/// and the harness has to be brought back into line rather than silently
-/// becoming a test of something that is no longer shipped.
+/// [`run_ghostkeys_sweep`] is the frozen transcription of the OUTGOING
+/// hand-rolled sweep (`migration.rs::real::run_pass` as it shipped through
+/// v0.3.0, commit f41fbf3) — the walk itself now lives in
+/// `migration_adapter.rs`, driven by `freenet-migrate`, and is differenced
+/// against this oracle via the committed observations. The transcription must
+/// therefore keep calling the same shipped decision functions in the sweep's
+/// order, and keep walking the whole table without an early exit; if someone
+/// "simplifies" it, the differential quietly stops measuring the behaviour
+/// users actually had. (When this test was written the transcription was
+/// pinned line-for-line against the then-shipped `run_pass`; that pin ran
+/// green until the walk was replaced in the freenet-migrate adoption PR.)
 #[test]
-fn the_harness_mirrors_the_shipped_sweep() {
-    let src = include_str!("migration.rs");
-    const TEST_MODULE_MARKER: &str = "#[cfg(test)]\nmod tests {";
-    assert!(
-        src.contains(TEST_MODULE_MARKER),
-        "the test-module marker moved; this scrape would otherwise match string literals"
-    );
-    let code = src.split(TEST_MODULE_MARKER).next().unwrap();
+fn the_harness_mirrors_the_outgoing_sweep() {
+    let src = include_str!("migration_differential.rs");
+    const MARKER: &str = "fn run_ghostkeys_sweep(";
+    let at = src.find(MARKER).expect("the oracle function");
+    let body = &src[at..];
+    let body = &body[..body.find("\n}\n").map(|i| i + 3).unwrap_or(body.len())];
 
-    // The call sequence, in order. `find` from a moving offset, so a reordering
-    // fails rather than passing on mere presence.
-    let mut at = 0usize;
+    // The call sequence, in order. `find` from a moving offset, so a
+    // reordering fails rather than passing on mere presence.
+    let mut cursor = 0usize;
     for needle in [
-        "let presence = presence_probe(&legacy_key).await;",
-        "match super::sweep_step(&presence)",
-        "GhostkeyRequest::ExportAllGhostKeys",
+        "classify_presence(pred.state.presence_reply())",
+        "sweep_step(&presence)",
+        "classify(pred.state.export_reply())",
         "outcome.record_probe(&verdict, had_presence);",
-        "GhostkeyRequest::ImportGhostKey",
+        "store.apply_import(&k)",
         "outcome.record_import(true);",
     ] {
-        let found = code[at..].find(needle).unwrap_or_else(|| {
-            panic!("the shipped sweep no longer contains `{needle}` in the expected order")
+        let found = body[cursor..].find(needle).unwrap_or_else(|| {
+            panic!("the oracle transcription no longer contains `{needle}` in the expected order")
         });
-        at += found + needle.len();
+        cursor += found + needle.len();
     }
 
-    // The sweep must keep walking the whole table. Every arm that gives up on
-    // one entry uses `continue`, never `break`/`return`, so silence early in
-    // the table cannot strand everything after it -- the exact property the
-    // crate's NewestSnapshotWins policy does NOT have.
-    let loop_at = code
-        .find("for (delegate_key_bytes, code_hash_bytes) in LEGACY_DELEGATES")
-        .expect("the sweep loop");
-    let body = &code[loop_at..];
-    let body = &body[..body
-        .find("\n        }\n")
-        .map(|i| i + 10)
-        .unwrap_or(body.len())];
+    // The sweep walked the whole table; silence early in the table never
+    // stranded anything after it. The oracle must preserve that.
     assert!(
         !body.contains("break"),
-        "the sweep must not stop early; a `break` in the loop would strand every later entry"
+        "the oracle must not stop early; the outgoing sweep never did"
     );
 }
 
