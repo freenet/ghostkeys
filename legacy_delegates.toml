@@ -71,3 +71,8 @@ delegate_key = "7763276e411b064a67fed05f9b0cb2062dd1e4ff78274c40a141eee262633719
 [[entry]]
 code_hash = "23e7161e2963d878ba9d65bf8f94ad60bcfdd031ad65e30b85472a81faa2ffdd"
 delegate_key = "38bbba647e93bfbee87c8ef92cd6f1f77ce8eaeb2775aa32a70b8fb2e23d30ee"
+
+# Added 2026-08-12 (recorded at publish)
+[[entry]]
+code_hash = "0d0e2043c5242953b6e8705179ca6847f1d83fce8e23a4ae314118d9b22ffd62"
+delegate_key = "80e377b7482cd7ee3c737bbae4ea6690757856652896ae47aa0bddb25dd9c353"
