@@ -83,9 +83,22 @@ top_level_field() { pointer_top_field "$TOML_PATH" "$1"; }
 AUTHOR_VK="$(top_level_field author_verifying_key)"
 [ -n "$AUTHOR_VK" ] || die "no author_verifying_key in $TOML_PATH"
 
-# Via the shared reader, which absorbs grep's exit-1-on-zero-matches; a bare
-# `grep -c` here died under `set -e` with no message on a record-less file.
+# A zero count is a HARD ERROR, not an empty loop.
+#
+# pointer_record_count absorbs grep's exit-1-on-no-match so the caller can print
+# a real message -- which means the caller MUST check. Without this guard the
+# loop below simply never runs and the script reports success over an empty
+# list: the publisher printed "All 0 record(s) published AND verified from the
+# network" and exited 0, having written nothing. A bad merge that drops the
+# blocks, or a reformat that indents the keys (which this parser reads as zero
+# records, by design), is enough to trigger it.
+#
+# Same reasoning as the CI-run count in the provenance block above: ask for
+# evidence that there is something to do, rather than only for absence of
+# failure. A guard that cannot fail is worse than no guard because it reassures.
 N="$(pointer_record_count "$TOML_PATH")"
+[ "$N" -gt 0 ] || die "no [[record]] blocks in $TOML_PATH -- there is nothing to sign.
+Refusing to report \"nothing to do\" over an empty registry."
 CHANGED=0
 
 for i in $(seq 1 "$N"); do
@@ -194,9 +207,14 @@ cat <<'EOF'
 Next:
   1. git add pointer-records.toml   (and the delegate change that caused this)
   2. Open a PR. check-pointer-freshness will re-verify.
-  3. AFTER merge, from main: scripts/publish-pointer-records.sh
+  3. AFTER merge, from main, IN THIS ORDER:
+       a. cargo make publish-ghostkeys          (the vault, and the delegate)
+       b. scripts/publish-pointer-records.sh    (the record)
 
-Signing does not publish. Until step 3 runs, integrators still resolve the
-PREVIOUS record — which is correct, because the new delegate is not on the
-network until the vault is republished either.
+Step 3 is in that order because the publish script's check [2] REFUSES a record
+naming a delegate that is not already live, so (b) before (a) simply aborts.
+
+Between (a) and (b) the pointer still names the delegate (a) has just retired,
+so an integrator resolving it in that gap derives a dead key. Run them back to
+back and keep that window short.
 EOF

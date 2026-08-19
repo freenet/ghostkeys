@@ -16,6 +16,19 @@
 # was ignored. That is why this script re-reads afterwards rather than trusting
 # "published successfully".
 #
+# ## ORDERING: the vault goes FIRST, and that leaves a window
+#
+# Check [2] requires the record to name the delegate ALREADY live on the
+# network, so there is only one possible order: publish the vault
+# (`cargo make publish-ghostkeys`), THEN publish the record here. Running this
+# first does not work -- it refuses, by design.
+#
+# The cost is a window. Between the vault publish and the record publish, the
+# pointer still names the delegate the vault publish has just retired, so an
+# integrator resolving it in that gap derives a dead key. That is
+# freenet/ghostkeys#21 TIME-BOXED, not eliminated. Close it promptly: run the
+# two back to back, not "later in the week".
+#
 # Usage:
 #   scripts/publish-pointer-records.sh --node-port 7599 --pointer-wasm PATH [--dry-run] [--yes]
 set -euo pipefail
@@ -212,9 +225,22 @@ Refusing to publish against a bundle whose own two fields disagree."
 say "live delegate: code_hash $LIVE_HASH (key $LIVE_KEY)"
 
 # --------------------------------------------------------------- PER-RECORD
-# Via the shared reader, which absorbs grep's exit-1-on-zero-matches; a bare
-# `grep -c` here died under `set -e` with no message on a record-less file.
+# A zero count is a HARD ERROR, not an empty loop.
+#
+# pointer_record_count absorbs grep's exit-1-on-no-match so the caller can print
+# a real message -- which means the caller MUST check. Without this guard the
+# loop below simply never runs and the script reports success over an empty
+# list: the publisher printed "All 0 record(s) published AND verified from the
+# network" and exited 0, having written nothing. A bad merge that drops the
+# blocks, or a reformat that indents the keys (which this parser reads as zero
+# records, by design), is enough to trigger it.
+#
+# Same reasoning as the CI-run count in the provenance block above: ask for
+# evidence that there is something to do, rather than only for absence of
+# failure. A guard that cannot fail is worse than no guard because it reassures.
 N="$(pointer_record_count "$TOML_PATH")"
+[ "$N" -gt 0 ] || die "no [[record]] blocks in $TOML_PATH -- there is nothing to publish.
+Refusing to report success over an empty registry."
 # No PUB_STATE array: the bytes live in $WORK/state_$i.bin, written below.
 # Keeping a second copy in a shell variable would be two things that can
 # disagree about what we are publishing.
@@ -234,7 +260,9 @@ for i in $(seq 1 "$N"); do
     # by hand against a locally-edited file, and an empty field would otherwise
     # reach fdev as an empty argument.
     for v in APP_ID VERSION CODE_HASH STATE POINTER_KEY; do
-        [ -n "${!v}" ] || die "record $i is missing $(echo "$v" | tr 'A-Z_' 'a-z-')"
+        # See the same note in check-pointer-freshness.sh: 'A-Z_' -> 'a-z-'
+        # renamed `app_id` to "app-id" in the error message.
+        [ -n "${!v}" ] || die "record $i is missing $(echo "$v" | tr 'A-Z' 'a-z')"
     done
 
     if [ "$LIVE_HASH" != "$CODE_HASH" ]; then

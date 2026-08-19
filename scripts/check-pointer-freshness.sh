@@ -112,6 +112,27 @@ done
 
 [ -f "$TOML_PATH" ] || die "$TOML_PATH not found"
 
+# A base that is not a reachable commit must FAIL, not silently disable checks.
+#
+# Both base-side reads are `if git show ... 2>/dev/null`, which cannot tell
+# "this commit is not in the clone" from "the file did not exist at that
+# commit". The second is legitimate and common -- it is this very PR's case,
+# since main has no registry yet. The first is a bug, and treating them alike
+# skips BOTH the vanish check and the version-monotonicity check while printing
+# "All N pointer record(s) are fresh" and exiting 0.
+#
+# Nothing is broken today because the CI job sets `fetch-depth: 0`. But nothing
+# ASSERTS that, so a routine "speed up CI" edit to a shallow checkout would
+# disarm two of the three checks and report green. This is that assertion.
+if [ -n "$BASE_SHA" ]; then
+    git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || die "--base '$BASE_SHA' is not a commit in this clone.
+
+That is different from 'the registry did not exist at the base', which is fine
+and handled below. This means the base-side checks could not run at all, and
+passing quietly would report success having skipped the vanish check and the
+version check. The usual cause is a shallow checkout: CI needs fetch-depth: 0."
+fi
+
 if [ "$BUILD" -eq 1 ]; then
     echo "== building the delegate (scripts/build-delegate.sh) =="
     # Not `cargo build`: the remap that keeps the delegate key
@@ -168,7 +189,14 @@ FAILED=0
 # silent.
 if [ -n "$BASE_SHA" ]; then
     BASE_TOML_ALL="$(mktemp)"
-    if git show "$BASE_SHA:$TOML_PATH" > "$BASE_TOML_ALL" 2>/dev/null; then
+    if ! git show "$BASE_SHA:$TOML_PATH" > "$BASE_TOML_ALL" 2>/dev/null; then
+        # Legitimate: the base predates the registry (the first such PR is the
+        # one that introduces it). Said aloud so a reader can tell this apart
+        # from the checks having run and found nothing.
+        echo "note: $TOML_PATH does not exist at the base commit, so the vanish"
+        echo "      and version checks have nothing to compare against."
+        echo ""
+    else
         # Compared as exact STRINGS via `grep -qxF` against the head file's
         # extracted app_id list — never by interpolating the app_id into a
         # regex. The app_id contains a `.`, which is a regex wildcard, so an
@@ -211,7 +239,10 @@ for i in $(seq 1 "$N"); do
 
     echo "== $APP_ID =="
     for v in APP_ID WASM_PATH VERSION CODE_HASH STATE POINTER_KEY; do
-        [ -n "${!v}" ] || die "record $i is missing $(echo "$v" | tr 'A-Z_' 'a-z-')"
+        # `tr 'A-Z' 'a-z'`, NOT 'A-Z_' -> 'a-z-': mapping underscore to hyphen
+        # made this report a missing "app-id" for a key actually spelled
+        # `app_id`, sending the reader after a key that does not exist.
+        [ -n "${!v}" ] || die "record $i is missing $(echo "$v" | tr 'A-Z' 'a-z')"
     done
 
     # --- 1. does the record name the bytes this source builds? ---------------
@@ -276,7 +307,15 @@ for i in $(seq 1 "$N"); do
                 BASE_STATE="$(field_of_record "$BASE_I" state "$BASE_TOML")"
                 BASE_VERSION="$(field_of_record "$BASE_I" version "$BASE_TOML")"
             fi
-            if [ -n "$BASE_STATE" ]; then
+            if [ -n "$BASE_STATE" ] && [ -z "$BASE_VERSION" ]; then
+                # The base record has a state but no version. `[ N -le "" ]`
+                # emits "integer expression expected", evaluates FALSE, and
+                # falls through to print a reassuring "version advanced" -- so
+                # a malformed base silently disables the check it should trip.
+                echo "  FAILED: the base record for $APP_ID has a state but no version."
+                echo "  Cannot check version monotonicity against a malformed base record."
+                FAILED=1
+            elif [ -n "$BASE_STATE" ]; then
                 if [ "$BASE_STATE" != "$STATE" ] && [ "$VERSION" -le "$BASE_VERSION" ]; then
                     echo "  FAILED: the record changed but version did not increase"
                     echo "    base ($BASE_SHA): version $BASE_VERSION"

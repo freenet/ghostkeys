@@ -23,6 +23,15 @@
 # `scripts/sign-pointer-records.sh` and commit the result. CI's
 # check-pointer-freshness fails the PR if the delegate WASM changed and no new
 # record was signed.
+#
+# ## A deliberate [[record]] mention, inside this comment
+#
+# The line above names the record header in a comment ON PURPOSE, and
+# scripts/pointer-toml-lib.sh points at it. That parser anchors every pattern at
+# column ZERO precisely so a mention like this cannot contribute a phantom
+# record, and a claim about a protection is worth no more than a standing
+# example that exercises it. Keep this line. If the record count ever reads one
+# higher than the number of real blocks below, this is the first thing to check.
 
 # ## THE KEY DECISION, flagged rather than buried
 #

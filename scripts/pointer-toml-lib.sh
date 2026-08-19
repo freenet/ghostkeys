@@ -36,7 +36,10 @@
 #
 # If indentation is ever wanted, widen the anchor and re-check that a
 # `[[record]]` inside a comment still cannot create a phantom record. The
-# header of pointer-records.toml contains exactly such a mention.
+# header of pointer-records.toml carries exactly such a mention, under the
+# heading "A deliberate [[record]] mention, inside this comment", kept there so
+# this protection has a standing example rather than only a claim. (It did not,
+# until review caught this comment asserting a check that nothing exercised.)
 
 # Prints the value of KEY inside the Nth [[record]] block of FILE.
 #   pointer_field <file> <n> <key>

@@ -39,15 +39,65 @@ done
 TOML_PATH="pointer-records.toml"
 [ -f "$TOML_PATH" ] || { echo "ERROR: $TOML_PATH not found" >&2; exit 1; }
 
+# The expected revision, read from the CI gate so there is ONE place to bump it.
+# `|| true` because `set -o pipefail` is active: a missing line makes grep exit
+# 1, which would kill the script SILENTLY here -- before the explicit emptiness
+# check below could say what was wrong. Absorb the status, then handle the empty
+# value deliberately. (Absorbing WITHOUT then handling it is the fail-open trap
+# that the record-count guard in the other scripts exists to close.)
+POINTER_TOOL_REV="$(grep -m1 '^POINTER_TOOL_REV=' \
+    "$(dirname "${BASH_SOURCE[0]}")/check-pointer-freshness.sh" \
+    | sed 's/.*:-\([0-9a-f]*\)}.*/\1/' || true)"
+[ -n "$POINTER_TOOL_REV" ] || {
+    echo "ERROR: could not read POINTER_TOOL_REV from check-pointer-freshness.sh" >&2
+    exit 1
+}
+
 # Hard requirement, not a soft skip. A missing tool here would silently drop
 # the pointer half of this gate on exactly the machine doing the publishing,
 # which is the one place it has to run.
 command -v pointer-record >/dev/null 2>&1 || {
     echo "ERROR: pointer-record not found. Install with:" >&2
     echo "  cargo install --git https://github.com/freenet/freenet-migrate \\" >&2
-    echo "    --rev 5e1759c39f98ec54f51c84d632e28fc33578b48d --features publish --locked freenet-pointer-contract" >&2
+    echo "    --rev $POINTER_TOOL_REV --features publish --locked freenet-pointer-contract" >&2
     exit 1
 }
+
+# And it must be the PINNED revision, not whatever is on PATH.
+#
+# CI verifies with a rev-pinned build; without this the publishing machine
+# verified with anything at all, so the two could disagree about what a valid
+# record IS and only the looser one would be consulted at the moment it counts.
+# check-pointer-freshness.sh states the rule this applies: "a gate whose oracle
+# can change under it is not a gate." It was stated there and not applied here.
+#
+# A KNOWN mismatch is fatal. An UNKNOWN version only warns, because
+# `cargo install --list` cannot see a binary installed by other means, and
+# refusing on "I could not tell" would block publishing for a reason that is
+# not evidence of anything.
+# `|| true` for the same pipefail reason, and it matters more here: with no
+# cargo on PATH the pipeline returns 127 and, without this, the script died
+# with NO output at all -- the exact silent-death failure this review round is
+# about. Verified by running it with cargo removed from PATH. An empty result
+# is a real, expected answer ("cannot tell"), and the branch below handles it.
+INSTALLED_REV="$(cargo install --list 2>/dev/null \
+    | grep -m1 'freenet-pointer-contract' \
+    | grep -oE 'rev=[0-9a-f]+' | sed 's/rev=//' || true)"
+if [ -z "$INSTALLED_REV" ]; then
+    echo "WARNING: could not determine which revision of pointer-record is installed." >&2
+    echo "         Expected $POINTER_TOOL_REV. Verification below is running against" >&2
+    echo "         an unknown build of the tool that decides what a record's bytes are." >&2
+elif [ "$INSTALLED_REV" != "$POINTER_TOOL_REV" ]; then
+    echo "ERROR: pointer-record is at revision $INSTALLED_REV" >&2
+    echo "       but this repo pins $POINTER_TOOL_REV." >&2
+    echo "" >&2
+    echo "CI verifies records with the pinned build. Publishing after verifying with" >&2
+    echo "a different one means the check that passed here is not the check CI ran." >&2
+    echo "Reinstall:" >&2
+    echo "  cargo install --git https://github.com/freenet/freenet-migrate \\" >&2
+    echo "    --rev $POINTER_TOOL_REV --features publish --locked freenet-pointer-contract" >&2
+    exit 1
+fi
 
 # The same reader the freshness gate, the signer and the publish script use.
 # All four must agree about what a record says.
@@ -138,5 +188,9 @@ fi
 echo "OK: delegate-key.json matches the bundled delegate ($ACTUAL_KEY)."
 echo "OK: pointer record $APP_ID v$REC_VERSION names it too ($REC_KEY)."
 echo ""
-echo "Reminder: signing is not publishing. The pointer record goes to the network"
-echo "separately, from main after merge: scripts/publish-pointer-records.sh"
+echo "NEXT, and promptly: this publish retires the delegate the pointer currently"
+echo "names, so from the moment it completes until you run"
+echo "  scripts/publish-pointer-records.sh"
+echo "an integrator resolving the pointer derives a DEAD key. The record must be"
+echo "published second -- its check [2] refuses a record naming a delegate that is"
+echo "not already live -- so the window cannot be avoided, only kept short."
