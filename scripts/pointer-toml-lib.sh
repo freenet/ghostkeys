@@ -83,7 +83,13 @@ pointer_top_field() {
 }
 
 # Number of [[record]] blocks in FILE.
-pointer_record_count() { grep -c '^\[\[record\]\]' "$1"; }
+#
+# `|| true` is load-bearing: grep exits 1 when the count is ZERO, so under the
+# callers' `set -e` a record-less file killed the script with a bare exit code
+# and NO message -- swallowing the caller's own "no [[record]] blocks" die() in
+# exactly the case it exists to explain. It still fails closed either way; this
+# is about the gate saying why.
+pointer_record_count() { grep -c '^\[\[record\]\]' "$1" || true; }
 
 # Every app_id in FILE, one per line.
 pointer_app_ids() {

@@ -212,7 +212,9 @@ Refusing to publish against a bundle whose own two fields disagree."
 say "live delegate: code_hash $LIVE_HASH (key $LIVE_KEY)"
 
 # --------------------------------------------------------------- PER-RECORD
-N="$(grep -c '^\[\[record\]\]' "$TOML_PATH")"
+# Via the shared reader, which absorbs grep's exit-1-on-zero-matches; a bare
+# `grep -c` here died under `set -e` with no message on a record-less file.
+N="$(pointer_record_count "$TOML_PATH")"
 # No PUB_STATE array: the bytes live in $WORK/state_$i.bin, written below.
 # Keeping a second copy in a shell variable would be two things that can
 # disagree about what we are publishing.
@@ -270,7 +272,8 @@ still pass."
     # 5. The signature verifies, under the key published in FREENET.md, BEFORE
     #    the PUT. A key-file/doc mismatch must fail loudly rather than ship a
     #    record integrators cannot verify.
-    grep -qF "$AUTHOR_VK" FREENET.md || die "[5] FREENET.md does not publish $AUTHOR_VK"
+    # -x, not a substring match: see the same guard in check-pointer-freshness.sh.
+    grep -qxF "$AUTHOR_VK" FREENET.md || die "[5] FREENET.md does not publish $AUTHOR_VK"
     pointer-record verify --author-vk "$AUTHOR_VK" --app-id "$APP_ID" --state "$STATE" \
         --expect-version "$VERSION" --expect-code-hash "$CODE_HASH" --expect-key "$POINTER_KEY" >/dev/null \
         || die "[5] the record for $APP_ID does not verify"

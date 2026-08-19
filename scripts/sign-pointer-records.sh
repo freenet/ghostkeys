@@ -83,7 +83,9 @@ top_level_field() { pointer_top_field "$TOML_PATH" "$1"; }
 AUTHOR_VK="$(top_level_field author_verifying_key)"
 [ -n "$AUTHOR_VK" ] || die "no author_verifying_key in $TOML_PATH"
 
-N="$(grep -c '^\[\[record\]\]' "$TOML_PATH")"
+# Via the shared reader, which absorbs grep's exit-1-on-zero-matches; a bare
+# `grep -c` here died under `set -e` with no message on a record-less file.
+N="$(pointer_record_count "$TOML_PATH")"
 CHANGED=0
 
 for i in $(seq 1 "$N"); do

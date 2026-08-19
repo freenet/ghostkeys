@@ -132,10 +132,15 @@ AUTHOR_VK="$(top_level_field author_verifying_key)"
 # disagree, we sign records nobody can verify — and it fails silently, because
 # a record signed by the wrong key is perfectly well-formed.
 echo "== author key =="
-if ! grep -qF "$AUTHOR_VK" "$FREENET_MD"; then
+# `-x` (whole LINE), not a bare substring match. FREENET.md presents the key on
+# its own line in a fenced block so integrators can copy it; a substring match
+# accepts a TRUNCATED key here, since the real key in FREENET.md contains the
+# truncated one as a prefix. That is the precise failure this check exists to
+# catch, so it must not be the one input that slips through.
+if ! grep -qxF "$AUTHOR_VK" "$FREENET_MD"; then
     echo "FAILED: $TOML_PATH publishes author_verifying_key"
     echo "  $AUTHOR_VK"
-    echo "but $FREENET_MD does not contain that value."
+    echo "but $FREENET_MD does not publish that value on a line of its own."
     echo ""
     echo "Integrators take the author key from $FREENET_MD. If the two disagree,"
     echo "every record we sign is one they will reject — and the record will look"

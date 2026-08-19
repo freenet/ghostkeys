@@ -88,6 +88,17 @@ REC_I="$(pointer_index_of_app "$TOML_PATH" "$APP_ID")"
 if [ -z "$AUTHOR_VK" ]; then
     echo "ERROR: no author_verifying_key in $TOML_PATH" >&2
     FAILED=1
+elif ! grep -qxF "$AUTHOR_VK" FREENET.md; then
+    # The CI gate checks this too, but it is NOT on the publish path --
+    # Makefile.toml has sign-webapp depend on THIS script, not on
+    # check-pointer-freshness. So without this, a FREENET.md/registry key
+    # mismatch has no backstop at the one moment it becomes permanent.
+    # Integrators take the author key from FREENET.md; if the two disagree,
+    # every record we sign is one they will reject, and it looks fine from here.
+    echo "ERROR: $TOML_PATH publishes author_verifying_key" >&2
+    echo "       $AUTHOR_VK" >&2
+    echo "       but FREENET.md does not publish that value on a line of its own." >&2
+    FAILED=1
 elif [ -z "$REC_I" ]; then
     # Not a soft warning. The pointer address is live on the network whether or
     # not this file still describes it, so a publish with no record here ships a
