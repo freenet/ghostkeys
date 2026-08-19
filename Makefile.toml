@@ -86,6 +86,20 @@ cd target/dx/ghostkey-ui/${BUILD_PROFILE}/web/public && tar -cJf ../../../../../
 echo "Compressed webapp to target/webapp/webapp.tar.xz"
 '''
 
+[tasks.sign-pointer-records]
+description = "Re-sign the pointer record against the delegate this source builds"
+# No build-delegate dependency: the script builds the delegate itself, because
+# signing a stale target/ would put a hash nobody can reproduce at a fixed
+# public address.
+command = "bash"
+args = ["scripts/sign-pointer-records.sh", "${@}"]
+
+[tasks.check-pointer-freshness]
+description = "Check the pointer record still names the delegate this source builds"
+# The gate CI runs. Same reasoning as above about building itself.
+command = "bash"
+args = ["scripts/check-pointer-freshness.sh", "${@}"]
+
 [tasks.check-delegate-pointer]
 description = "Verify the published pointer names the delegate actually shipping"
 dependencies = ["compress-webapp"]
