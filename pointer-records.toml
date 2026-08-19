@@ -1,0 +1,77 @@
+# ghostkeys' pointer records — stable identity for a delegate that re-keys.
+#
+# A pointer record is a tiny contract at a FIXED address whose state names the
+# CURRENT code hash of one of ghostkeys' artifacts. Third parties resolve it
+# instead of pinning a key, so they survive our re-keys. See
+# freenet-core#5194 and the contract's README:
+# https://github.com/freenet/freenet-migrate/tree/main/contracts/pointer-contract
+#
+# This is the network-side answer to freenet/ghostkeys#21, where the delegate
+# re-keyed twice in one day and every third-party integration broke silently.
+# `delegate-key.json` inside the webapp bundle was the stopgap and remains the
+# fallback; it is not replaced by this file. See FREENET.md for both paths.
+#
+# This solves ADDRESSING ONLY. It says nothing about whether the ghost keys
+# stored under the old delegate key survived — that is what
+# legacy_delegates.toml and the vault's migration sweep are for, and for
+# ghostkeys that distinction is unusually expensive to get wrong, because the
+# secrets in question are keys users PAID for.
+#
+# ## Editing
+#
+# Do not hand-edit code_hash, version, state or pointer_key. Run
+# `scripts/sign-pointer-records.sh` and commit the result. CI's
+# check-pointer-freshness fails the PR if the delegate WASM changed and no new
+# record was signed.
+
+# ## THE KEY DECISION, flagged rather than buried
+#
+# ghostkeys has NO pre-existing app-author identity. Ghost keys are per-user
+# blind-signed certificates and the delegate holds no repo-level key, so there
+# is no root key already serving this role.
+#
+# This uses the web-container key, which is ghostkeys' only publisher identity:
+# it signs the vault webapp every user actually loads, and its 32 bytes ARE
+# published-contract/webapp.parameters (verified), which is why the container
+# id DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N derives from it. That follows
+# the precedent Ian set for River on 2026-08-18 and Delta after it.
+#
+# The same two consequences as River's and Delta's, and they are worth stating
+# rather than discovering: this key is NOT kept offline, because it is used on
+# every vault publish; and rotating it would move the web container's address
+# AND the pointer address together, so it is a coordinated flag day rather than
+# routine key hygiene.
+#
+# If a dedicated, offline ghostkeys author key is wanted instead, that decision
+# has to be made BEFORE these records are published — afterwards it is a flag
+# day that strands anyone who has pinned the author vk.
+author_verifying_key = "river:v1:vk:6kWWDBPRne385neUxXmzqpabUYxRbBYCTYSS8BAcPb29"
+
+# The pointer contract's own frozen code hash. A CONSTANT, never recomputed:
+# every pointer address is BLAKE3(this ‖ params), so a locally rebuilt pointer
+# WASM lands every record at an address nobody else derives.
+pointer_code_hash = "8wnAPaSRY1oYZCz723fdwK6BgzL6q8ozP3buVovXnt6v"
+
+[[record]]
+app_id = "ghostkeys.ghostkey-delegate"
+# UNLIKE Delta and River, this path is a BUILD OUTPUT, not a committed file:
+# ghostkeys builds its delegate from source and commits no WASM. So the gate,
+# the signer and the publish check all run scripts/build-delegate.sh first and
+# hash what it produces. What makes that trustworthy is the reproducibility
+# work in ghostkeys#9 — committed Cargo.lock, pinned rustc, and the registry
+# path remap that build script both applies and verifies. If that ever stops
+# holding, this record stops meaning anything, which is why build-delegate.sh
+# fails the build rather than warning when an absolute path leaks in.
+wasm_path = "target/wasm32-unknown-unknown/release/ghostkey_delegate.wasm"
+pointer_key = "HYBCmCSGKjr4jUUoTzivZ48UynjLscwA3nvnpKQAwi3a"
+version = 1
+code_hash = "0d0e2043c5242953b6e8705179ca6847f1d83fce8e23a4ae314118d9b22ffd62"
+state = "000000010d0e2043c5242953b6e8705179ca6847f1d83fce8e23a4ae314118d9b22ffd62cda2a020751f31c3a09fb162dd31841c72db664932202bde6f8908bd82d5134dd15d62a6bb2d8bfa5400297e95a9133219e3a1eacee584b7763047a75e19ac06"
+# SCOPE, and ghostkeys is the app where it matters most. Resolving this pointer
+# tells you the delegate's current key. It does NOT tell you a user's ghost
+# keys came with it: secrets move only when the ghostkeys vault UI has run on
+# that user's node and swept legacy_delegates.toml, so an integrator can
+# resolve this perfectly, derive the right key, and still find an EMPTY
+# namespace — which looks like "this user has no ghost key" rather than like an
+# error, and sends a user who already paid off to buy another one. That is
+# exactly the ghostkeys#21 report.
