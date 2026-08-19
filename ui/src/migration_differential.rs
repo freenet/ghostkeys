@@ -1292,7 +1292,24 @@ fn the_registry_has_no_generation_field() {
         "if a generation column has been added, the adapter's numbering is no longer a guess"
     );
     let entries = legacy_entries();
-    assert_eq!(entries.len(), 12, "the real registry, as build.rs reads it");
+    // A FLOOR, not an equality. This assertion's job is to prove build.rs read
+    // the REAL registry rather than an empty or fixture one; the exact count is
+    // not a property of the code under test. It grows by one at every publish,
+    // because scripts/record-migration.sh appends an entry and pushes it to
+    // main as part of `cargo make publish-ghostkeys` -- so an exact pin turns
+    // every publish into a red main. That is not hypothetical: commit eaee7fa
+    // ("record the published delegate hash 0d0e2043c524") added the 13th entry
+    // and left main failing this test.
+    //
+    // The floor still catches the failure that matters here (the registry
+    // reading as empty or short) and it ratchets: entries are never meant to be
+    // removed, which scripts/check-migration.sh enforces against the base
+    // branch. Raise it if you want a tighter net; never make it an equality.
+    assert!(
+        entries.len() >= 13,
+        "the real registry, as build.rs reads it: expected at least 13 entries, found {}",
+        entries.len()
+    );
     assert_eq!(
         entries
             .iter()
