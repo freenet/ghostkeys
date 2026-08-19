@@ -67,7 +67,7 @@ Non-Rust implementers: the wire format, the four resolution steps and hex test v
 
 ### `delegate-key.json` — the fallback, still supported
 
-Before the pointer existed, ghostkeys published the delegate key as a file inside the signed vault webapp bundle, fetchable at:
+Before the pointer existed, ghostkeys published the delegate key as a file inside the signed vault webapp bundle ([ghostkeys#22](https://github.com/freenet/ghostkeys/pull/22)), fetchable at:
 
 ```
 /v1/contract/web/DLog47hEsrtuGT4N5XCeMBG45m4n1aWM89tBZXue2E1N/delegate-key.json
