@@ -17,7 +17,7 @@ freenet-stdlib = { workspace = true, features = ["net"] }
 # app-specific judgements stay in ui/src/migration.rs. UI-side only: nothing
 # in delegates/ may depend on this (a delegate dependency change re-keys the
 # WASM, which is the event being migrated across).
-freenet-migrate = { version = "0.5.0", default-features = false, features = ["ui"] }
+freenet-migrate = { version = "0.6.0", default-features = false, features = ["ui"] }
 dioxus = { workspace = true }
 serde = { workspace = true }
 ciborium = { workspace = true }
