@@ -16,7 +16,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Named to match rust-toolchain.toml, which is what actually governs the
       # build: it outranks the rustup default this action sets. Stated
@@ -76,7 +76,7 @@ jobs:
     # allowance instead of failing.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The script under test exists to `git push` to main, and on a
           # push-to-main run this job's token can write. It only ever touches
@@ -107,7 +107,7 @@ jobs:
   browser:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
@@ -180,7 +180,7 @@ jobs:
     name: pointer record names the delegate this source builds
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Load-bearing on PRs: the gate compares against the base commit to
           # confirm the version moved and that no record vanished, and reads
