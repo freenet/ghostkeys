@@ -43,7 +43,7 @@ jobs:
       # version while `rustup default` reports stable). The pin is
       # belt-and-braces, not a bug fix — the real gap this commit closes is the
       # path filter below.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: wasm32-unknown-unknown
 

@@ -23,7 +23,7 @@ jobs:
       # explicitly here because the version matters — the delegate key is
       # BLAKE3(BLAKE3(wasm) || params), so a different rustc yields a different
       # key — but the toml is what enforces it, not this line.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
@@ -109,7 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: wasm32-unknown-unknown
 
@@ -190,7 +190,7 @@ jobs:
       # Same pin as every other job here. It matters more than usual: the gate
       # hashes a BUILT artifact, so a different rustc yields a different hash
       # and the record would look stale for no reason.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: wasm32-unknown-unknown
 
