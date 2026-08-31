@@ -22,7 +22,7 @@ repository = "https://github.com/freenet/ghostkeys"
 ghostkey-common = { path = "common" }
 ghostkey_lib = "0.2"
 freenet-stdlib = "0.8"
-ed25519-dalek = { version = "2.1", features = ["serde"] }
+ed25519-dalek = { version = "3.0", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 ciborium = "0.2"
 blake3 = "1"
