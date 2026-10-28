@@ -1,6 +1,16 @@
+# FROZEN: this is the `ghostkey-common 0.3.0` the deployed ghostkey delegate is
+# built from. Do not change its version or dependencies: the delegate key is
+# BLAKE3 over the delegate WASM, and changing this package's identity changes
+# those bytes (measured 2026-10-27: a version bump to 0.4.0 alone re-keyed it).
+#
+# It is no longer what gets published. Releases of ghostkey-common (0.4.0 on)
+# are cut from `crates-io/ghostkey-common/`, whose `src/lib.rs` CI requires to
+# be identical to this one's. Edit both together. Unfreeze (and fold the two
+# back together) only as part of a deliberate delegate re-key.
 [package]
 name = "ghostkey-common"
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

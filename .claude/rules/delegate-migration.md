@@ -7,6 +7,8 @@ Without a migration entry, **users lose all stored ghostkeys**.
 
 - `delegates/ghostkey-delegate/src/`
 - `common/src/`
+- `common/Cargo.toml` -- even a bare version bump (measured). This is why
+  ghostkey-common is released from `crates-io/ghostkey-common/` instead
 - `Cargo.toml` (dependency version changes)
 - `Cargo.lock` (transitive dependency changes)
 

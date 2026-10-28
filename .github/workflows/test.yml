@@ -244,3 +244,56 @@ jobs:
       - name: Verify the pointer record (push)
         if: github.event_name != 'pull_request'
         run: ./scripts/check-pointer-freshness.sh --no-build
+
+  # The published ghostkey-common lives in its own workspace
+  # (crates-io/ghostkey-common/), because the delegate must keep linking
+  # `common/` as ghostkey-common 0.3.0 or it re-keys. Nothing above builds it:
+  # the root workspace does not contain it, and `cargo fmt --all` does not
+  # reach it.
+  ghostkey-common-crate:
+    name: published ghostkey-common crate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates-io/ghostkey-common
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates-io/ghostkey-common
+
+      # The wire types apps compile against must be the ones the deployed
+      # delegate speaks. One source, two manifests; this is what keeps it one.
+      - name: Source is identical to the delegate's copy
+        working-directory: .
+        run: cmp common/src/lib.rs crates-io/ghostkey-common/src/lib.rs
+
+      - name: Format
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --features crypto -- -D warnings
+
+      # Run before the downgrade below, which rewrites Cargo.lock.
+      - name: Package
+        run: cargo publish --dry-run --locked
+
+      # The committed lockfile resolves the top of the stdlib range.
+      - name: Test (freenet-stdlib, top of range)
+        run: |
+          grep -A1 '^name = "freenet-stdlib"' Cargo.lock
+          cargo test --locked
+          cargo test --locked --features crypto
+
+      # The range's floor. The golden bytes were captured on 0.8.5, so passing
+      # at both ends is the evidence that one release serves both.
+      - name: Test (freenet-stdlib 0.8.0, bottom of range)
+        run: |
+          cargo update -p freenet-stdlib --precise 0.8.0
+          cargo test
+          cargo test --features crypto

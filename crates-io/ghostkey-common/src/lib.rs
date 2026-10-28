@@ -1,0 +1,949 @@
+use freenet_stdlib::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "crypto")]
+use ed25519_dalek::VerifyingKey;
+
+/// Compute fingerprint for a ghostkey verifying key.
+/// First 8 bytes of BLAKE3(verifying_key_bytes), base58-encoded.
+#[cfg(feature = "crypto")]
+pub fn fingerprint(verifying_key: &VerifyingKey) -> String {
+    let hash = blake3::hash(verifying_key.as_bytes());
+    bs58::encode(&hash.as_bytes()[..8]).into_string()
+}
+
+/// Serialize a value to CBOR bytes.
+pub fn to_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(value, &mut buf).map_err(|e| format!("CBOR serialize: {e}"))?;
+    Ok(buf)
+}
+
+/// Deserialize a value from CBOR bytes.
+pub fn from_cbor<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, String> {
+    ciborium::from_reader(bytes).map_err(|e| format!("CBOR deserialize: {e}"))
+}
+
+/// Who requested a ghostkey operation. Runtime-attested, can't be spoofed.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SignatureRequestor {
+    /// A web application (UI) backed by this contract.
+    WebApp(ContractInstanceId),
+    /// Another delegate on the same node.
+    Delegate(DelegateKey),
+}
+
+/// What an authorised caller is allowed to do with a ghostkey.
+///
+/// A grant carries a set of scopes. The vault auto-grants itself every
+/// scope when it imports a key. Third-party apps can request access via
+/// `RequestAnyAccess`, which (on user approval) grants only
+/// `{ReadPublic, Sign}` -- enough to read the public certificate and sign
+/// messages, but not enough to extract the private key or destroy the
+/// identity. Apps that need higher privileges are deliberately routed
+/// through the vault, where the user is rendering the management UI.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum GhostkeyScope {
+    /// Read public certificate and metadata. Granted alongside `Sign`
+    /// because every signing UI also wants to display the public cert.
+    ReadPublic,
+    /// Sign messages with the private key. Implies `ReadPublic` in
+    /// practice (a verifier needs the cert), but gating is per-scope so
+    /// the grant intent is explicit.
+    Sign,
+    /// Export the private signing key. Catastrophic if granted to a
+    /// third-party app -- the recipient becomes able to sign as the
+    /// user offline. Only ever granted to the vault.
+    Export,
+    /// Delete the ghostkey or rewrite its label. Only ever granted to
+    /// the vault.
+    Delete,
+    /// Manage permissions for this ghostkey: grant/revoke other apps'
+    /// access. The vault gets this on import; third-party apps never
+    /// get it via `RequestAnyAccess`.
+    Admin,
+}
+
+/// What the ghostkey delegate actually signs. The raw payload is never signed
+/// alone -- always wrapped with the attested caller identity.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScopedPayload {
+    pub requestor: SignatureRequestor,
+    pub payload: Vec<u8>,
+}
+
+/// Summary info about a stored ghostkey.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GhostKeyInfo {
+    pub fingerprint: String,
+    pub label: Option<String>,
+    /// The notary certificate info field (encodes donation tier).
+    /// Historically called `delegate_info` — the wire-format key is frozen
+    /// via `#[serde(rename)]` for backward compat with stored state.
+    /// See freenet/web#24.
+    #[serde(rename = "delegate_info")]
+    pub notary_info: String,
+    /// Ed25519 verifying key bytes (32 bytes). Added in 0.2.2 for dapps
+    /// that need the raw key (e.g. Harvest store contract parameters).
+    #[serde(default)]
+    pub verifying_key_bytes: Option<Vec<u8>>,
+    /// Whether the user has ever exported this identity.
+    ///
+    /// On most nodes the vault holds the only copy of a ghostkey, so an
+    /// identity that has never left it is one lost disk away from gone. The
+    /// vault marks un-exported identities so the reminder sits where someone
+    /// is looking at something they own, rather than mid-purchase where it is
+    /// just an obstacle between them and finishing.
+    ///
+    /// `#[serde(default)]` so a record written by an older delegate reads back
+    /// as "not backed up" -- the safe direction, since over-warning costs a
+    /// nudge and under-warning costs the key.
+    #[serde(default)]
+    pub backed_up: bool,
+}
+
+/// A ghostkey exported for backup (includes private signing key).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExportedGhostKey {
+    pub fingerprint: String,
+    pub certificate_pem: String,
+    pub signing_key_pem: String,
+    pub label: Option<String>,
+    #[serde(rename = "delegate_info")]
+    pub notary_info: String,
+}
+
+/// Requests from UI or other delegates to the ghostkey delegate.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[non_exhaustive]
+pub enum GhostkeyRequest {
+    /// Import a ghostkey from PEM-armored certificate and signing key.
+    ///
+    /// The certificate chain is always verified against the Freenet master
+    /// key compiled into the delegate. There is deliberately no way for a
+    /// caller to name a different trust root: this variant used to carry a
+    /// `master_verifying_key_pem` override marked "for testing", and which
+    /// authority a stored identity is checked against is not a caller's
+    /// decision to make. A test convenience does not belong on a production
+    /// wire type; tests seed the vault directly instead.
+    ///
+    /// Removing the field is wire-compatible in both directions: CBOR struct
+    /// variants are maps with named keys and nothing here sets
+    /// `deny_unknown_fields`, so an older caller that still sends the field
+    /// decodes fine (the value is ignored), and a newer caller that omits it
+    /// decodes fine against an older delegate (the field was `Option` with
+    /// `#[serde(default)]`). Pinned by `import_request_has_no_trust_root_field`
+    /// and `legacy_import_payload_still_decodes`.
+    ImportGhostKey {
+        certificate_pem: String,
+        signing_key_pem: String,
+    },
+    /// List all stored ghostkeys.
+    ListGhostKeys,
+    /// Get details for a specific ghostkey.
+    GetGhostKey { fingerprint: String },
+    /// Get just the public certificate (for sharing with counterparties).
+    GetCertificate { fingerprint: String },
+    /// Delete a stored ghostkey.
+    DeleteGhostKey { fingerprint: String },
+    /// Set a user-friendly label.
+    SetLabel { fingerprint: String, label: String },
+    /// Sign a message with a specific ghostkey. The delegate scopes the
+    /// signature to the requestor.
+    SignMessage {
+        fingerprint: String,
+        message: Vec<u8>,
+    },
+    /// Sign a message with the user's default ghostkey (highest-tier key,
+    /// or user-overridden via SetDefaultKey). Apps should prefer this over
+    /// SignMessage -- it avoids needing to know about specific fingerprints.
+    SignWithDefault { message: Vec<u8> },
+    /// Set which ghostkey is the default for signing.
+    SetDefaultKey { fingerprint: String },
+    /// Get the current default ghostkey fingerprint.
+    ///
+    /// Returns `DefaultKeyResult { fingerprint: None }` when the caller has no
+    /// `Sign` grant on any key, which is NOT the same as the user having no
+    /// ghostkey -- use `HasIdentity` for that question. This request never
+    /// prompts: it is a question, and an app must not be able to put a dialog
+    /// in front of the user just by asking one. `SignWithDefault` is the one
+    /// that prompts, because it acts.
+    GetDefaultKey,
+    /// Verify a signed message produced by this delegate.
+    VerifySignedMessage { signed_message: Vec<u8> },
+    /// Export a ghostkey's certificate and signing key for backup.
+    /// Security-sensitive: returns the private signing key.
+    ExportGhostKey { fingerprint: String },
+    /// Export all ghostkeys for backup.
+    ExportAllGhostKeys,
+    /// Grant an application or delegate permission to use a ghostkey.
+    GrantPermission {
+        fingerprint: String,
+        requestor: SignatureRequestor,
+    },
+    /// Revoke a previously granted permission.
+    RevokePermission {
+        fingerprint: String,
+        requestor: SignatureRequestor,
+    },
+    /// List permissions for a ghostkey.
+    ListPermissions { fingerprint: String },
+    /// A third-party app asks for any one of the user's ghostkeys. The
+    /// delegate emits a user prompt that lets the user pick a key (or
+    /// deny). On approval the delegate grants `{ReadPublic, Sign}` to
+    /// the requesting app for the chosen fingerprint and replies with a
+    /// single-element `GhostKeyList` containing that key.
+    ///
+    /// The request takes no fields on purpose: the only identifier the
+    /// user sees in the prompt is the runtime-attested requestor (a
+    /// truncated contract id). Letting the app supply free text would
+    /// open a phishing surface (a hostile app could write text designed
+    /// to look like Freenet UI chrome). Apps that want to communicate
+    /// purpose to the user should do so in their own UI before this
+    /// flow runs.
+    RequestAnyAccess,
+    /// Ask whether the user holds any ghostkey at all, WITHOUT prompting.
+    ///
+    /// Apps need this and today have no way to get it. `RequestAnyAccess`
+    /// always prompts, so it cannot be polled. `ListGhostKeys` is filtered by
+    /// permission, so an app with no grant yet sees an empty list and cannot
+    /// tell "the user has none" from "I have not been granted access".
+    ///
+    /// The motivating case is the purchase round trip: an app that sends a
+    /// user off to buy a ghostkey wants to notice when they come back, and
+    /// polling a prompt is not an option.
+    ///
+    /// What this discloses without consent is bounded by scope: a caller
+    /// holding `ReadPublic` on some keys gets the true counts for THOSE, and a
+    /// caller holding nothing gets counts that saturate at one, so it learns
+    /// that an identity exists and that one may be broken, never how many. That is a little more than the
+    /// bare existence bit `NoIdentityAvailable` already leaks to anyone who
+    /// asks for a signature, and the trade is deliberate: no fingerprints,
+    /// labels or tiers are exposed, and the alternative is that an app cannot
+    /// tell a half-lost identity from a healthy one, nor "you have none" from
+    /// "I have not been granted access".
+    HasIdentity,
+    /// Record that the user has exported this identity, so the vault can stop
+    /// warning that it is the only copy. Requires `Export` scope, so only the
+    /// vault can set it -- a third-party app must not be able to silence a
+    /// warning about a key it does not hold a backup of.
+    MarkBackedUp { fingerprint: String },
+}
+
+/// Responses from the ghostkey delegate.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[non_exhaustive]
+pub enum GhostkeyResponse {
+    ImportResult {
+        fingerprint: String,
+        #[serde(rename = "delegate_info")]
+        notary_info: String,
+    },
+    GhostKeyList {
+        keys: Vec<GhostKeyInfo>,
+    },
+    GhostKeyDetail {
+        fingerprint: String,
+        certificate_pem: String,
+        label: Option<String>,
+        #[serde(rename = "delegate_info")]
+        notary_info: String,
+    },
+    Certificate {
+        fingerprint: String,
+        certificate_pem: String,
+    },
+    SignResult {
+        /// CBOR-serialized ScopedPayload
+        scoped_payload: Vec<u8>,
+        /// Ed25519 signature over the scoped_payload bytes
+        signature: Vec<u8>,
+        /// The certificate PEM, so the verifier has the full chain
+        certificate_pem: String,
+    },
+    DefaultKeyResult {
+        fingerprint: Option<String>,
+    },
+    DefaultKeySet {
+        fingerprint: String,
+    },
+    VerifyResult {
+        valid: bool,
+        signer_fingerprint: Option<String>,
+        #[serde(rename = "delegate_info")]
+        notary_info: Option<String>,
+        requestor: Option<SignatureRequestor>,
+        message: Option<Vec<u8>>,
+    },
+    Deleted {
+        fingerprint: String,
+    },
+    LabelSet {
+        fingerprint: String,
+        label: String,
+    },
+    PermissionGranted {
+        fingerprint: String,
+        requestor: SignatureRequestor,
+    },
+    PermissionRevoked {
+        fingerprint: String,
+        requestor: SignatureRequestor,
+    },
+    PermissionList {
+        fingerprint: String,
+        requestors: Vec<SignatureRequestor>,
+    },
+    ExportResult {
+        fingerprint: String,
+        certificate_pem: String,
+        signing_key_pem: String,
+        label: Option<String>,
+    },
+    ExportAllResult {
+        keys: Vec<ExportedGhostKey>,
+    },
+    PermissionDenied {
+        fingerprint: String,
+        requestor: SignatureRequestor,
+    },
+    /// Permission denied for a request that didn't name a specific
+    /// fingerprint -- today this means the user denied a
+    /// `RequestAnyAccess` prompt. Distinct from `PermissionDenied` so
+    /// callers don't have to invent a placeholder fingerprint to
+    /// pattern-match.
+    AccessDenied {
+        requestor: SignatureRequestor,
+    },
+    /// The user has no ghostkeys. Apps should direct the user to
+    /// freenet.org/ghostkey to purchase one.
+    ///
+    /// It is NOT returned merely because the caller lacks permission —
+    /// `SignWithDefault` prompts the user instead when the vault holds keys
+    /// the caller has no grant on. So an app can treat this as "offer to buy
+    /// one" without first checking whether it was really a permissions
+    /// problem.
+    ///
+    /// Precisely, it means no identity is *available to sign with*: either the
+    /// vault is empty, or every identity in it has lost its signing key. Use
+    /// `HasIdentity` to tell those apart — its `unusable` count is non-zero in
+    /// the second case, which is worth a different message, since buying
+    /// another key is not what that user needs.
+    NoIdentityAvailable,
+    /// Reply to `HasIdentity`. Counts only — no fingerprints, labels or tiers.
+    IdentityPresence {
+        /// Identities that can actually sign: certificate AND signing key both
+        /// present.
+        usable: usize,
+        /// Identities whose certificate loads but whose signing key is gone.
+        /// These still appear in `ListGhostKeys`, which never checks for the
+        /// signing key, so without this count a half-lost identity looks
+        /// perfectly healthy right up until it fails to sign.
+        unusable: usize,
+    },
+    /// Confirms `MarkBackedUp`.
+    BackedUpMarked {
+        fingerprint: String,
+    },
+    /// The requested ghostkey fingerprint was not found.
+    KeyNotFound {
+        fingerprint: String,
+    },
+    /// Generic error for unexpected failures.
+    Error {
+        message: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    // --- Golden CBOR bytes -------------------------------------------------
+    //
+    // The delegate stores `gk:perms:` grants and signs `ScopedPayload`s as
+    // CBOR of types whose layout is only PARTLY this crate's: both embed
+    // freenet-stdlib types (`ContractInstanceId`, `DelegateKey`), so a stdlib
+    // bump can silently move the serde layout out from under every blob
+    // already sitting in users' delegates — stranding every pre-bump
+    // `gk:perms:` grant with no error anywhere. The 0.6→0.8 bump (ghostkeys
+    // #33) happened to keep the layout identical, but that was verified only
+    // EPHEMERALLY, by diffing two builds that both existed that day.
+    //
+    // These literals freeze the byte layout durably: the NEXT stdlib (or
+    // serde, or ciborium) bump that moves it turns these red instead of
+    // shipping a silent format break. If one of these fails, the fix is NOT
+    // to update the literal — it is to decide, consciously, how blobs in the
+    // OLD layout keep decoding (a fallback decode path, or a delegate-side
+    // migration), and only then re-freeze.
+
+    /// `SignatureRequestor::WebApp(ContractInstanceId::new([7u8; 32]))`.
+    const WEBAPP_REQUESTOR_CBOR: &str = concat!(
+        "a166576562417070982007070707070707070707070707070707070707070707",
+        "07070707070707070707",
+    );
+
+    /// `SignatureRequestor::Delegate(DelegateKey::new([0x11; 32], CodeHash::new([0x22; 32])))`.
+    const DELEGATE_REQUESTOR_CBOR: &str = concat!(
+        "a16844656c6567617465a2636b65799820111111111111111111111111111111",
+        "111111111111111111111111111111111169636f64655f686173689820182218",
+        "2218221822182218221822182218221822182218221822182218221822182218",
+        "2218221822182218221822182218221822182218221822182218221822",
+    );
+
+    /// `ScopedPayload { requestor: WebApp([7; 32]), payload: b"attest me" }`.
+    const SCOPED_PAYLOAD_CBOR: &str = concat!(
+        "a269726571756573746f72a16657656241707098200707070707070707070707",
+        "070707070707070707070707070707070707070707677061796c6f6164891861",
+        "187418741865187318741820186d1865",
+    );
+
+    fn webapp_requestor() -> SignatureRequestor {
+        SignatureRequestor::WebApp(ContractInstanceId::new([7u8; 32]))
+    }
+
+    fn delegate_requestor() -> SignatureRequestor {
+        SignatureRequestor::Delegate(DelegateKey::new([0x11u8; 32], CodeHash::new([0x22u8; 32])))
+    }
+
+    #[test]
+    fn signature_requestor_cbor_layout_is_frozen() {
+        assert_eq!(
+            hex(&to_cbor(&webapp_requestor()).unwrap()),
+            WEBAPP_REQUESTOR_CBOR.replace(char::is_whitespace, ""),
+            "SignatureRequestor::WebApp no longer encodes to its frozen CBOR layout. \
+             Every `gk:perms:` grant already stored in users' delegates is in the OLD \
+             layout; do not update this literal without a decode path for them."
+        );
+        assert_eq!(
+            hex(&to_cbor(&delegate_requestor()).unwrap()),
+            DELEGATE_REQUESTOR_CBOR.replace(char::is_whitespace, ""),
+            "SignatureRequestor::Delegate no longer encodes to its frozen CBOR layout \
+             (same consequence as the WebApp variant)."
+        );
+    }
+
+    #[test]
+    fn scoped_payload_cbor_layout_is_frozen() {
+        let scoped = ScopedPayload {
+            requestor: webapp_requestor(),
+            payload: b"attest me".to_vec(),
+        };
+        assert_eq!(
+            hex(&to_cbor(&scoped).unwrap()),
+            SCOPED_PAYLOAD_CBOR.replace(char::is_whitespace, ""),
+            "ScopedPayload no longer encodes to its frozen CBOR layout. Verifiers \
+             check signatures over these exact bytes; moving the layout breaks \
+             verification of everything signed before the change."
+        );
+    }
+
+    /// The frozen bytes must also DECODE to the same values — encoding
+    /// stability alone would not catch an asymmetric serde change, and
+    /// decoding the literal is exactly what the delegate does to every
+    /// pre-existing blob after an upgrade.
+    #[test]
+    fn frozen_cbor_bytes_still_decode() {
+        let webapp: SignatureRequestor = from_cbor(&unhex(
+            &WEBAPP_REQUESTOR_CBOR.replace(char::is_whitespace, ""),
+        ))
+        .expect("frozen WebApp requestor decodes");
+        assert_eq!(webapp, webapp_requestor());
+
+        let delegate: SignatureRequestor = from_cbor(&unhex(
+            &DELEGATE_REQUESTOR_CBOR.replace(char::is_whitespace, ""),
+        ))
+        .expect("frozen Delegate requestor decodes");
+        assert_eq!(delegate, delegate_requestor());
+
+        let scoped: ScopedPayload = from_cbor(&unhex(
+            &SCOPED_PAYLOAD_CBOR.replace(char::is_whitespace, ""),
+        ))
+        .expect("frozen ScopedPayload decodes");
+        assert_eq!(scoped.requestor, webapp_requestor());
+        assert_eq!(scoped.payload, b"attest me".to_vec());
+    }
+
+    /// Regression: `ImportGhostKey` used to carry a `master_verifying_key_pem`
+    /// override marked "for testing", which let the caller decide which
+    /// authority the vault checked a stored identity against. The field is
+    /// gone and must stay gone -- this fails the moment one is re-added.
+    #[test]
+    fn import_request_has_no_trust_root_field() {
+        let request = GhostkeyRequest::ImportGhostKey {
+            certificate_pem: "CERT".into(),
+            signing_key_pem: "SK".into(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        let fields = json
+            .get("ImportGhostKey")
+            .and_then(|v| v.as_object())
+            .expect("ImportGhostKey serialises as a named-field object");
+
+        let mut names: Vec<&str> = fields.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["certificate_pem", "signing_key_pem"],
+            "ImportGhostKey must carry the key material and nothing else -- \
+             a caller-supplied trust root is an authorization hole, not a test hook"
+        );
+    }
+
+    /// The removal must not break an older client that still sends the field.
+    /// CBOR struct variants are maps with named keys and nothing here sets
+    /// `deny_unknown_fields`, so the extra key is ignored on read. Verified
+    /// rather than assumed.
+    #[test]
+    fn legacy_import_payload_still_decodes() {
+        /// The shape an older `ghostkey-common` produced.
+        #[derive(Serialize)]
+        enum LegacyRequest {
+            ImportGhostKey {
+                certificate_pem: String,
+                signing_key_pem: String,
+                master_verifying_key_pem: Option<String>,
+            },
+        }
+
+        for legacy_value in [None, Some("-----BEGIN VERIFYING_KEY_V1-----".to_string())] {
+            let bytes = to_cbor(&LegacyRequest::ImportGhostKey {
+                certificate_pem: "CERT".into(),
+                signing_key_pem: "SK".into(),
+                master_verifying_key_pem: legacy_value.clone(),
+            })
+            .unwrap();
+
+            match from_cbor::<GhostkeyRequest>(&bytes) {
+                Ok(GhostkeyRequest::ImportGhostKey {
+                    certificate_pem,
+                    signing_key_pem,
+                }) => {
+                    assert_eq!(certificate_pem, "CERT");
+                    assert_eq!(signing_key_pem, "SK");
+                }
+                other => panic!("legacy payload ({legacy_value:?}) did not decode: {other:?}"),
+            }
+        }
+    }
+}
+
+/// Byte-for-byte golden encodings of every wire type, captured from
+/// ghostkey-common 0.3.0 (freenet-stdlib 0.8.5) — the version the deployed
+/// ghostkey delegate (code hash `0d0e2043…`) was built from.
+///
+/// The delegate decodes `GhostkeyRequest`s from apps, encodes
+/// `GhostkeyResponse`s back, stores `SignatureRequestor` grants, and signs
+/// `ScopedPayload` bytes. An app built against this crate talks to THAT
+/// delegate, so whatever freenet-stdlib this crate is compiled against, every
+/// value below must encode to exactly these bytes and decode back from them.
+/// The published crate (`crates-io/ghostkey-common`) accepts a RANGE of
+/// stdlib versions, so a consumer may resolve anything in it; CI runs this
+/// module against both ends of that range.
+///
+/// If one of these fails, do NOT regenerate the literal: the deployed delegate
+/// and every blob already stored still speak the old bytes. Work out how old
+/// and new interoperate first.
+#[cfg(test)]
+mod wire_golden {
+    use super::*;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    fn webapp() -> SignatureRequestor {
+        SignatureRequestor::WebApp(ContractInstanceId::new([0xa5; 32]))
+    }
+
+    fn delegate() -> SignatureRequestor {
+        SignatureRequestor::Delegate(DelegateKey::new([0x3c; 32], CodeHash::new([0xd2; 32])))
+    }
+
+    fn fp() -> String {
+        "8xFpRtQz3Kw".to_string()
+    }
+
+    /// Forces a compile error when a variant is added, so the new variant
+    /// gets a golden entry below rather than shipping unpinned.
+    fn request_name(r: &GhostkeyRequest) -> &'static str {
+        use GhostkeyRequest::*;
+        match r {
+            ImportGhostKey { .. } => "ImportGhostKey",
+            ListGhostKeys => "ListGhostKeys",
+            GetGhostKey { .. } => "GetGhostKey",
+            GetCertificate { .. } => "GetCertificate",
+            DeleteGhostKey { .. } => "DeleteGhostKey",
+            SetLabel { .. } => "SetLabel",
+            SignMessage { .. } => "SignMessage",
+            SignWithDefault { .. } => "SignWithDefault",
+            SetDefaultKey { .. } => "SetDefaultKey",
+            GetDefaultKey => "GetDefaultKey",
+            VerifySignedMessage { .. } => "VerifySignedMessage",
+            ExportGhostKey { .. } => "ExportGhostKey",
+            ExportAllGhostKeys => "ExportAllGhostKeys",
+            GrantPermission { .. } => "GrantPermission",
+            RevokePermission { .. } => "RevokePermission",
+            ListPermissions { .. } => "ListPermissions",
+            RequestAnyAccess => "RequestAnyAccess",
+            HasIdentity => "HasIdentity",
+            MarkBackedUp { .. } => "MarkBackedUp",
+        }
+    }
+
+    /// See [`request_name`].
+    fn response_name(r: &GhostkeyResponse) -> &'static str {
+        use GhostkeyResponse::*;
+        match r {
+            ImportResult { .. } => "ImportResult",
+            GhostKeyList { .. } => "GhostKeyList",
+            GhostKeyDetail { .. } => "GhostKeyDetail",
+            Certificate { .. } => "Certificate",
+            SignResult { .. } => "SignResult",
+            DefaultKeyResult { .. } => "DefaultKeyResult",
+            DefaultKeySet { .. } => "DefaultKeySet",
+            VerifyResult { .. } => "VerifyResult",
+            Deleted { .. } => "Deleted",
+            LabelSet { .. } => "LabelSet",
+            PermissionGranted { .. } => "PermissionGranted",
+            PermissionRevoked { .. } => "PermissionRevoked",
+            PermissionList { .. } => "PermissionList",
+            ExportResult { .. } => "ExportResult",
+            ExportAllResult { .. } => "ExportAllResult",
+            PermissionDenied { .. } => "PermissionDenied",
+            AccessDenied { .. } => "AccessDenied",
+            NoIdentityAvailable => "NoIdentityAvailable",
+            IdentityPresence { .. } => "IdentityPresence",
+            BackedUpMarked { .. } => "BackedUpMarked",
+            KeyNotFound { .. } => "KeyNotFound",
+            Error { .. } => "Error",
+        }
+    }
+
+    fn info(backed_up: bool) -> GhostKeyInfo {
+        GhostKeyInfo {
+            fingerprint: fp(),
+            label: Some("work".into()),
+            notary_info: "{\"amount\":20}".into(),
+            verifying_key_bytes: Some(vec![0x42; 32]),
+            backed_up,
+        }
+    }
+
+    fn exported() -> ExportedGhostKey {
+        ExportedGhostKey {
+            fingerprint: fp(),
+            certificate_pem: "CERT".into(),
+            signing_key_pem: "SK".into(),
+            label: None,
+            notary_info: "{\"amount\":1}".into(),
+        }
+    }
+
+    fn requests() -> Vec<GhostkeyRequest> {
+        use GhostkeyRequest::*;
+        vec![
+            ImportGhostKey {
+                certificate_pem: "CERT".into(),
+                signing_key_pem: "SK".into(),
+            },
+            ListGhostKeys,
+            GetGhostKey { fingerprint: fp() },
+            GetCertificate { fingerprint: fp() },
+            DeleteGhostKey { fingerprint: fp() },
+            SetLabel {
+                fingerprint: fp(),
+                label: "home".into(),
+            },
+            SignMessage {
+                fingerprint: fp(),
+                message: vec![0, 1, 2, 0xff],
+            },
+            SignWithDefault {
+                message: b"hi".to_vec(),
+            },
+            SetDefaultKey { fingerprint: fp() },
+            GetDefaultKey,
+            VerifySignedMessage {
+                signed_message: vec![9, 8, 7],
+            },
+            ExportGhostKey { fingerprint: fp() },
+            ExportAllGhostKeys,
+            GrantPermission {
+                fingerprint: fp(),
+                requestor: webapp(),
+            },
+            RevokePermission {
+                fingerprint: fp(),
+                requestor: delegate(),
+            },
+            ListPermissions { fingerprint: fp() },
+            RequestAnyAccess,
+            HasIdentity,
+            MarkBackedUp { fingerprint: fp() },
+        ]
+    }
+
+    fn responses() -> Vec<GhostkeyResponse> {
+        use GhostkeyResponse::*;
+        vec![
+            ImportResult {
+                fingerprint: fp(),
+                notary_info: "{\"amount\":5}".into(),
+            },
+            GhostKeyList {
+                keys: vec![info(true), info(false)],
+            },
+            GhostKeyDetail {
+                fingerprint: fp(),
+                certificate_pem: "CERT".into(),
+                label: None,
+                notary_info: "{}".into(),
+            },
+            Certificate {
+                fingerprint: fp(),
+                certificate_pem: "CERT".into(),
+            },
+            SignResult {
+                scoped_payload: vec![0xa2, 0x01],
+                signature: vec![0x55; 64],
+                certificate_pem: "CERT".into(),
+            },
+            DefaultKeyResult { fingerprint: None },
+            DefaultKeySet { fingerprint: fp() },
+            VerifyResult {
+                valid: true,
+                signer_fingerprint: Some(fp()),
+                notary_info: Some("{}".into()),
+                requestor: Some(delegate()),
+                message: Some(b"msg".to_vec()),
+            },
+            Deleted { fingerprint: fp() },
+            LabelSet {
+                fingerprint: fp(),
+                label: "home".into(),
+            },
+            PermissionGranted {
+                fingerprint: fp(),
+                requestor: webapp(),
+            },
+            PermissionRevoked {
+                fingerprint: fp(),
+                requestor: delegate(),
+            },
+            PermissionList {
+                fingerprint: fp(),
+                requestors: vec![webapp(), delegate()],
+            },
+            ExportResult {
+                fingerprint: fp(),
+                certificate_pem: "CERT".into(),
+                signing_key_pem: "SK".into(),
+                label: Some("l".into()),
+            },
+            ExportAllResult {
+                keys: vec![exported()],
+            },
+            PermissionDenied {
+                fingerprint: fp(),
+                requestor: webapp(),
+            },
+            AccessDenied {
+                requestor: delegate(),
+            },
+            NoIdentityAvailable,
+            IdentityPresence {
+                usable: 2,
+                unusable: 1,
+            },
+            BackedUpMarked { fingerprint: fp() },
+            KeyNotFound { fingerprint: fp() },
+            Error {
+                message: "boom".into(),
+            },
+        ]
+    }
+
+    /// Prints the current encodings in the table format below. Run with
+    /// `cargo test -p ghostkey-common print_wire_golden -- --ignored --nocapture`
+    /// ONLY to add an entry for a new variant, never to "fix" a failing one.
+    #[test]
+    #[ignore]
+    fn print_wire_golden() {
+        for r in requests() {
+            println!(
+                "(\"{}\", \"{}\"),",
+                request_name(&r),
+                hex(&to_cbor(&r).unwrap())
+            );
+        }
+        for r in responses() {
+            println!(
+                "(\"{}\", \"{}\"),",
+                response_name(&r),
+                hex(&to_cbor(&r).unwrap())
+            );
+        }
+        for s in scopes() {
+            println!("(\"{s:?}\", \"{}\"),", hex(&to_cbor(&s).unwrap()));
+        }
+        let scoped = ScopedPayload {
+            requestor: delegate(),
+            payload: vec![1, 2, 3],
+        };
+        println!("SCOPED {}", hex(&to_cbor(&scoped).unwrap()));
+    }
+
+    // Captured with `print_wire_golden` from ghostkey-common 0.3.0 source on
+    // freenet-stdlib 0.8.5, before the stdlib requirement was widened.
+    const REQUEST_GOLDEN: &[(&str, &str)] = &[
+        ("ImportGhostKey", "a16e496d706f727447686f73744b6579a26f63657274696669636174655f70656d64434552546f7369676e696e675f6b65795f70656d62534b"),
+        ("ListGhostKeys", "6d4c69737447686f73744b657973"),
+        ("GetGhostKey", "a16b47657447686f73744b6579a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("GetCertificate", "a16e4765744365727469666963617465a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("DeleteGhostKey", "a16e44656c65746547686f73744b6579a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("SetLabel", "a1685365744c6162656ca26b66696e6765727072696e746b387846705274517a334b77656c6162656c64686f6d65"),
+        ("SignMessage", "a16b5369676e4d657373616765a26b66696e6765727072696e746b387846705274517a334b77676d6573736167658400010218ff"),
+        ("SignWithDefault", "a16f5369676e5769746844656661756c74a1676d6573736167658218681869"),
+        ("SetDefaultKey", "a16d53657444656661756c744b6579a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("GetDefaultKey", "6d47657444656661756c744b6579"),
+        ("VerifySignedMessage", "a1735665726966795369676e65644d657373616765a16e7369676e65645f6d65737361676583090807"),
+        ("ExportGhostKey", "a16e4578706f727447686f73744b6579a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("ExportAllGhostKeys", "724578706f7274416c6c47686f73744b657973"),
+        ("GrantPermission", "a16f4772616e745065726d697373696f6ea26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5"),
+        ("RevokePermission", "a1705265766f6b655065726d697373696f6ea26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
+        ("ListPermissions", "a16f4c6973745065726d697373696f6e73a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("RequestAnyAccess", "7052657175657374416e79416363657373"),
+        ("HasIdentity", "6b4861734964656e74697479"),
+        ("MarkBackedUp", "a16c4d61726b4261636b65645570a16b66696e6765727072696e746b387846705274517a334b77"),
+    ];
+    const RESPONSE_GOLDEN: &[(&str, &str)] = &[
+        ("ImportResult", "a16c496d706f7274526573756c74a26b66696e6765727072696e746b387846705274517a334b776d64656c65676174655f696e666f6c7b22616d6f756e74223a357d"),
+        ("GhostKeyList", "a16c47686f73744b65794c697374a1646b65797382a56b66696e6765727072696e746b387846705274517a334b77656c6162656c64776f726b6d64656c65676174655f696e666f6d7b22616d6f756e74223a32307d73766572696679696e675f6b65795f6279746573982018421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842696261636b65645f7570f5a56b66696e6765727072696e746b387846705274517a334b77656c6162656c64776f726b6d64656c65676174655f696e666f6d7b22616d6f756e74223a32307d73766572696679696e675f6b65795f6279746573982018421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842696261636b65645f7570f4"),
+        ("GhostKeyDetail", "a16e47686f73744b657944657461696ca46b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d6443455254656c6162656cf66d64656c65676174655f696e666f627b7d"),
+        ("Certificate", "a16b4365727469666963617465a26b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d6443455254"),
+        ("SignResult", "a16a5369676e526573756c74a36e73636f7065645f7061796c6f61648218a201697369676e6174757265984018551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518556f63657274696669636174655f70656d6443455254"),
+        ("DefaultKeyResult", "a17044656661756c744b6579526573756c74a16b66696e6765727072696e74f6"),
+        ("DefaultKeySet", "a16d44656661756c744b6579536574a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("VerifyResult", "a16c566572696679526573756c74a56576616c6964f5727369676e65725f66696e6765727072696e746b387846705274517a334b776d64656c65676174655f696e666f627b7d69726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2676d65737361676583186d18731867"),
+        ("Deleted", "a16744656c65746564a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("LabelSet", "a1684c6162656c536574a26b66696e6765727072696e746b387846705274517a334b77656c6162656c64686f6d65"),
+        ("PermissionGranted", "a1715065726d697373696f6e4772616e746564a26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5"),
+        ("PermissionRevoked", "a1715065726d697373696f6e5265766f6b6564a26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
+        ("PermissionList", "a16e5065726d697373696f6e4c697374a26b66696e6765727072696e746b387846705274517a334b776a726571756573746f727382a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
+        ("ExportResult", "a16c4578706f7274526573756c74a46b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d64434552546f7369676e696e675f6b65795f70656d62534b656c6162656c616c"),
+        ("ExportAllResult", "a16f4578706f7274416c6c526573756c74a1646b65797381a56b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d64434552546f7369676e696e675f6b65795f70656d62534b656c6162656cf66d64656c65676174655f696e666f6c7b22616d6f756e74223a317d"),
+        ("PermissionDenied", "a1705065726d697373696f6e44656e696564a26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5"),
+        ("AccessDenied", "a16c41636365737344656e696564a169726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
+        ("NoIdentityAvailable", "734e6f4964656e74697479417661696c61626c65"),
+        ("IdentityPresence", "a1704964656e7469747950726573656e6365a266757361626c650268756e757361626c6501"),
+        ("BackedUpMarked", "a16e4261636b656455704d61726b6564a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("KeyNotFound", "a16b4b65794e6f74466f756e64a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("Error", "a1654572726f72a1676d65737361676564626f6f6d"),
+    ];
+    const SCOPE_GOLDEN: &[(&str, &str)] = &[
+        ("ReadPublic", "6a526561645075626c6963"),
+        ("Sign", "645369676e"),
+        ("Export", "664578706f7274"),
+        ("Delete", "6644656c657465"),
+        ("Admin", "6541646d696e"),
+    ];
+    const SCOPED_DELEGATE_GOLDEN: &str = "a269726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2677061796c6f616483010203";
+
+    fn scopes() -> Vec<GhostkeyScope> {
+        use GhostkeyScope::*;
+        // Exhaustive by construction: adding a variant breaks this match.
+        let all = [ReadPublic, Sign, Export, Delete, Admin];
+        for s in &all {
+            match s {
+                ReadPublic | Sign | Export | Delete | Admin => {}
+            }
+        }
+        all.to_vec()
+    }
+
+    /// Check one table: every sample encodes to its golden bytes, every golden
+    /// decodes, and re-encoding the decoded value reproduces the bytes (most
+    /// of these types have no `PartialEq`, and byte equality is the property
+    /// that matters on the wire anyway).
+    fn check<T>(samples: Vec<T>, name: impl Fn(&T) -> String, golden: &[(&str, &str)])
+    where
+        T: Serialize + for<'de> Deserialize<'de>,
+    {
+        assert_eq!(
+            samples.len(),
+            golden.len(),
+            "every variant needs exactly one golden entry"
+        );
+        for (value, (golden_name, golden_hex)) in samples.iter().zip(golden) {
+            let n = name(value);
+            assert_eq!(&n, golden_name, "golden table out of order");
+            assert_eq!(
+                hex(&to_cbor(value).unwrap()),
+                *golden_hex,
+                "{n} no longer encodes to the bytes ghostkey-common 0.3.0 produced; \
+                 the deployed delegate will not read it the same way"
+            );
+            let decoded: T = from_cbor(&unhex(golden_hex))
+                .unwrap_or_else(|e| panic!("0.3.0 bytes for {n} no longer decode: {e}"));
+            assert_eq!(
+                hex(&to_cbor(&decoded).unwrap()),
+                *golden_hex,
+                "{n} does not round-trip from the 0.3.0 bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn requests_match_0_3_0_bytes() {
+        check(requests(), |r| request_name(r).to_string(), REQUEST_GOLDEN);
+    }
+
+    #[test]
+    fn responses_match_0_3_0_bytes() {
+        check(
+            responses(),
+            |r| response_name(r).to_string(),
+            RESPONSE_GOLDEN,
+        );
+    }
+
+    #[test]
+    fn scopes_match_0_3_0_bytes() {
+        check(scopes(), |s| format!("{s:?}"), SCOPE_GOLDEN);
+    }
+
+    #[test]
+    fn delegate_scoped_payload_matches_0_3_0_bytes() {
+        // The WebApp form is pinned in `tests::scoped_payload_cbor_layout_is_frozen`;
+        // this pins the Delegate form, which carries both stdlib key types.
+        let scoped = ScopedPayload {
+            requestor: delegate(),
+            payload: vec![1, 2, 3],
+        };
+        assert_eq!(hex(&to_cbor(&scoped).unwrap()), SCOPED_DELEGATE_GOLDEN);
+        let back: ScopedPayload = from_cbor(&unhex(SCOPED_DELEGATE_GOLDEN)).unwrap();
+        assert_eq!(back.requestor, delegate());
+        assert_eq!(back.payload, vec![1, 2, 3]);
+    }
+}

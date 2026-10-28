@@ -230,9 +230,35 @@ This means your application doesn't need to handle the permission flow at all --
 
 This is a Rust workspace with three crates:
 
-- **`common/`** -- Shared types and CBOR serialization for the request/response protocol between delegate and UI
+- **`common/`** -- Shared types and CBOR serialization for the request/response protocol between delegate and UI. Frozen at `ghostkey-common 0.3.0`, the version the deployed delegate is built from; see below
 - **`delegates/ghostkey-delegate/`** -- The Freenet delegate (compiles to WASM) that stores signing keys and handles identity operations
 - **`ui/`** -- Dioxus web frontend for managing identities, signing messages, and granting permissions
+
+Plus one crate outside the workspace:
+
+- **`crates-io/ghostkey-common/`** -- The `ghostkey-common` published to crates.io (0.4.0 on). Its `src/lib.rs` is a copy of `common/src/lib.rs`, and CI fails if they differ.
+
+#### Why two copies of ghostkey-common
+
+The delegate key is BLAKE3 over the delegate WASM, and the WASM depends on the
+identity of every crate linked into it, `ghostkey-common` included. Measured
+on 2026-10-27: bumping `common/` from 0.3.0 to 0.4.0, and nothing else, gave
+the delegate a different hash, and so did pointing it at the byte-identical
+0.3.0 from crates.io. Releasing the crate from `common/` would therefore
+re-key the delegate every time. So `common/` stays what the delegate needs and
+releases come from `crates-io/ghostkey-common/`, its own workspace with its own
+`Cargo.lock` and its own freenet-stdlib resolution.
+
+#### Releasing ghostkey-common
+
+1. On a branch, bump `version` in `crates-io/ghostkey-common/Cargo.toml`.
+   Any change to the wire types goes in `common/src/lib.rs` AND the copy;
+   a change there also changes the delegate, so it is a re-key (see
+   `.claude/rules/delegate-migration.md`). Never touch `common/Cargo.toml`.
+2. PR, review, green CI (job `ghostkey-common-crate` runs the tests at both
+   ends of the stdlib range and a `cargo publish --dry-run`), merge.
+3. From an up-to-date `main`:
+   `cd crates-io/ghostkey-common && cargo publish --locked`.
 
 ### Certificate chain
 

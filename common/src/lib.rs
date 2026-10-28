@@ -540,3 +540,410 @@ mod tests {
         }
     }
 }
+
+/// Byte-for-byte golden encodings of every wire type, captured from
+/// ghostkey-common 0.3.0 (freenet-stdlib 0.8.5) — the version the deployed
+/// ghostkey delegate (code hash `0d0e2043…`) was built from.
+///
+/// The delegate decodes `GhostkeyRequest`s from apps, encodes
+/// `GhostkeyResponse`s back, stores `SignatureRequestor` grants, and signs
+/// `ScopedPayload` bytes. An app built against this crate talks to THAT
+/// delegate, so whatever freenet-stdlib this crate is compiled against, every
+/// value below must encode to exactly these bytes and decode back from them.
+/// The published crate (`crates-io/ghostkey-common`) accepts a RANGE of
+/// stdlib versions, so a consumer may resolve anything in it; CI runs this
+/// module against both ends of that range.
+///
+/// If one of these fails, do NOT regenerate the literal: the deployed delegate
+/// and every blob already stored still speak the old bytes. Work out how old
+/// and new interoperate first.
+#[cfg(test)]
+mod wire_golden {
+    use super::*;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    fn webapp() -> SignatureRequestor {
+        SignatureRequestor::WebApp(ContractInstanceId::new([0xa5; 32]))
+    }
+
+    fn delegate() -> SignatureRequestor {
+        SignatureRequestor::Delegate(DelegateKey::new([0x3c; 32], CodeHash::new([0xd2; 32])))
+    }
+
+    fn fp() -> String {
+        "8xFpRtQz3Kw".to_string()
+    }
+
+    /// Forces a compile error when a variant is added, so the new variant
+    /// gets a golden entry below rather than shipping unpinned.
+    fn request_name(r: &GhostkeyRequest) -> &'static str {
+        use GhostkeyRequest::*;
+        match r {
+            ImportGhostKey { .. } => "ImportGhostKey",
+            ListGhostKeys => "ListGhostKeys",
+            GetGhostKey { .. } => "GetGhostKey",
+            GetCertificate { .. } => "GetCertificate",
+            DeleteGhostKey { .. } => "DeleteGhostKey",
+            SetLabel { .. } => "SetLabel",
+            SignMessage { .. } => "SignMessage",
+            SignWithDefault { .. } => "SignWithDefault",
+            SetDefaultKey { .. } => "SetDefaultKey",
+            GetDefaultKey => "GetDefaultKey",
+            VerifySignedMessage { .. } => "VerifySignedMessage",
+            ExportGhostKey { .. } => "ExportGhostKey",
+            ExportAllGhostKeys => "ExportAllGhostKeys",
+            GrantPermission { .. } => "GrantPermission",
+            RevokePermission { .. } => "RevokePermission",
+            ListPermissions { .. } => "ListPermissions",
+            RequestAnyAccess => "RequestAnyAccess",
+            HasIdentity => "HasIdentity",
+            MarkBackedUp { .. } => "MarkBackedUp",
+        }
+    }
+
+    /// See [`request_name`].
+    fn response_name(r: &GhostkeyResponse) -> &'static str {
+        use GhostkeyResponse::*;
+        match r {
+            ImportResult { .. } => "ImportResult",
+            GhostKeyList { .. } => "GhostKeyList",
+            GhostKeyDetail { .. } => "GhostKeyDetail",
+            Certificate { .. } => "Certificate",
+            SignResult { .. } => "SignResult",
+            DefaultKeyResult { .. } => "DefaultKeyResult",
+            DefaultKeySet { .. } => "DefaultKeySet",
+            VerifyResult { .. } => "VerifyResult",
+            Deleted { .. } => "Deleted",
+            LabelSet { .. } => "LabelSet",
+            PermissionGranted { .. } => "PermissionGranted",
+            PermissionRevoked { .. } => "PermissionRevoked",
+            PermissionList { .. } => "PermissionList",
+            ExportResult { .. } => "ExportResult",
+            ExportAllResult { .. } => "ExportAllResult",
+            PermissionDenied { .. } => "PermissionDenied",
+            AccessDenied { .. } => "AccessDenied",
+            NoIdentityAvailable => "NoIdentityAvailable",
+            IdentityPresence { .. } => "IdentityPresence",
+            BackedUpMarked { .. } => "BackedUpMarked",
+            KeyNotFound { .. } => "KeyNotFound",
+            Error { .. } => "Error",
+        }
+    }
+
+    fn info(backed_up: bool) -> GhostKeyInfo {
+        GhostKeyInfo {
+            fingerprint: fp(),
+            label: Some("work".into()),
+            notary_info: "{\"amount\":20}".into(),
+            verifying_key_bytes: Some(vec![0x42; 32]),
+            backed_up,
+        }
+    }
+
+    fn exported() -> ExportedGhostKey {
+        ExportedGhostKey {
+            fingerprint: fp(),
+            certificate_pem: "CERT".into(),
+            signing_key_pem: "SK".into(),
+            label: None,
+            notary_info: "{\"amount\":1}".into(),
+        }
+    }
+
+    fn requests() -> Vec<GhostkeyRequest> {
+        use GhostkeyRequest::*;
+        vec![
+            ImportGhostKey {
+                certificate_pem: "CERT".into(),
+                signing_key_pem: "SK".into(),
+            },
+            ListGhostKeys,
+            GetGhostKey { fingerprint: fp() },
+            GetCertificate { fingerprint: fp() },
+            DeleteGhostKey { fingerprint: fp() },
+            SetLabel {
+                fingerprint: fp(),
+                label: "home".into(),
+            },
+            SignMessage {
+                fingerprint: fp(),
+                message: vec![0, 1, 2, 0xff],
+            },
+            SignWithDefault {
+                message: b"hi".to_vec(),
+            },
+            SetDefaultKey { fingerprint: fp() },
+            GetDefaultKey,
+            VerifySignedMessage {
+                signed_message: vec![9, 8, 7],
+            },
+            ExportGhostKey { fingerprint: fp() },
+            ExportAllGhostKeys,
+            GrantPermission {
+                fingerprint: fp(),
+                requestor: webapp(),
+            },
+            RevokePermission {
+                fingerprint: fp(),
+                requestor: delegate(),
+            },
+            ListPermissions { fingerprint: fp() },
+            RequestAnyAccess,
+            HasIdentity,
+            MarkBackedUp { fingerprint: fp() },
+        ]
+    }
+
+    fn responses() -> Vec<GhostkeyResponse> {
+        use GhostkeyResponse::*;
+        vec![
+            ImportResult {
+                fingerprint: fp(),
+                notary_info: "{\"amount\":5}".into(),
+            },
+            GhostKeyList {
+                keys: vec![info(true), info(false)],
+            },
+            GhostKeyDetail {
+                fingerprint: fp(),
+                certificate_pem: "CERT".into(),
+                label: None,
+                notary_info: "{}".into(),
+            },
+            Certificate {
+                fingerprint: fp(),
+                certificate_pem: "CERT".into(),
+            },
+            SignResult {
+                scoped_payload: vec![0xa2, 0x01],
+                signature: vec![0x55; 64],
+                certificate_pem: "CERT".into(),
+            },
+            DefaultKeyResult { fingerprint: None },
+            DefaultKeySet { fingerprint: fp() },
+            VerifyResult {
+                valid: true,
+                signer_fingerprint: Some(fp()),
+                notary_info: Some("{}".into()),
+                requestor: Some(delegate()),
+                message: Some(b"msg".to_vec()),
+            },
+            Deleted { fingerprint: fp() },
+            LabelSet {
+                fingerprint: fp(),
+                label: "home".into(),
+            },
+            PermissionGranted {
+                fingerprint: fp(),
+                requestor: webapp(),
+            },
+            PermissionRevoked {
+                fingerprint: fp(),
+                requestor: delegate(),
+            },
+            PermissionList {
+                fingerprint: fp(),
+                requestors: vec![webapp(), delegate()],
+            },
+            ExportResult {
+                fingerprint: fp(),
+                certificate_pem: "CERT".into(),
+                signing_key_pem: "SK".into(),
+                label: Some("l".into()),
+            },
+            ExportAllResult {
+                keys: vec![exported()],
+            },
+            PermissionDenied {
+                fingerprint: fp(),
+                requestor: webapp(),
+            },
+            AccessDenied {
+                requestor: delegate(),
+            },
+            NoIdentityAvailable,
+            IdentityPresence {
+                usable: 2,
+                unusable: 1,
+            },
+            BackedUpMarked { fingerprint: fp() },
+            KeyNotFound { fingerprint: fp() },
+            Error {
+                message: "boom".into(),
+            },
+        ]
+    }
+
+    /// Prints the current encodings in the table format below. Run with
+    /// `cargo test -p ghostkey-common print_wire_golden -- --ignored --nocapture`
+    /// ONLY to add an entry for a new variant, never to "fix" a failing one.
+    #[test]
+    #[ignore]
+    fn print_wire_golden() {
+        for r in requests() {
+            println!(
+                "(\"{}\", \"{}\"),",
+                request_name(&r),
+                hex(&to_cbor(&r).unwrap())
+            );
+        }
+        for r in responses() {
+            println!(
+                "(\"{}\", \"{}\"),",
+                response_name(&r),
+                hex(&to_cbor(&r).unwrap())
+            );
+        }
+        for s in scopes() {
+            println!("(\"{s:?}\", \"{}\"),", hex(&to_cbor(&s).unwrap()));
+        }
+        let scoped = ScopedPayload {
+            requestor: delegate(),
+            payload: vec![1, 2, 3],
+        };
+        println!("SCOPED {}", hex(&to_cbor(&scoped).unwrap()));
+    }
+
+    // Captured with `print_wire_golden` from ghostkey-common 0.3.0 source on
+    // freenet-stdlib 0.8.5, before the stdlib requirement was widened.
+    const REQUEST_GOLDEN: &[(&str, &str)] = &[
+        ("ImportGhostKey", "a16e496d706f727447686f73744b6579a26f63657274696669636174655f70656d64434552546f7369676e696e675f6b65795f70656d62534b"),
+        ("ListGhostKeys", "6d4c69737447686f73744b657973"),
+        ("GetGhostKey", "a16b47657447686f73744b6579a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("GetCertificate", "a16e4765744365727469666963617465a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("DeleteGhostKey", "a16e44656c65746547686f73744b6579a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("SetLabel", "a1685365744c6162656ca26b66696e6765727072696e746b387846705274517a334b77656c6162656c64686f6d65"),
+        ("SignMessage", "a16b5369676e4d657373616765a26b66696e6765727072696e746b387846705274517a334b77676d6573736167658400010218ff"),
+        ("SignWithDefault", "a16f5369676e5769746844656661756c74a1676d6573736167658218681869"),
+        ("SetDefaultKey", "a16d53657444656661756c744b6579a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("GetDefaultKey", "6d47657444656661756c744b6579"),
+        ("VerifySignedMessage", "a1735665726966795369676e65644d657373616765a16e7369676e65645f6d65737361676583090807"),
+        ("ExportGhostKey", "a16e4578706f727447686f73744b6579a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("ExportAllGhostKeys", "724578706f7274416c6c47686f73744b657973"),
+        ("GrantPermission", "a16f4772616e745065726d697373696f6ea26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5"),
+        ("RevokePermission", "a1705265766f6b655065726d697373696f6ea26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
+        ("ListPermissions", "a16f4c6973745065726d697373696f6e73a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("RequestAnyAccess", "7052657175657374416e79416363657373"),
+        ("HasIdentity", "6b4861734964656e74697479"),
+        ("MarkBackedUp", "a16c4d61726b4261636b65645570a16b66696e6765727072696e746b387846705274517a334b77"),
+    ];
+    const RESPONSE_GOLDEN: &[(&str, &str)] = &[
+        ("ImportResult", "a16c496d706f7274526573756c74a26b66696e6765727072696e746b387846705274517a334b776d64656c65676174655f696e666f6c7b22616d6f756e74223a357d"),
+        ("GhostKeyList", "a16c47686f73744b65794c697374a1646b65797382a56b66696e6765727072696e746b387846705274517a334b77656c6162656c64776f726b6d64656c65676174655f696e666f6d7b22616d6f756e74223a32307d73766572696679696e675f6b65795f6279746573982018421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842696261636b65645f7570f5a56b66696e6765727072696e746b387846705274517a334b77656c6162656c64776f726b6d64656c65676174655f696e666f6d7b22616d6f756e74223a32307d73766572696679696e675f6b65795f6279746573982018421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842696261636b65645f7570f4"),
+        ("GhostKeyDetail", "a16e47686f73744b657944657461696ca46b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d6443455254656c6162656cf66d64656c65676174655f696e666f627b7d"),
+        ("Certificate", "a16b4365727469666963617465a26b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d6443455254"),
+        ("SignResult", "a16a5369676e526573756c74a36e73636f7065645f7061796c6f61648218a201697369676e6174757265984018551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518556f63657274696669636174655f70656d6443455254"),
+        ("DefaultKeyResult", "a17044656661756c744b6579526573756c74a16b66696e6765727072696e74f6"),
+        ("DefaultKeySet", "a16d44656661756c744b6579536574a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("VerifyResult", "a16c566572696679526573756c74a56576616c6964f5727369676e65725f66696e6765727072696e746b387846705274517a334b776d64656c65676174655f696e666f627b7d69726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2676d65737361676583186d18731867"),
+        ("Deleted", "a16744656c65746564a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("LabelSet", "a1684c6162656c536574a26b66696e6765727072696e746b387846705274517a334b77656c6162656c64686f6d65"),
+        ("PermissionGranted", "a1715065726d697373696f6e4772616e746564a26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5"),
+        ("PermissionRevoked", "a1715065726d697373696f6e5265766f6b6564a26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
+        ("PermissionList", "a16e5065726d697373696f6e4c697374a26b66696e6765727072696e746b387846705274517a334b776a726571756573746f727382a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
+        ("ExportResult", "a16c4578706f7274526573756c74a46b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d64434552546f7369676e696e675f6b65795f70656d62534b656c6162656c616c"),
+        ("ExportAllResult", "a16f4578706f7274416c6c526573756c74a1646b65797381a56b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d64434552546f7369676e696e675f6b65795f70656d62534b656c6162656cf66d64656c65676174655f696e666f6c7b22616d6f756e74223a317d"),
+        ("PermissionDenied", "a1705065726d697373696f6e44656e696564a26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5"),
+        ("AccessDenied", "a16c41636365737344656e696564a169726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
+        ("NoIdentityAvailable", "734e6f4964656e74697479417661696c61626c65"),
+        ("IdentityPresence", "a1704964656e7469747950726573656e6365a266757361626c650268756e757361626c6501"),
+        ("BackedUpMarked", "a16e4261636b656455704d61726b6564a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("KeyNotFound", "a16b4b65794e6f74466f756e64a16b66696e6765727072696e746b387846705274517a334b77"),
+        ("Error", "a1654572726f72a1676d65737361676564626f6f6d"),
+    ];
+    const SCOPE_GOLDEN: &[(&str, &str)] = &[
+        ("ReadPublic", "6a526561645075626c6963"),
+        ("Sign", "645369676e"),
+        ("Export", "664578706f7274"),
+        ("Delete", "6644656c657465"),
+        ("Admin", "6541646d696e"),
+    ];
+    const SCOPED_DELEGATE_GOLDEN: &str = "a269726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2677061796c6f616483010203";
+
+    fn scopes() -> Vec<GhostkeyScope> {
+        use GhostkeyScope::*;
+        // Exhaustive by construction: adding a variant breaks this match.
+        let all = [ReadPublic, Sign, Export, Delete, Admin];
+        for s in &all {
+            match s {
+                ReadPublic | Sign | Export | Delete | Admin => {}
+            }
+        }
+        all.to_vec()
+    }
+
+    /// Check one table: every sample encodes to its golden bytes, every golden
+    /// decodes, and re-encoding the decoded value reproduces the bytes (most
+    /// of these types have no `PartialEq`, and byte equality is the property
+    /// that matters on the wire anyway).
+    fn check<T>(samples: Vec<T>, name: impl Fn(&T) -> String, golden: &[(&str, &str)])
+    where
+        T: Serialize + for<'de> Deserialize<'de>,
+    {
+        assert_eq!(
+            samples.len(),
+            golden.len(),
+            "every variant needs exactly one golden entry"
+        );
+        for (value, (golden_name, golden_hex)) in samples.iter().zip(golden) {
+            let n = name(value);
+            assert_eq!(&n, golden_name, "golden table out of order");
+            assert_eq!(
+                hex(&to_cbor(value).unwrap()),
+                *golden_hex,
+                "{n} no longer encodes to the bytes ghostkey-common 0.3.0 produced; \
+                 the deployed delegate will not read it the same way"
+            );
+            let decoded: T = from_cbor(&unhex(golden_hex))
+                .unwrap_or_else(|e| panic!("0.3.0 bytes for {n} no longer decode: {e}"));
+            assert_eq!(
+                hex(&to_cbor(&decoded).unwrap()),
+                *golden_hex,
+                "{n} does not round-trip from the 0.3.0 bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn requests_match_0_3_0_bytes() {
+        check(requests(), |r| request_name(r).to_string(), REQUEST_GOLDEN);
+    }
+
+    #[test]
+    fn responses_match_0_3_0_bytes() {
+        check(
+            responses(),
+            |r| response_name(r).to_string(),
+            RESPONSE_GOLDEN,
+        );
+    }
+
+    #[test]
+    fn scopes_match_0_3_0_bytes() {
+        check(scopes(), |s| format!("{s:?}"), SCOPE_GOLDEN);
+    }
+
+    #[test]
+    fn delegate_scoped_payload_matches_0_3_0_bytes() {
+        // The WebApp form is pinned in `tests::scoped_payload_cbor_layout_is_frozen`;
+        // this pins the Delegate form, which carries both stdlib key types.
+        let scoped = ScopedPayload {
+            requestor: delegate(),
+            payload: vec![1, 2, 3],
+        };
+        assert_eq!(hex(&to_cbor(&scoped).unwrap()), SCOPED_DELEGATE_GOLDEN);
+        let back: ScopedPayload = from_cbor(&unhex(SCOPED_DELEGATE_GOLDEN)).unwrap();
+        assert_eq!(back.requestor, delegate());
+        assert_eq!(back.payload, vec![1, 2, 3]);
+    }
+}
