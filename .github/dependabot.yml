@@ -78,6 +78,28 @@ updates:
           - "minor"
           - "patch"
 
+  # The published ghostkey-common, a separate workspace (see README.md, "Why
+  # two copies of ghostkey-common"). Its lockfile only decides what CI tests the
+  # crate against; consumers resolve their own. Nothing in it reaches the
+  # delegate, so no `contract-rekey-risk` label.
+  - package-ecosystem: "cargo"
+    directory: "/crates-io/ghostkey-common"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    # Set explicitly: omitting this caps at 5 and silently withholds the rest.
+    open-pull-requests-limit: 20
+    labels:
+      - "dependencies"
+    groups:
+      ghostkey-common-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

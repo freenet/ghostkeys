@@ -23,6 +23,9 @@ on:
       # The guard's main job is catching a PR that drops a recorded entry, and
       # a PR can drop one by editing nothing but this file.
       - 'legacy_delegates.toml'
+      # NOT listed, deliberately: crates-io/** (the published ghostkey-common).
+      # It is its own workspace and nothing in it reaches the delegate build;
+      # the `test` job keeps its source identical to common/, which IS listed.
 
 jobs:
   check-migration:

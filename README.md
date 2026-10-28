@@ -251,12 +251,18 @@ releases come from `crates-io/ghostkey-common/`, its own workspace with its own
 
 #### Releasing ghostkey-common
 
-1. On a branch, bump `version` in `crates-io/ghostkey-common/Cargo.toml`.
-   Any change to the wire types goes in `common/src/lib.rs` AND the copy;
-   a change there also changes the delegate, so it is a re-key (see
+1. On a branch, bump `version` in `crates-io/ghostkey-common/Cargo.toml`
+   (check crates.io: the dry-run does not catch an already-published version).
+   Any change to the wire types goes in `common/src/` AND the copy; a non-test
+   change there also changes the delegate, so it is a re-key (see
    `.claude/rules/delegate-migration.md`). Never touch `common/Cargo.toml`.
-2. PR, review, green CI (job `ghostkey-common-crate` runs the tests at both
-   ends of the stdlib range and a `cargo publish --dry-run`), merge.
+   A new freenet-stdlib minor (0.13) needs a release that widens the range,
+   after checking `ContractInstanceId`/`DelegateKey`/`CodeHash` still encode
+   the same; the golden tests will say.
+2. PR, review, green CI (the `test` job checks the crate: sources identical to
+   `common/`, manifests in step, golden tests at both ends of the stdlib range
+   and at the newest release in it, a wasm32 build, a `cargo publish
+   --dry-run`), merge.
 3. From an up-to-date `main`:
    `cd crates-io/ghostkey-common && cargo publish --locked`.
 

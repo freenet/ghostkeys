@@ -584,8 +584,9 @@ mod wire_golden {
         "8xFpRtQz3Kw".to_string()
     }
 
-    /// Forces a compile error when a variant is added, so the new variant
-    /// gets a golden entry below rather than shipping unpinned.
+    /// Names a request's variant. Exhaustive, so adding a variant is a compile
+    /// error here; [`check`] then fails until the variant has a golden entry,
+    /// because it compares the table against serde's own variant list.
     fn request_name(r: &GhostkeyRequest) -> &'static str {
         use GhostkeyRequest::*;
         match r {
@@ -714,6 +715,13 @@ mod wire_golden {
             GhostKeyList {
                 keys: vec![info(true), info(false)],
             },
+            GhostKeyList {
+                keys: vec![GhostKeyInfo {
+                    label: None,
+                    verifying_key_bytes: None,
+                    ..info(false)
+                }],
+            },
             GhostKeyDetail {
                 fingerprint: fp(),
                 certificate_pem: "CERT".into(),
@@ -730,6 +738,9 @@ mod wire_golden {
                 certificate_pem: "CERT".into(),
             },
             DefaultKeyResult { fingerprint: None },
+            DefaultKeyResult {
+                fingerprint: Some(fp()),
+            },
             DefaultKeySet { fingerprint: fp() },
             VerifyResult {
                 valid: true,
@@ -737,6 +748,13 @@ mod wire_golden {
                 notary_info: Some("{}".into()),
                 requestor: Some(delegate()),
                 message: Some(b"msg".to_vec()),
+            },
+            VerifyResult {
+                valid: false,
+                signer_fingerprint: None,
+                notary_info: None,
+                requestor: None,
+                message: None,
             },
             Deleted { fingerprint: fp() },
             LabelSet {
@@ -761,8 +779,20 @@ mod wire_golden {
                 signing_key_pem: "SK".into(),
                 label: Some("l".into()),
             },
+            ExportResult {
+                fingerprint: fp(),
+                certificate_pem: "CERT".into(),
+                signing_key_pem: "SK".into(),
+                label: None,
+            },
             ExportAllResult {
                 keys: vec![exported()],
+            },
+            ExportAllResult {
+                keys: vec![ExportedGhostKey {
+                    label: Some("l".into()),
+                    ..exported()
+                }],
             },
             PermissionDenied {
                 fingerprint: fp(),
@@ -840,19 +870,24 @@ mod wire_golden {
     const RESPONSE_GOLDEN: &[(&str, &str)] = &[
         ("ImportResult", "a16c496d706f7274526573756c74a26b66696e6765727072696e746b387846705274517a334b776d64656c65676174655f696e666f6c7b22616d6f756e74223a357d"),
         ("GhostKeyList", "a16c47686f73744b65794c697374a1646b65797382a56b66696e6765727072696e746b387846705274517a334b77656c6162656c64776f726b6d64656c65676174655f696e666f6d7b22616d6f756e74223a32307d73766572696679696e675f6b65795f6279746573982018421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842696261636b65645f7570f5a56b66696e6765727072696e746b387846705274517a334b77656c6162656c64776f726b6d64656c65676174655f696e666f6d7b22616d6f756e74223a32307d73766572696679696e675f6b65795f6279746573982018421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842184218421842696261636b65645f7570f4"),
+        ("GhostKeyList", "a16c47686f73744b65794c697374a1646b65797381a56b66696e6765727072696e746b387846705274517a334b77656c6162656cf66d64656c65676174655f696e666f6d7b22616d6f756e74223a32307d73766572696679696e675f6b65795f6279746573f6696261636b65645f7570f4"),
         ("GhostKeyDetail", "a16e47686f73744b657944657461696ca46b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d6443455254656c6162656cf66d64656c65676174655f696e666f627b7d"),
         ("Certificate", "a16b4365727469666963617465a26b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d6443455254"),
         ("SignResult", "a16a5369676e526573756c74a36e73636f7065645f7061796c6f61648218a201697369676e6174757265984018551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518551855185518556f63657274696669636174655f70656d6443455254"),
         ("DefaultKeyResult", "a17044656661756c744b6579526573756c74a16b66696e6765727072696e74f6"),
+        ("DefaultKeyResult", "a17044656661756c744b6579526573756c74a16b66696e6765727072696e746b387846705274517a334b77"),
         ("DefaultKeySet", "a16d44656661756c744b6579536574a16b66696e6765727072696e746b387846705274517a334b77"),
         ("VerifyResult", "a16c566572696679526573756c74a56576616c6964f5727369676e65725f66696e6765727072696e746b387846705274517a334b776d64656c65676174655f696e666f627b7d69726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2676d65737361676583186d18731867"),
+        ("VerifyResult", "a16c566572696679526573756c74a56576616c6964f4727369676e65725f66696e6765727072696e74f66d64656c65676174655f696e666ff669726571756573746f72f6676d657373616765f6"),
         ("Deleted", "a16744656c65746564a16b66696e6765727072696e746b387846705274517a334b77"),
         ("LabelSet", "a1684c6162656c536574a26b66696e6765727072696e746b387846705274517a334b77656c6162656c64686f6d65"),
         ("PermissionGranted", "a1715065726d697373696f6e4772616e746564a26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5"),
         ("PermissionRevoked", "a1715065726d697373696f6e5265766f6b6564a26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
         ("PermissionList", "a16e5065726d697373696f6e4c697374a26b66696e6765727072696e746b387846705274517a334b776a726571756573746f727382a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
         ("ExportResult", "a16c4578706f7274526573756c74a46b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d64434552546f7369676e696e675f6b65795f70656d62534b656c6162656c616c"),
+        ("ExportResult", "a16c4578706f7274526573756c74a46b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d64434552546f7369676e696e675f6b65795f70656d62534b656c6162656cf6"),
         ("ExportAllResult", "a16f4578706f7274416c6c526573756c74a1646b65797381a56b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d64434552546f7369676e696e675f6b65795f70656d62534b656c6162656cf66d64656c65676174655f696e666f6c7b22616d6f756e74223a317d"),
+        ("ExportAllResult", "a16f4578706f7274416c6c526573756c74a1646b65797381a56b66696e6765727072696e746b387846705274517a334b776f63657274696669636174655f70656d64434552546f7369676e696e675f6b65795f70656d62534b656c6162656c616c6d64656c65676174655f696e666f6c7b22616d6f756e74223a317d"),
         ("PermissionDenied", "a1705065726d697373696f6e44656e696564a26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5"),
         ("AccessDenied", "a16c41636365737344656e696564a169726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
         ("NoIdentityAvailable", "734e6f4964656e74697479417661696c61626c65"),
@@ -886,14 +921,24 @@ mod wire_golden {
     /// decodes, and re-encoding the decoded value reproduces the bytes (most
     /// of these types have no `PartialEq`, and byte equality is the property
     /// that matters on the wire anyway).
+    ///
+    /// It also requires the table to cover every variant serde knows for `T`,
+    /// read from the derive itself by [`serde_variants`], so a variant cannot
+    /// be added without a golden entry: hand-built sample lists alone would
+    /// let one slip through.
     fn check<T>(samples: Vec<T>, name: impl Fn(&T) -> String, golden: &[(&str, &str)])
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
+        assert_eq!(samples.len(), golden.len(), "one golden entry per sample");
+        let mut covered: Vec<&str> = golden.iter().map(|(n, _)| *n).collect();
+        covered.sort_unstable();
+        covered.dedup();
+        let mut variants = serde_variants::<T>();
+        variants.sort_unstable();
         assert_eq!(
-            samples.len(),
-            golden.len(),
-            "every variant needs exactly one golden entry"
+            covered, variants,
+            "the golden table must cover every variant, and nothing else"
         );
         for (value, (golden_name, golden_hex)) in samples.iter().zip(golden) {
             let n = name(value);
@@ -912,6 +957,46 @@ mod wire_golden {
                 "{n} does not round-trip from the 0.3.0 bytes"
             );
         }
+    }
+
+    /// Every variant name serde knows for enum `T`. The derived `Deserialize`
+    /// hands its complete variant list to `deserialize_enum`; this deserializer
+    /// records it and bails out.
+    fn serde_variants<T: for<'de> Deserialize<'de>>() -> Vec<&'static str> {
+        use serde::de::{self, Visitor};
+        use std::cell::Cell;
+
+        struct Capture(Cell<&'static [&'static str]>);
+
+        impl<'de> de::Deserializer<'de> for &Capture {
+            type Error = de::value::Error;
+
+            fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+                Err(de::Error::custom("not an enum"))
+            }
+
+            fn deserialize_enum<V: Visitor<'de>>(
+                self,
+                _name: &'static str,
+                variants: &'static [&'static str],
+                _visitor: V,
+            ) -> Result<V::Value, Self::Error> {
+                self.0.set(variants);
+                Err(de::Error::custom("variants captured"))
+            }
+
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+                bytes byte_buf option unit unit_struct newtype_struct seq tuple
+                tuple_struct map struct identifier ignored_any
+            }
+        }
+
+        let capture = Capture(Cell::new(&[]));
+        let _ = T::deserialize(&capture);
+        let variants = capture.0.get().to_vec();
+        assert!(!variants.is_empty(), "serde reported no variants");
+        variants
     }
 
     #[test]

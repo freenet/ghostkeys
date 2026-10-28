@@ -1,15 +1,22 @@
 # FROZEN: this is the `ghostkey-common 0.3.0` the deployed ghostkey delegate is
-# built from. Do not change its version or dependencies: the delegate key is
-# BLAKE3 over the delegate WASM, and changing this package's identity changes
-# those bytes (measured 2026-10-27: a version bump to 0.4.0 alone re-keyed it).
+# built from. Do not change its version or dependencies (they come from the
+# root Cargo.toml's [workspace.dependencies], which is equally frozen): the
+# delegate key is BLAKE3 over the delegate WASM, and this package's identity is
+# part of those bytes. Measured 2026-10-27: a version bump to 0.4.0 alone
+# re-keyed it. The version is written out rather than inherited from
+# [workspace.package] so that a UI-only version bump cannot move it.
+#
+# Its SOURCE is not frozen in the same way: test-only code (`#[cfg(test)]`) is
+# not in the WASM, and shifting line numbers was measured not to change it.
+# Any change to non-test code changes the delegate, i.e. it is a re-key.
 #
 # It is no longer what gets published. Releases of ghostkey-common (0.4.0 on)
-# are cut from `crates-io/ghostkey-common/`, whose `src/lib.rs` CI requires to
-# be identical to this one's. Edit both together. Unfreeze (and fold the two
-# back together) only as part of a deliberate delegate re-key.
+# are cut from `crates-io/ghostkey-common/`, whose `src/` CI requires to be
+# identical to this one's. Edit both together. Unfreeze (and fold the two back
+# together) only as part of a deliberate delegate re-key.
 [package]
 name = "ghostkey-common"
-version.workspace = true
+version = "0.3.0"
 publish = false
 edition.workspace = true
 license.workspace = true

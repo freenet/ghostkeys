@@ -35,11 +35,15 @@ pin the bytes at both ends.
 
 On 0.12, nothing to do. On an older stdlib, cargo resolves the range to its
 newest version rather than to yours, which shows up as a `mismatched types`
-error naming two freenet-stdlib versions. Point it back at yours:
+error naming two freenet-stdlib versions. In the crate that owns the
+`Cargo.lock` (your application), point it back at yours:
 
 ```sh
-cargo update -p freenet-stdlib@0.12.1 --precise 0.8.5   # your version here
+cargo update -p freenet-stdlib@0.12 --precise 0.8.5   # your version here
 ```
+
+A library can't do this for its own users. If you publish a library on an
+older stdlib, depend on ghostkey-common 0.3 or move to 0.12.
 
 ## License
 
