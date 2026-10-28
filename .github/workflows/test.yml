@@ -29,6 +29,10 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            crates-io/ghostkey-common -> target
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -59,6 +63,64 @@ jobs:
       # delegate's own tests.
       - name: Test
         run: cargo test --workspace
+
+      # The published ghostkey-common lives in its own workspace,
+      # crates-io/ghostkey-common/, because the delegate must keep linking
+      # `common/` as ghostkey-common 0.3.0 or it re-keys. Nothing above builds
+      # it: the root workspace does not contain it, and `cargo fmt --all` does
+      # not reach it. These steps live in this job, not one of their own,
+      # because `test` is a required check and a separate job would not be.
+      #
+      # The wire types apps compile against must be the ones the deployed
+      # delegate speaks: one source, two manifests, and this keeps it one.
+      - name: ghostkey-common — published copy matches the frozen one
+        run: bash scripts/check-ghostkey-common-copy.sh
+
+      - name: ghostkey-common — format and clippy
+        working-directory: crates-io/ghostkey-common
+        run: |
+          cargo fmt -- --check
+          cargo clippy --locked --all-targets --features crypto -- -D warnings
+
+      # How dapps actually consume it: in a WASM UI.
+      - name: ghostkey-common — wasm32 build
+        working-directory: crates-io/ghostkey-common
+        run: |
+          cargo check --locked --target wasm32-unknown-unknown
+          cargo check --locked --target wasm32-unknown-unknown --features crypto
+
+      # Before the lockfile is rewritten below.
+      - name: ghostkey-common — package
+        working-directory: crates-io/ghostkey-common
+        run: cargo publish --dry-run --locked
+
+      # The golden bytes were captured on stdlib 0.8.5. Passing at both ends of
+      # the range, and at the newest release in it, is the evidence that one
+      # release serves dapps on any of them.
+      - name: ghostkey-common — tests across the freenet-stdlib range
+        working-directory: crates-io/ghostkey-common
+        run: |
+          set -euo pipefail
+          stdlib() { grep -A1 '^name = "freenet-stdlib"' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p'; }
+          run() { echo "== freenet-stdlib $(stdlib)"; cargo test "$@"; cargo test "$@" --features crypto; }
+
+          run --locked
+
+          # Newest release in the range, so a new 0.12.x that moves the
+          # encoding fails here rather than in a user's vault. Updates only
+          # freenet-stdlib and what it needs, not the whole tree. This is the
+          # one non-hermetic check: it can turn red with no change in this
+          # repo. If it does, a stdlib release changed the bytes dapps send the
+          # delegate; do NOT regenerate the goldens (see `wire_golden` in
+          # common/src/lib.rs). Releases already on crates.io admit it, so the
+          # remedy is a new release that caps the range below it, plus yanking
+          # the affected ones.
+          cargo update -p freenet-stdlib
+          run
+
+          cargo update -p freenet-stdlib --precise 0.8.0
+          test "$(stdlib)" = 0.8.0
+          run
 
   # scripts/record-migration.sh is the mechanism that puts a published
   # delegate's hash on main, and legacy_delegates.toml is the only thing that
@@ -105,7 +167,11 @@ jobs:
   # tree in a native test does not exercise the compiled bundle, its event
   # handlers, or its asset paths. This job loads the real bundle in Chromium.
   browser:
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: that moved to 26.04, which the pinned Playwright
+    # (1.56.1, ui/tests/browser/package.json) cannot install Chromium on
+    # ("Playwright does not support chromium on ubuntu26.04-x64"). Move this
+    # forward together with a Playwright bump that supports the newer image.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

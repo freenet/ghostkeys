@@ -1,0 +1,51 @@
+# The published `ghostkey-common` (crates.io), from 0.4.0 on. Paths below are
+# in the freenet/ghostkeys repository.
+#
+# A copy of `common/`, which (as of 0.4.0) is frozen because the deployed
+# delegate links it. Why, and how to release: the repository README ("Why two
+# copies of ghostkey-common", "Releasing ghostkey-common"). `src/` must equal
+# `common/src/` and this manifest must match `common/Cargo.toml` except for
+# the version and the freenet-stdlib requirement, enforced by
+# `scripts/check-ghostkey-common-copy.sh` in CI. Edit both together.
+#
+# Its own workspace, so it resolves freenet-stdlib independently: its lockfile
+# is on 0.12.1, while the delegate and UI (as of 0.4.0) are on 0.8.5.
+
+[workspace]
+
+[package]
+name = "ghostkey-common"
+version = "0.4.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/freenet/ghostkeys"
+description = "Wire types for communicating with the Freenet ghostkey delegate (GhostkeyRequest/GhostkeyResponse). Use this crate from a Freenet dapp that needs to sign messages or read ghostkey identity info via the delegate. For low-level ghostkey certificate crypto, see ghostkey_lib instead."
+readme = "README.md"
+keywords = ["freenet", "ghostkey", "delegate"]
+categories = ["cryptography"]
+
+[features]
+default = []
+# Enable crypto operations (fingerprint computation, etc.)
+crypto = ["dep:ed25519-dalek", "dep:blake3", "dep:bs58"]
+
+[dependencies]
+# A range, so one release serves dapps on any of these stdlib versions.
+# Everything linked into one WASM must share a single freenet-stdlib, and a
+# dapp on 0.12 cannot use a crate pinned to 0.8. The only stdlib
+# types used are ContractInstanceId, DelegateKey and CodeHash, whose
+# definitions and serde encoding are identical across the range; the
+# `wire_golden` tests pin the bytes, and CI runs them at both ends.
+freenet-stdlib = ">=0.8, <0.13"
+serde = { version = "1.0", features = ["derive"] }
+ciborium = "0.2"
+
+# Optional crypto deps (needed by delegate, not by UI)
+ed25519-dalek = { version = "2.1", features = ["serde"], optional = true }
+blake3 = { version = "1", optional = true }
+bs58 = { version = "0.5", optional = true }
+
+[dev-dependencies]
+# Used only to pin the JSON-visible field names of the wire types; serde tags
+# enum variants by name in CBOR too, so a JSON assertion catches a CBOR break.
+serde_json = "1"
