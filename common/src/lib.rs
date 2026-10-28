@@ -550,9 +550,9 @@ mod tests {
 /// `ScopedPayload` bytes. An app built against this crate talks to THAT
 /// delegate, so whatever freenet-stdlib this crate is compiled against, every
 /// value below must encode to exactly these bytes and decode back from them.
-/// The published crate (`crates-io/ghostkey-common`) accepts a RANGE of
-/// stdlib versions, so a consumer may resolve anything in it; CI runs this
-/// module against both ends of that range.
+/// The published crate (`crates-io/ghostkey-common` in the freenet/ghostkeys
+/// repository) accepts a RANGE of stdlib versions, so a consumer may resolve
+/// anything in it; that repository's CI runs this module across the range.
 ///
 /// If one of these fails, do NOT regenerate the literal: the deployed delegate
 /// and every blob already stored still speak the old bytes. Work out how old
@@ -578,6 +578,11 @@ mod wire_golden {
 
     fn delegate() -> SignatureRequestor {
         SignatureRequestor::Delegate(DelegateKey::new([0x3c; 32], CodeHash::new([0xd2; 32])))
+    }
+
+    /// `[start, start+1, ..., start+31]`.
+    fn ramp(start: u8) -> [u8; 32] {
+        std::array::from_fn(|i| start + i as u8)
     }
 
     fn fp() -> String {
@@ -693,6 +698,18 @@ mod wire_golden {
             GrantPermission {
                 fingerprint: fp(),
                 requestor: webapp(),
+            },
+            // Distinct bytes, so a change that reorders key bytes shows up.
+            GrantPermission {
+                fingerprint: fp(),
+                requestor: SignatureRequestor::WebApp(ContractInstanceId::new(ramp(0))),
+            },
+            RevokePermission {
+                fingerprint: fp(),
+                requestor: SignatureRequestor::Delegate(DelegateKey::new(
+                    ramp(32),
+                    CodeHash::new(ramp(64)),
+                )),
             },
             RevokePermission {
                 fingerprint: fp(),
@@ -865,6 +882,8 @@ mod wire_golden {
         ("ExportGhostKey", "a16e4578706f727447686f73744b6579a16b66696e6765727072696e746b387846705274517a334b77"),
         ("ExportAllGhostKeys", "724578706f7274416c6c47686f73744b657973"),
         ("GrantPermission", "a16f4772616e745065726d697373696f6ea26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a166576562417070982018a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a518a5"),
+        ("GrantPermission", "a16f4772616e745065726d697373696f6ea26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a1665765624170709820000102030405060708090a0b0c0d0e0f101112131415161718181819181a181b181c181d181e181f"),
+        ("RevokePermission", "a1705265766f6b655065726d697373696f6ea26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a16844656c6567617465a2636b657998201820182118221823182418251826182718281829182a182b182c182d182e182f1830183118321833183418351836183718381839183a183b183c183d183e183f69636f64655f6861736898201840184118421843184418451846184718481849184a184b184c184d184e184f1850185118521853185418551856185718581859185a185b185c185d185e185f"),
         ("RevokePermission", "a1705265766f6b655065726d697373696f6ea26b66696e6765727072696e746b387846705274517a334b7769726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2"),
         ("ListPermissions", "a16f4c6973745065726d697373696f6e73a16b66696e6765727072696e746b387846705274517a334b77"),
         ("RequestAnyAccess", "7052657175657374416e79416363657373"),
@@ -1026,6 +1045,41 @@ mod wire_golden {
     #[test]
     fn scopes_match_0_3_0_bytes() {
         check(scopes(), scope_name, SCOPE_GOLDEN);
+    }
+
+    /// `SignatureRequestor` has no golden table of its own; pin its variant
+    /// set so a new one cannot appear without someone deciding how stored
+    /// grants and signed payloads carry it.
+    #[test]
+    fn signature_requestor_variants_are_pinned() {
+        assert_eq!(
+            serde_variants::<SignatureRequestor>(),
+            ["WebApp", "Delegate"]
+        );
+    }
+
+    /// Records written by an older delegate lack fields added since. They must
+    /// still decode, with the documented defaults: `backed_up` false (the safe
+    /// direction, see its doc) and no key bytes. The goldens only decode full
+    /// records, so this path is pinned here.
+    #[test]
+    fn older_ghostkey_info_records_still_decode() {
+        #[derive(Serialize)]
+        struct OldGhostKeyInfo {
+            fingerprint: String,
+            label: Option<String>,
+            delegate_info: String,
+        }
+        let bytes = to_cbor(&OldGhostKeyInfo {
+            fingerprint: fp(),
+            label: None,
+            delegate_info: "{}".into(),
+        })
+        .unwrap();
+        let info: GhostKeyInfo = from_cbor(&bytes).expect("old record decodes");
+        assert!(!info.backed_up);
+        assert_eq!(info.verifying_key_bytes, None);
+        assert_eq!(info.notary_info, "{}");
     }
 
     #[test]

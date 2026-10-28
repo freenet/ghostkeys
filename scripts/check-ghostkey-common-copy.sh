@@ -21,7 +21,11 @@ if ! diff -r common/src crates-io/ghostkey-common/src; then
     exit 1
 fi
 
-EXTRA="$(git ls-files crates-io/ghostkey-common \
+# Listed first, on its own, so a git failure aborts (set -e) instead of
+# yielding an empty list that passes.
+TRACKED="$(git ls-files crates-io/ghostkey-common)"
+[ -n "$TRACKED" ] || { echo "ERROR: git lists no files under crates-io/ghostkey-common" >&2; exit 1; }
+EXTRA="$(printf '%s\n' "$TRACKED" \
          | grep -v -x -e 'crates-io/ghostkey-common/Cargo.toml' \
                       -e 'crates-io/ghostkey-common/Cargo.lock' \
                       -e 'crates-io/ghostkey-common/README.md' \
@@ -33,15 +37,20 @@ if [ -n "$EXTRA" ]; then
     exit 1
 fi
 
+# `cargo metadata` does not show these, and they would make CI test the crate
+# against something other than what `cargo publish` ships.
+if grep -E -n '^\[(patch|replace)([].]|$)' crates-io/ghostkey-common/Cargo.toml; then
+    echo "ERROR: [patch]/[replace] in crates-io/ghostkey-common/Cargo.toml" >&2
+    exit 1
+fi
+
 FROZEN="$(cargo metadata --no-deps --format-version 1 --offline 2>/dev/null \
           || cargo metadata --no-deps --format-version 1)"
 PUBLISHED="$(cd crates-io/ghostkey-common && { cargo metadata --no-deps --format-version 1 --offline 2>/dev/null \
           || cargo metadata --no-deps --format-version 1; })"
 
 python3 -I - "$FROZEN" "$PUBLISHED" <<'PY'
-import json, sys
-
-import os
+import json, os, sys
 
 def package(meta):
     [pkg] = [p for p in json.loads(meta)["packages"] if p["name"] == "ghostkey-common"]
@@ -58,7 +67,10 @@ def shape(pkg):
     )
     targets = sorted(
         (t["name"], tuple(t["kind"]), tuple(t["crate_types"]), t["edition"],
-         os.path.relpath(t["src_path"], os.path.dirname(pkg["manifest_path"])))
+         os.path.relpath(t["src_path"], os.path.dirname(pkg["manifest_path"])),
+         # `test = false` would let the range tests pass with none run.
+         t.get("test"), t.get("doctest"), t.get("doc"),
+         tuple(t.get("required-features", [])))
         for t in pkg["targets"]
     )
     meta = {k: pkg.get(k) for k in (

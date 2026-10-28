@@ -237,7 +237,7 @@ This is a Rust workspace with three crates (plus the test-only
 
 Plus one crate outside the workspace:
 
-- **`crates-io/ghostkey-common/`** -- The `ghostkey-common` published to crates.io (0.4.0 on). Its `src/lib.rs` is a copy of `common/src/lib.rs`, and CI fails if they differ.
+- **`crates-io/ghostkey-common/`** -- The `ghostkey-common` published to crates.io (0.4.0 on). Its `src/` is a copy of `common/src/`, and CI fails if they differ.
 
 #### Why two copies of ghostkey-common
 

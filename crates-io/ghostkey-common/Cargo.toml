@@ -1,19 +1,12 @@
-# The published `ghostkey-common` crate (crates.io), from 0.4.0 on.
+# The published `ghostkey-common` (crates.io), from 0.4.0 on. Paths below are
+# in the freenet/ghostkeys repository.
 #
-# Why this is not `common/`: the deployed ghostkey delegate links `common/` as
-# `ghostkey-common 0.3.0`, and the delegate key is BLAKE3 over its WASM. Any
-# change to that package's identity -- its version, or its source (a path
-# elsewhere, or the identical 0.3.0 from crates.io) -- changes the delegate's
-# bytes and RE-KEYS it, measured on 2026-10-27. So `common/` stays exactly as
-# the delegate needs it, and new releases are cut from here.
-#
-# `src/` is a byte-for-byte copy of `common/src/`, and this manifest matches
-# common/Cargo.toml except for the version and the freenet-stdlib requirement.
-# `scripts/check-ghostkey-common-copy.sh` enforces both, in the required `test`
-# job (`.github/workflows/test.yml`, the steps named "ghostkey-common — ..."),
-# so the wire types the delegate speaks and the ones apps compile against
-# cannot drift. Edit both together. Release procedure: README.md, "Releasing
-# ghostkey-common".
+# A copy of `common/`, which stays frozen because the deployed delegate links
+# it: why, and how to release, is in the repository README ("Why two copies of
+# ghostkey-common", "Releasing ghostkey-common"). `src/` must equal
+# `common/src/` and this manifest must match `common/Cargo.toml` except for
+# the version and the freenet-stdlib requirement, enforced by
+# `scripts/check-ghostkey-common-copy.sh` in CI. Edit both together.
 #
 # Its own workspace, so it resolves freenet-stdlib independently of the
 # delegate and UI, which stay on 0.8.

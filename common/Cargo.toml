@@ -1,6 +1,7 @@
 # FROZEN: this is the `ghostkey-common 0.3.0` the deployed ghostkey delegate is
 # built from. Do not change its version or dependencies (they come from the
-# root Cargo.toml's [workspace.dependencies], which is equally frozen): the
+# root Cargo.toml's [workspace.dependencies], whose entries used here are
+# equally frozen): the
 # delegate key is BLAKE3 over the delegate WASM, and this package's identity is
 # part of those bytes. Measured 2026-10-27: a version bump to 0.4.0 alone
 # re-keyed it. The version is written out rather than inherited from

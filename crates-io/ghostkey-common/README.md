@@ -30,8 +30,9 @@ Three ghostkey-prefixed crates exist on crates.io; they serve different layers:
 The wire types embed freenet-stdlib's `ContractInstanceId` and `DelegateKey`,
 and everything linked into one WASM must share a single freenet-stdlib. From
 0.4.0 this crate accepts any freenet-stdlib from 0.8 up to (not including)
-0.13; those types encode identically across that range, and the crate's tests
-pin the bytes at both ends.
+0.13; those types encode identically across that range. The crate's tests pin
+the bytes, and the ghostkeys repository's CI runs them at both ends of the
+range and at its newest release.
 
 On 0.12, nothing to do. On an older stdlib, a fresh resolve or a
 `cargo update` picks the range's newest version rather than yours (adding
