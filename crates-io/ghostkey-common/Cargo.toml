@@ -36,7 +36,7 @@ crypto = ["dep:ed25519-dalek", "dep:blake3", "dep:bs58"]
 [dependencies]
 # A range, so one release serves dapps on any of these stdlib versions.
 # Everything linked into one WASM must share a single freenet-stdlib, and a
-# dapp on 0.12 (freenet/mail) cannot use a crate pinned to 0.8. The only stdlib
+# dapp on 0.12 cannot use a crate pinned to 0.8. The only stdlib
 # types used are ContractInstanceId, DelegateKey and CodeHash, whose
 # definitions and serde encoding are identical across the range; the
 # `wire_golden` tests pin the bytes, and CI runs them at both ends.

@@ -33,17 +33,21 @@ and everything linked into one WASM must share a single freenet-stdlib. From
 0.13; those types encode identically across that range, and the crate's tests
 pin the bytes at both ends.
 
-On 0.12, nothing to do. On an older stdlib, cargo resolves the range to its
-newest version rather than to yours, which shows up as a `mismatched types`
-error naming two freenet-stdlib versions. In the crate that owns the
-`Cargo.lock` (your application), point it back at yours:
+On 0.12, nothing to do. On an older stdlib, a fresh resolve or a
+`cargo update` picks the range's newest version rather than yours (adding
+0.4 to a lockfile that already has your stdlib reuses it). That usually shows
+up as a `mismatched types` error naming two freenet-stdlib versions; if no
+stdlib type crosses between your code and this crate, it builds quietly with
+both linked. In the crate that owns the `Cargo.lock` (your application), point
+it back at yours:
 
 ```sh
 cargo update -p freenet-stdlib@0.12 --precise 0.8.5   # your version here
 ```
 
-A library can't do this for its own users. If you publish a library on an
-older stdlib, depend on ghostkey-common 0.3 or move to 0.12.
+A plain `cargo update` undoes this, so redo it after one. A library can't do
+it for its own users at all. If you are on a stdlib below 0.12, the simplest
+option is to stay on ghostkey-common 0.3: its wire types are identical.
 
 ## License
 

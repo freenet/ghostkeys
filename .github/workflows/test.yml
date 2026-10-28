@@ -82,7 +82,7 @@ jobs:
           cargo fmt -- --check
           cargo clippy --locked --all-targets --features crypto -- -D warnings
 
-      # How dapps (freenet/mail) actually consume it.
+      # How dapps actually consume it: in a WASM UI.
       - name: ghostkey-common — wasm32 build
         working-directory: crates-io/ghostkey-common
         run: |
