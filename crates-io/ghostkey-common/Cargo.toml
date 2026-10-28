@@ -2,14 +2,14 @@
 # in the freenet/ghostkeys repository.
 #
 # A copy of `common/`, which (as of 0.4.0) is frozen because the deployed
-# delegate links it: why, and how to release, is in the repository README ("Why two copies of
-# ghostkey-common", "Releasing ghostkey-common"). `src/` must equal
+# delegate links it. Why, and how to release: the repository README ("Why two
+# copies of ghostkey-common", "Releasing ghostkey-common"). `src/` must equal
 # `common/src/` and this manifest must match `common/Cargo.toml` except for
 # the version and the freenet-stdlib requirement, enforced by
 # `scripts/check-ghostkey-common-copy.sh` in CI. Edit both together.
 #
-# Its own workspace, so it resolves freenet-stdlib independently of the
-# delegate and UI (on 0.8 as of 0.4.0).
+# Its own workspace, so it resolves freenet-stdlib independently: its lockfile
+# is on 0.12.1, while the delegate and UI (as of 0.4.0) are on 0.8.5.
 
 [workspace]
 

@@ -542,8 +542,8 @@ mod tests {
 }
 
 /// Byte-for-byte golden encodings of every wire type, captured from
-/// ghostkey-common 0.3.0 (freenet-stdlib 0.8.5) — the version the deployed
-/// ghostkey delegate (code hash `0d0e2043…`) was built from.
+/// ghostkey-common 0.3.0 (freenet-stdlib 0.8.5), the version the ghostkey
+/// delegate deployed when ghostkey-common 0.4.0 was released was built from.
 ///
 /// The delegate decodes `GhostkeyRequest`s from apps, encodes
 /// `GhostkeyResponse`s back, stores `SignatureRequestor` grants, and signs

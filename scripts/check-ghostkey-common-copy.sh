@@ -47,10 +47,13 @@ import json, os, sys, tomllib
 
 errors = []
 
-# Things `cargo metadata` does not show, which would make CI build or test the
-# crate differently from what `cargo publish` ships (a patched dependency, a
-# changed profile) or change what ships (include/exclude). Parsed as TOML, so
-# no spelling of the table header gets past.
+# Things `cargo metadata` does not show that would make CI resolve or build
+# the crate differently from what `cargo publish` ships (a patched or replaced
+# dependency, an alternate source, a changed profile) or change what ships
+# (include/exclude). Parsed as TOML, so no spelling of the table header gets
+# past. NOT covered: rustflags and [env] from cargo config or the environment
+# (the root .cargo/config.toml sets a wasm32 getrandom cfg, which the
+# published crate does not depend on).
 root = sys.argv[3]
 crate_dir = os.path.join(root, "crates-io", "ghostkey-common")
 with open(os.path.join(crate_dir, "Cargo.toml"), "rb") as f:
@@ -62,7 +65,7 @@ for key in ("include", "exclude", "build", "links", "workspace"):
     if key in manifest.get("package", {}):
         errors.append(f"crates-io/ghostkey-common/Cargo.toml must not set package.{key}")
 # Cargo config applies from the crate's directory up to the filesystem root;
-# the repository's part of that is checkable here.
+# the repository's part of that is checked here, for the keys above.
 d = crate_dir
 while True:
     for name in ("config.toml", "config"):
