@@ -23,9 +23,11 @@ on:
       # The guard's main job is catching a PR that drops a recorded entry, and
       # a PR can drop one by editing nothing but this file.
       - 'legacy_delegates.toml'
-      # NOT listed, deliberately: crates-io/** (the published ghostkey-common).
-      # It is its own workspace and nothing in it reaches the delegate build;
-      # the `test` job keeps its source identical to common/, which IS listed.
+      # The published ghostkey-common. Nothing in it reaches the delegate
+      # build, but this check is REQUIRED by the branch ruleset, and a required
+      # check that never reports blocks the merge: without this line a release
+      # PR that only bumps crates-io/ghostkey-common/Cargo.toml could not land.
+      - 'crates-io/**'
 
 jobs:
   check-migration:

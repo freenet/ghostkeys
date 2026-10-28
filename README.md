@@ -228,7 +228,8 @@ This means your application doesn't need to handle the permission flow at all --
 
 ## Architecture
 
-This is a Rust workspace with three crates:
+This is a Rust workspace with three crates (plus the test-only
+`migration-differential/`):
 
 - **`common/`** -- Shared types and CBOR serialization for the request/response protocol between delegate and UI. Frozen at `ghostkey-common 0.3.0`, the version the deployed delegate is built from; see below
 - **`delegates/ghostkey-delegate/`** -- The Freenet delegate (compiles to WASM) that stores signing keys and handles identity operations
@@ -255,14 +256,15 @@ releases come from `crates-io/ghostkey-common/`, its own workspace with its own
    (check crates.io: the dry-run does not catch an already-published version).
    Any change to the wire types goes in `common/src/` AND the copy; a non-test
    change there also changes the delegate, so it is a re-key (see
-   `.claude/rules/delegate-migration.md`). Never touch `common/Cargo.toml`.
+   `.claude/rules/delegate-migration.md`). Never touch `common/Cargo.toml`
+   except as part of a deliberate re-key (see #56).
    A new freenet-stdlib minor (0.13) needs a release that widens the range,
    after checking `ContractInstanceId`/`DelegateKey`/`CodeHash` still encode
    the same; the golden tests will say.
-2. PR, review, green CI (the `test` job checks the crate: sources identical to
-   `common/`, manifests in step, golden tests at both ends of the stdlib range
-   and at the newest release in it, a wasm32 build, a `cargo publish
-   --dry-run`), merge.
+2. PR, review, green CI (the `test` job checks the crate: `src/` identical to
+   `common/src/`, the manifests' metadata, features and dependencies in step,
+   golden tests at both ends of the stdlib range and at the newest release in
+   it, a wasm32 build, a `cargo publish --dry-run`), merge.
 3. From an up-to-date `main`:
    `cd crates-io/ghostkey-common && cargo publish --locked`.
 

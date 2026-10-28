@@ -108,7 +108,11 @@ jobs:
 
           # Newest release in the range, so a new 0.12.x that moves the
           # encoding fails here rather than in a user's vault. Updates only
-          # freenet-stdlib and what it needs, not the whole tree.
+          # freenet-stdlib and what it needs, not the whole tree. This is the
+          # one non-hermetic check: it can turn red with no change in this
+          # repo. If it does, a stdlib release changed the bytes dapps send the
+          # delegate; do NOT regenerate the goldens (see `wire_golden` in
+          # common/src/lib.rs), cap the range below that release instead.
           cargo update -p freenet-stdlib
           run
 
@@ -304,4 +308,3 @@ jobs:
       - name: Verify the pointer record (push)
         if: github.event_name != 'pull_request'
         run: ./scripts/check-pointer-freshness.sh --no-build
-

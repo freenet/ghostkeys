@@ -46,8 +46,9 @@ cargo update -p freenet-stdlib@0.12 --precise 0.8.5   # your version here
 ```
 
 A plain `cargo update` undoes this, so redo it after one. A library can't do
-it for its own users at all. If you are on a stdlib below 0.12, the simplest
-option is to stay on ghostkey-common 0.3: its wire types are identical.
+it for its own users at all. If you are on freenet-stdlib 0.8.x, the simplest
+option is to stay on ghostkey-common 0.3 (which requires `^0.8`): its wire
+types are identical. On 0.9 to 0.11 there is no 0.3 option; pin as above.
 
 ## License
 

@@ -7,10 +7,13 @@
 # bytes and RE-KEYS it, measured on 2026-10-27. So `common/` stays exactly as
 # the delegate needs it, and new releases are cut from here.
 #
-# `src/lib.rs` is a byte-for-byte copy of `common/src/lib.rs`, enforced by CI
-# (`.github/workflows/test.yml`, job `ghostkey-common-crate`), so the wire
-# types the delegate speaks and the ones apps compile against cannot drift.
-# Edit both together. Release procedure: README.md, "Releasing ghostkey-common".
+# `src/` is a byte-for-byte copy of `common/src/`, and this manifest matches
+# common/Cargo.toml except for the version and the freenet-stdlib requirement.
+# `scripts/check-ghostkey-common-copy.sh` enforces both, in the required `test`
+# job (`.github/workflows/test.yml`, the steps named "ghostkey-common — ..."),
+# so the wire types the delegate speaks and the ones apps compile against
+# cannot drift. Edit both together. Release procedure: README.md, "Releasing
+# ghostkey-common".
 #
 # Its own workspace, so it resolves freenet-stdlib independently of the
 # delegate and UI, which stay on 0.8.

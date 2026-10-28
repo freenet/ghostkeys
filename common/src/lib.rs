@@ -835,7 +835,11 @@ mod wire_golden {
             );
         }
         for s in scopes() {
-            println!("(\"{s:?}\", \"{}\"),", hex(&to_cbor(&s).unwrap()));
+            println!(
+                "(\"{}\", \"{}\"),",
+                scope_name(&s),
+                hex(&to_cbor(&s).unwrap())
+            );
         }
         let scoped = ScopedPayload {
             requestor: delegate(),
@@ -904,6 +908,12 @@ mod wire_golden {
         ("Admin", "6541646d696e"),
     ];
     const SCOPED_DELEGATE_GOLDEN: &str = "a269726571756573746f72a16844656c6567617465a2636b65799820183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c183c69636f64655f68617368982018d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d218d2677061796c6f616483010203";
+
+    /// The scope's serde variant name (what is on the wire), not its `Debug`
+    /// name, so a future `#[serde(rename)]` is compared like-for-like.
+    fn scope_name(s: &GhostkeyScope) -> String {
+        from_cbor(&to_cbor(s).unwrap()).expect("a unit variant encodes as its name")
+    }
 
     fn scopes() -> Vec<GhostkeyScope> {
         use GhostkeyScope::*;
@@ -1015,7 +1025,7 @@ mod wire_golden {
 
     #[test]
     fn scopes_match_0_3_0_bytes() {
-        check(scopes(), |s| format!("{s:?}"), SCOPE_GOLDEN);
+        check(scopes(), scope_name, SCOPE_GOLDEN);
     }
 
     #[test]

@@ -19,6 +19,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/freenet/ghostkeys"
 
 [workspace.dependencies]
+# Frozen as the deployed delegate needs it, like common/Cargo.toml: these
+# entries are part of the delegate's bytes. The published ghostkey-common is
+# crates-io/ghostkey-common/, outside this workspace.
 ghostkey-common = { path = "common" }
 ghostkey_lib = "0.2"
 freenet-stdlib = "0.8"

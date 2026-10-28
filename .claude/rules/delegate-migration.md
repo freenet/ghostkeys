@@ -9,7 +9,9 @@ Without a migration entry, **users lose all stored ghostkeys**.
 - `common/src/`
 - `common/Cargo.toml` -- including its version alone (measured: 0.3.0 -> 0.4.0
   re-keyed the delegate). This is why ghostkey-common is released from
-  `crates-io/ghostkey-common/`, whose changes do not reach the delegate
+  `crates-io/ghostkey-common/`. Its manifest, README and lockfile do not reach
+  the delegate, but its `src/` must stay identical to `common/src/`, so a
+  non-test source change there is a change here too, i.e. a re-key
 - `Cargo.toml` (dependency version changes)
 - `Cargo.lock` (transitive dependency changes)
 
