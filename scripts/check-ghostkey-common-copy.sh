@@ -37,20 +37,45 @@ if [ -n "$EXTRA" ]; then
     exit 1
 fi
 
-# `cargo metadata` does not show these, and they would make CI test the crate
-# against something other than what `cargo publish` ships.
-if grep -E -n '^\[(patch|replace)([].]|$)' crates-io/ghostkey-common/Cargo.toml; then
-    echo "ERROR: [patch]/[replace] in crates-io/ghostkey-common/Cargo.toml" >&2
-    exit 1
-fi
-
 FROZEN="$(cargo metadata --no-deps --format-version 1 --offline 2>/dev/null \
           || cargo metadata --no-deps --format-version 1)"
 PUBLISHED="$(cd crates-io/ghostkey-common && { cargo metadata --no-deps --format-version 1 --offline 2>/dev/null \
           || cargo metadata --no-deps --format-version 1; })"
 
-python3 -I - "$FROZEN" "$PUBLISHED" <<'PY'
-import json, os, sys
+python3 -I - "$FROZEN" "$PUBLISHED" "$REPO_ROOT" <<'PY'
+import json, os, sys, tomllib
+
+errors = []
+
+# Things `cargo metadata` does not show, which would make CI build or test the
+# crate differently from what `cargo publish` ships (a patched dependency, a
+# changed profile) or change what ships (include/exclude). Parsed as TOML, so
+# no spelling of the table header gets past.
+root = sys.argv[3]
+crate_dir = os.path.join(root, "crates-io", "ghostkey-common")
+with open(os.path.join(crate_dir, "Cargo.toml"), "rb") as f:
+    manifest = tomllib.load(f)
+for key in ("patch", "replace", "profile", "lints"):
+    if key in manifest or key in manifest.get("workspace", {}):
+        errors.append(f"crates-io/ghostkey-common/Cargo.toml must not have [{key}]")
+for key in ("include", "exclude", "build", "links", "workspace"):
+    if key in manifest.get("package", {}):
+        errors.append(f"crates-io/ghostkey-common/Cargo.toml must not set package.{key}")
+# Cargo config applies from the crate's directory up to the filesystem root;
+# the repository's part of that is checkable here.
+d = crate_dir
+while True:
+    for name in ("config.toml", "config"):
+        cfg = os.path.join(d, ".cargo", name)
+        if os.path.isfile(cfg):
+            with open(cfg, "rb") as f:
+                config = tomllib.load(f)
+            for key in ("patch", "source", "profile", "registries"):
+                if key in config:
+                    errors.append(f"{os.path.relpath(cfg, root)} sets [{key}], which would apply to the published crate's CI build")
+    if os.path.samefile(d, root):
+        break
+    d = os.path.dirname(d)
 
 def package(meta):
     [pkg] = [p for p in json.loads(meta)["packages"] if p["name"] == "ghostkey-common"]
@@ -62,7 +87,11 @@ def shape(pkg):
          # freenet-stdlib's requirement is the one intended difference.
          "<stdlib range>" if d["name"] == "freenet-stdlib" else d["req"],
          d["kind"] or "normal", d["target"] or "", d["optional"],
-         tuple(sorted(d["features"])), d["uses_default_features"])
+         tuple(sorted(d["features"])), d["uses_default_features"],
+         # A path or alternate source would be tested in CI and then stripped
+         # or rewritten by `cargo publish`.
+         d.get("source"), d.get("registry"), d.get("rename"),
+         os.path.relpath(d["path"], os.path.dirname(pkg["manifest_path"])) if d.get("path") else None)
         for d in pkg["dependencies"]
     )
     targets = sorted(
@@ -84,16 +113,31 @@ def shape(pkg):
 
 frozen_pkg, published_pkg = package(sys.argv[1]), package(sys.argv[2])
 if frozen_pkg["version"] != "0.3.0" or frozen_pkg["publish"] != []:
-    print(f"ERROR: common/ must stay ghostkey-common 0.3.0 with publish = false "
-          f"(the deployed delegate links exactly that); found version "
-          f"{frozen_pkg['version']}, publish {frozen_pkg['publish']}", file=sys.stderr)
-    sys.exit(1)
+    errors.append(f"common/ must stay ghostkey-common 0.3.0 with publish = false "
+                  f"(the deployed delegate links exactly that); found version "
+                  f"{frozen_pkg['version']}, publish {frozen_pkg['publish']}")
+
+# The range is what the CI steps test (its floor and its newest release) and
+# what README.md documents. Changing it is a deliberate act: update this too.
+[stdlib] = [d for d in published_pkg["dependencies"] if d["name"] == "freenet-stdlib"]
+if stdlib["req"] != ">=0.8, <0.13":
+    errors.append(f"freenet-stdlib requirement is {stdlib['req']!r}; this check, the "
+                  f"CI range steps and the crate README expect '>=0.8, <0.13'")
+
+# Compared above, but also asserted: with `test = false` on BOTH sides the
+# comparison passes and the range tests silently run nothing.
+for t in published_pkg["targets"]:
+    if "lib" in t["kind"] and not (t.get("test") and t.get("doctest")):
+        errors.append("the published crate's lib target must keep test and doctest enabled")
+
 frozen, published = shape(frozen_pkg), shape(published_pkg)
-if frozen != published:
-    for key in frozen:
-        if frozen[key] != published[key]:
-            print(f"ERROR: {key} differs\n  common/:                   {frozen[key]}\n"
-                  f"  crates-io/ghostkey-common: {published[key]}", file=sys.stderr)
+for key in frozen:
+    if frozen[key] != published[key]:
+        errors.append(f"{key} differs\n  common/:                   {frozen[key]}\n"
+                      f"  crates-io/ghostkey-common: {published[key]}")
+if errors:
+    for e in errors:
+        print(f"ERROR: {e}", file=sys.stderr)
     sys.exit(1)
 print("ghostkey-common: published crate matches the frozen copy (source, files and manifest)")
 PY

@@ -1,15 +1,15 @@
 # The published `ghostkey-common` (crates.io), from 0.4.0 on. Paths below are
 # in the freenet/ghostkeys repository.
 #
-# A copy of `common/`, which stays frozen because the deployed delegate links
-# it: why, and how to release, is in the repository README ("Why two copies of
+# A copy of `common/`, which (as of 0.4.0) is frozen because the deployed
+# delegate links it: why, and how to release, is in the repository README ("Why two copies of
 # ghostkey-common", "Releasing ghostkey-common"). `src/` must equal
 # `common/src/` and this manifest must match `common/Cargo.toml` except for
 # the version and the freenet-stdlib requirement, enforced by
 # `scripts/check-ghostkey-common-copy.sh` in CI. Edit both together.
 #
 # Its own workspace, so it resolves freenet-stdlib independently of the
-# delegate and UI, which stay on 0.8.
+# delegate and UI (on 0.8 as of 0.4.0).
 
 [workspace]
 

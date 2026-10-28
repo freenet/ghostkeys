@@ -11,7 +11,9 @@ Without a migration entry, **users lose all stored ghostkeys**.
   re-keyed the delegate). This is why ghostkey-common is released from
   `crates-io/ghostkey-common/`. Its manifest, README and lockfile do not reach
   the delegate, but its `src/` must stay identical to `common/src/`, so a
-  non-test source change there is a change here too, i.e. a re-key
+  source change there is a change here too. Test-only code is not in the
+  WASM; for anything else, assume a re-key unless `check-migration` and
+  `pointer-freshness` (which compare the built hash) say otherwise
 - `Cargo.toml` (dependency version changes)
 - `Cargo.lock` (transitive dependency changes)
 

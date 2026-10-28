@@ -80,8 +80,8 @@ updates:
 
   # The published ghostkey-common, a separate workspace (see README.md, "Why
   # two copies of ghostkey-common"). Its lockfile only decides what CI tests the
-  # crate against; consumers resolve their own. Nothing in it reaches the
-  # delegate, so no `contract-rekey-risk` label.
+  # crate against; consumers resolve their own. Nothing here is compiled into
+  # the delegate, so no `contract-rekey-risk` label.
   - package-ecosystem: "cargo"
     directory: "/crates-io/ghostkey-common"
     schedule:

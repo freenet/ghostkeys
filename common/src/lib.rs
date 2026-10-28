@@ -1052,10 +1052,10 @@ mod wire_golden {
     /// grants and signed payloads carry it.
     #[test]
     fn signature_requestor_variants_are_pinned() {
-        assert_eq!(
-            serde_variants::<SignatureRequestor>(),
-            ["WebApp", "Delegate"]
-        );
+        // Sorted: variants are encoded by name, so order is not the wire.
+        let mut variants = serde_variants::<SignatureRequestor>();
+        variants.sort_unstable();
+        assert_eq!(variants, ["Delegate", "WebApp"]);
     }
 
     /// Records written by an older delegate lack fields added since. They must

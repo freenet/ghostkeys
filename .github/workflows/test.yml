@@ -112,7 +112,9 @@ jobs:
           # one non-hermetic check: it can turn red with no change in this
           # repo. If it does, a stdlib release changed the bytes dapps send the
           # delegate; do NOT regenerate the goldens (see `wire_golden` in
-          # common/src/lib.rs), cap the range below that release instead.
+          # common/src/lib.rs). Releases already on crates.io admit it, so the
+          # remedy is a new release that caps the range below it, plus yanking
+          # the affected ones.
           cargo update -p freenet-stdlib
           run
 
