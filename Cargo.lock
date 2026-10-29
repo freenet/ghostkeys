@@ -1388,9 +1388,9 @@ dependencies = [
 
 [[package]]
 name = "freenet-migrate"
-version = "0.5.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "866b434a07257c5bcda3b4e2a64c2c51e584ac7bc8664b91c0429352fb23e4fb"
+checksum = "e9b6177524a7d4800bb8854fbfa6361ef81ac9c98919d03ed74174972f061b8c"
 dependencies = [
  "blake3",
  "bs58",
