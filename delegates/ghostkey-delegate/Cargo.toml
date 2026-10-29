@@ -22,7 +22,7 @@ getrandom = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-rand_core = "0.6"
+rand_core = "0.10"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
